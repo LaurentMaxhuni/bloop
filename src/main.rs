@@ -2,6 +2,8 @@
 
 mod mascot;
 mod platform;
+#[allow(dead_code)] // wired into the UI in the next task
+mod presence;
 mod style;
 mod ui;
 
