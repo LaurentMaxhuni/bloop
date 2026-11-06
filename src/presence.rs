@@ -38,6 +38,8 @@ pub enum Event {
     Peek(String),
     /// A reply is streaming (true) or finished (false).
     Busy(bool),
+    /// The reply was stopped or abandoned: unpin without an "All done" peek.
+    Cancelled,
     Fullscreen(bool),
 }
 
@@ -116,6 +118,7 @@ impl Presence {
                 }
             }
             Event::Tick => {}
+            Event::Cancelled => self.busy = false,
             Event::Click => {
                 if matches!(self.state, State::Hover | State::Peek) {
                     self.open();
@@ -411,6 +414,18 @@ mod tests {
         p.on(Event::Peek("hey".into()), at(10));
         assert_eq!(p.state(), State::Open);
         assert_eq!(p.message(), Some("hey"));
+    }
+
+    #[test]
+    fn cancel_unpins_busy_peek() {
+        let mut p = Presence::new();
+        p.on(Event::Shortcut, at(0));
+        p.on(Event::Busy(true), at(0));
+        p.on(Event::FocusLost, at(0));
+        assert_eq!(p.state(), State::Peek);
+        p.on(Event::Cancelled, at(100));
+        assert_eq!(p.state(), State::Sliver);
+        assert_eq!(p.message(), None);
     }
 
     #[test]

@@ -503,8 +503,7 @@ impl Island {
                 self.cancel();
                 self.status = "Stopped. Partial reply kept out of model context.".into();
                 self.react(Mood::Oops, 0.8);
-                let presence = self.present(Event::Busy(false));
-                return Task::batch([self.persist(), presence]);
+                return self.persist();
             }
             Message::Settings => {
                 self.settings = !self.settings;
@@ -603,6 +602,8 @@ impl Island {
             handle.abort();
         }
         self.request_id += 1;
+        // Only state changes matter here; this event never shows, hides or focuses the window.
+        let _ = self.present(Event::Cancelled);
     }
 
     fn persist(&mut self) -> Task<Message> {
@@ -1149,6 +1150,17 @@ mod tests {
         let id = app.request_id;
         let _ = app.update(Message::Finished(id, Ok(())));
         assert_eq!(app.presence.message(), Some("All done"));
+    }
+
+    #[test]
+    fn cancelled_reply_does_not_pin_the_pill() {
+        let mut app = ready();
+        let _ = app.update(Message::Toggle);
+        app.input = "hello".into();
+        let _task = app.update(Message::Send);
+        app.cancel();
+        let _ = app.update(Message::Focus(false));
+        assert_eq!(app.presence.state(), State::Sliver);
     }
 
     #[test]
