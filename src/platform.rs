@@ -366,7 +366,6 @@ pub fn shape(window: &dyn iced::window::Window, outline: &[(f32, f32)]) {
 
 /// True while a fullscreen app, presentation, or the lock screen should hide the notch.
 /// Errors count as "not fullscreen" so the notch is never stranded.
-#[allow(dead_code)] // polled by the UI in the next task
 pub fn fullscreen_active() -> bool {
     #[cfg(windows)]
     {

@@ -184,7 +184,11 @@ impl Presence {
         self.clear_deadlines();
         self.message = None;
         // A reply still streaming keeps the pill out so the mascot can be seen talking.
-        self.state = if self.busy { State::Peek } else { State::Sliver };
+        self.state = if self.busy {
+            State::Peek
+        } else {
+            State::Sliver
+        };
     }
 
     fn clear_deadlines(&mut self) {

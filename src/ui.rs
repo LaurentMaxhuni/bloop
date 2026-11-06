@@ -1,6 +1,7 @@
 use crate::{
     mascot::{self, Mascot, Mood, Notch},
     platform,
+    presence::{Event, Presence, Shape, State},
     style::{self, MEDIUM, Tokens, Variant},
 };
 use bloop::{
@@ -23,6 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub const SLIVER: Size = Size::new(120.0, 5.0);
 pub const COMPACT: Size = Size::new(300.0, 40.0);
 const EXPANDED: Size = Size::new(540.0, 580.0);
 /// Width of the concave curves where the notch meets the top of the screen.
@@ -36,7 +38,18 @@ pub enum Message {
     Loaded(Result<(Config, Vec<Turn>), String>),
     Saved(Result<(), String>),
     Platform(platform::Event),
+    /// Shortcut-like toggle: opens from anywhere, closes when open.
     Toggle,
+    /// Click on the compact pill.
+    OpenClick,
+    /// Cursor entered (true) or left (false) the window.
+    Cursor(bool),
+    /// Window gained (true) or lost (false) focus.
+    Focus(bool),
+    /// A presence deadline (hover/leave/peek) may have passed.
+    Deadline(Instant),
+    FullscreenPoll,
+    PeekTest,
     Frame(Instant),
     /// Mascot animation frame while it is moving.
     Tick(Instant),
@@ -78,7 +91,7 @@ pub struct Island {
     desktop_warning: String,
     storage_warning: String,
     loading: bool,
-    expanded: bool,
+    presence: Presence,
     settings: bool,
     confirming_clear: bool,
     size: Size,
@@ -113,10 +126,10 @@ impl Island {
             desktop_warning: String::new(),
             storage_warning: String::new(),
             loading: true,
-            expanded: false,
+            presence: Presence::new(),
             settings: false,
             confirming_clear: false,
-            size: COMPACT,
+            size: SLIVER,
             animation: None,
             window: None,
             controller: None,
@@ -191,13 +204,17 @@ impl Island {
                 Mood::Talking
             };
         }
-        if !self.expanded && self.now.saturating_duration_since(self.last_activity) >= NAP_AFTER {
+        if !self.is_open() && self.now.saturating_duration_since(self.last_activity) >= NAP_AFTER {
             return Mood::Sleepy;
         }
-        if self.expanded && !self.settings && !self.input.is_empty() {
+        if self.is_open() && !self.settings && !self.input.is_empty() {
             return Mood::Typing;
         }
         Mood::Idle
+    }
+
+    fn is_open(&self) -> bool {
+        self.presence.state() == State::Open
     }
 
     fn react(&mut self, mood: Mood, seconds: f32) {
@@ -251,7 +268,22 @@ impl Island {
                     None
                 }
             }),
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorEntered) => {
+                    Some(Message::Cursor(true))
+                }
+                iced::Event::Mouse(iced::mouse::Event::CursorLeft) => Some(Message::Cursor(false)),
+                iced::Event::Window(window::Event::Focused) => Some(Message::Focus(true)),
+                iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(false)),
+                _ => None,
+            }),
         ];
+        if self.presence.next_deadline().is_some() {
+            events.push(iced::time::every(Duration::from_millis(50)).map(Message::Deadline));
+        }
+        if !self.is_open() {
+            events.push(iced::time::every(Duration::from_secs(2)).map(|_| Message::FullscreenPoll));
+        }
         if self.animation.is_some() {
             events.push(iced::time::every(Duration::from_millis(16)).map(Message::Frame));
         }
@@ -271,7 +303,13 @@ impl Island {
         }
         if !matches!(
             message,
-            Message::Tick(_) | Message::Blink(_) | Message::Frame(_) | Message::Saved(_)
+            Message::Tick(_)
+                | Message::Blink(_)
+                | Message::Frame(_)
+                | Message::Saved(_)
+                | Message::Deadline(_)
+                | Message::FullscreenPoll
+                | Message::Focus(_)
         ) {
             self.last_activity = Instant::now();
             self.now = self.last_activity;
@@ -331,8 +369,8 @@ impl Island {
                         return iced::exit();
                     }
                     self.quitting = false;
-                    if !self.expanded {
-                        return self.toggle();
+                    if !self.is_open() {
+                        return self.present(Event::Shortcut);
                     }
                 }
             }
@@ -341,13 +379,28 @@ impl Island {
                     controller.shortcut(self.config.shortcut.clone());
                     self.controller = Some(controller);
                 }
-                platform::Event::Toggle => return self.toggle(),
+                platform::Event::Toggle => return self.present(Event::Shortcut),
                 platform::Event::Settings => return self.update(Message::Settings),
                 platform::Event::Quit => return self.update(Message::Quit),
                 platform::Event::Warning(error) => self.desktop_warning = error,
                 platform::Event::ShortcutApplied => self.desktop_warning.clear(),
             },
-            Message::Toggle => return self.toggle(),
+            Message::Toggle => return self.present(Event::Shortcut),
+            Message::OpenClick => return self.present(Event::Click),
+            Message::Cursor(true) => return self.present(Event::CursorEntered),
+            Message::Cursor(false) => return self.present(Event::CursorLeft),
+            Message::Focus(true) => {}
+            Message::Focus(false) => return self.present(Event::FocusLost),
+            Message::Deadline(now) => return self.present_at(Event::Tick, now),
+            Message::FullscreenPoll => {
+                return self.present(Event::Fullscreen(platform::fullscreen_active()));
+            }
+            Message::PeekTest => {
+                // Close the panel first so the peek is visible on its own.
+                let close = self.present(Event::Dismiss);
+                let peek = self.present(Event::Peek("Hi! This is a peek.".into()));
+                return Task::batch([close, peek]);
+            }
             Message::Frame(now) => {
                 if let Some(animation) = &self.animation {
                     let t = (now.duration_since(animation.start).as_secs_f32() / 0.22).min(1.0);
@@ -361,7 +414,7 @@ impl Island {
                         self.animation = None;
                     }
                     let resize = self.resize();
-                    if self.animation.is_none() && self.expanded && !self.settings {
+                    if self.animation.is_none() && self.is_open() && !self.settings {
                         return Task::batch([resize, widget::operation::focus("prompt")]);
                     }
                     return resize;
@@ -415,7 +468,8 @@ impl Island {
                 });
                 let (task, handle) = Task::run(stream, |message| message).abortable();
                 self.request = Some(handle);
-                return Task::batch([task, self.scroll()]);
+                let busy = self.present(Event::Busy(true));
+                return Task::batch([task, self.scroll(), busy]);
             }
             Message::Chunk(id, event) if id == self.request_id && self.request.is_some() => {
                 if let StreamEvent::Delta(delta) = event {
@@ -427,6 +481,7 @@ impl Island {
             }
             Message::Finished(id, result) if id == self.request_id && self.request.is_some() => {
                 self.request = None;
+                let mut presence = self.present(Event::Busy(false));
                 match result {
                     Ok(()) => {
                         if let Some(turn) = self.turns.last_mut() {
@@ -437,22 +492,25 @@ impl Island {
                     Err(error) => {
                         self.status = error;
                         self.react(Mood::Oops, 2.0);
+                        let failed = self.present(Event::Peek("Reply failed".into()));
+                        presence = Task::batch([presence, failed]);
                     }
                 }
-                return Task::batch([self.persist(), self.scroll()]);
+                return Task::batch([self.persist(), self.scroll(), presence]);
             }
             Message::Chunk(..) | Message::Finished(..) => {}
             Message::Cancel => {
                 self.cancel();
                 self.status = "Stopped. Partial reply kept out of model context.".into();
                 self.react(Mood::Oops, 0.8);
-                return self.persist();
+                let presence = self.present(Event::Busy(false));
+                return Task::batch([self.persist(), presence]);
             }
             Message::Settings => {
                 self.settings = !self.settings;
                 self.draft_config = self.config.clone();
-                if !self.expanded {
-                    return self.toggle();
+                if !self.is_open() {
+                    return self.present(Event::Shortcut);
                 }
             }
             Message::Provider(provider) => {
@@ -532,8 +590,8 @@ impl Island {
                 }
                 if self.settings {
                     self.settings = false;
-                } else if self.expanded {
-                    return self.toggle();
+                } else if self.is_open() {
+                    return self.present(Event::Dismiss);
                 }
             }
         }
@@ -570,19 +628,45 @@ impl Island {
         )
     }
 
-    fn toggle(&mut self) -> Task<Message> {
-        self.expanded = !self.expanded;
-        self.animation = Some(Animation {
-            start: Instant::now(),
-            from: self.size,
-            to: if self.expanded { EXPANDED } else { COMPACT },
-        });
-        if self.expanded
-            && let Some(id) = self.window
-        {
-            return Task::batch([window::gain_focus(id), widget::operation::focus("prompt")]);
+    fn present(&mut self, event: Event) -> Task<Message> {
+        self.present_at(event, Instant::now())
+    }
+
+    /// Feeds `event` to the presence state machine and turns its result into
+    /// window work: size animation, hide/show, and focus.
+    fn present_at(&mut self, event: Event, now: Instant) -> Task<Message> {
+        let (state_before, shape_before) = (self.presence.state(), self.presence.shape());
+        self.presence.on(event, now);
+        let (state, shape) = (self.presence.state(), self.presence.shape());
+        let mut tasks = Vec::new();
+        if state == State::Hover && state_before != State::Hover {
+            self.react(Mood::Perk, 0.6);
         }
-        Task::none()
+        if shape != shape_before {
+            self.animation = Some(Animation {
+                start: Instant::now(),
+                from: self.size,
+                to: size_for(shape),
+            });
+        }
+        if let Some(id) = self.window {
+            let hidden = state == State::Hidden;
+            if hidden != (state_before == State::Hidden) {
+                tasks.push(window::set_mode(
+                    id,
+                    if hidden {
+                        window::Mode::Hidden
+                    } else {
+                        window::Mode::Windowed
+                    },
+                ));
+            }
+            if state == State::Open && state_before != State::Open {
+                tasks.push(window::gain_focus(id));
+                tasks.push(widget::operation::focus("prompt"));
+            }
+        }
+        Task::batch(tasks)
     }
 
     fn resize(&self) -> Task<Message> {
@@ -590,7 +674,7 @@ impl Island {
             return Task::none();
         };
         let position = platform::primary_position(self.size);
-        let outline = mascot::notch_outline(self.size, SHOULDER, self.corner_radius());
+        let outline = mascot::notch_outline(self.size, self.shoulder(), self.corner_radius());
         Task::batch([
             window::resize(id, self.size),
             window::run(id, move |window| platform::shape(window, &outline)).discard(),
@@ -602,6 +686,11 @@ impl Island {
 
     fn corner_radius(&self) -> f32 {
         (self.size.height / 2.0).min(26.0)
+    }
+
+    /// Shoulders shrink with the notch so the 5 px sliver keeps its silhouette.
+    fn shoulder(&self) -> f32 {
+        (self.size.height * 0.6).clamp(3.0, SHOULDER)
     }
 
     fn scroll(&self) -> Task<Message> {
@@ -635,19 +724,23 @@ impl Island {
             Mood::Oops => "Oops",
             Mood::Sleepy => "Napping",
             Mood::Typing => "Listening…",
-            Mood::Idle => "Ask anything",
+            Mood::Idle | Mood::Perk => "Ask anything",
         }
     }
 
     pub fn view(&self) -> Element<'_, Message> {
         let t = self.tokens();
-        let full = self.expanded && self.animation.is_none();
-        let content: Element<'_, Message> = if full {
+        let full = self.is_open() && self.animation.is_none();
+        let status = self.presence.message().unwrap_or(self.status_line());
+        let content: Element<'_, Message> = if self.size.height < COMPACT.height - 6.0 {
+            // Sliver (or mid-animation): just the silhouette.
+            Space::new().into()
+        } else if full {
             let header = row![
                 self.mascot(30.0),
                 column![
                     text("bloop").size(15).font(MEDIUM),
-                    text(self.status_line()).size(12).color(t.muted_foreground),
+                    text(status).size(12).color(t.muted_foreground),
                 ],
                 Space::new().width(Length::Fill),
                 self.button(if self.light() { "Dark" } else { "Light" }, Variant::Ghost)
@@ -685,12 +778,12 @@ impl Island {
                 self.mascot(26.0),
                 text("bloop").size(14).font(MEDIUM),
                 Space::new().width(Length::Fill),
-                text(self.status_line()).size(12).color(t.muted_foreground),
+                text(status).size(12).color(t.muted_foreground),
             ]
             .spacing(8)
             .align_y(Alignment::Center);
             button(header)
-                .on_press(Message::Toggle)
+                .on_press(Message::OpenClick)
                 .style(style::btn(t, Variant::Bare))
                 .padding(Padding {
                     top: 5.0,
@@ -705,7 +798,7 @@ impl Island {
         let shape = canvas(Notch {
             fill: t.background,
             outline: self.light().then_some(t.border),
-            shoulder: SHOULDER,
+            shoulder: self.shoulder(),
             radius: self.corner_radius(),
         })
         .width(Length::Fill)
@@ -959,6 +1052,13 @@ impl Island {
             ]
             .align_y(Alignment::Center),
         );
+        #[cfg(debug_assertions)]
+        {
+            form = form.push(
+                self.button("Peek test", Variant::Ghost)
+                    .on_press(Message::PeekTest),
+            );
+        }
         if !self.storage_warning.is_empty() {
             form = form
                 .push(text(&self.storage_warning).size(13).color(t.destructive))
@@ -974,6 +1074,14 @@ impl Island {
             .height(Length::Fill)
             .style(style::scroll(t))
             .into()
+    }
+}
+
+fn size_for(shape: Shape) -> Size {
+    match shape {
+        Shape::Sliver => SLIVER,
+        Shape::Compact => COMPACT,
+        Shape::Expanded => EXPANDED,
     }
 }
 
@@ -1006,17 +1114,52 @@ mod tests {
     #[test]
     fn animation_can_reverse_and_stops_at_rest() {
         let mut app = ready();
-        let _ = app.toggle();
+        assert_eq!(app.size, SLIVER);
+        let _ = app.present(Event::Shortcut);
         let start = app.animation.as_ref().unwrap().start;
         let _ = app.update(Message::Frame(start + Duration::from_millis(90)));
-        assert!(app.size.width > COMPACT.width && app.size.width < EXPANDED.width);
+        assert!(app.size.width > SLIVER.width && app.size.width < EXPANDED.width);
         let midpoint = app.size;
-        let _ = app.toggle();
+        let _ = app.present(Event::Shortcut);
         assert_eq!(app.animation.as_ref().unwrap().from, midpoint);
         let start = app.animation.as_ref().unwrap().start;
         let _ = app.update(Message::Frame(start + Duration::from_secs(1)));
-        assert_eq!(app.size, COMPACT);
+        assert_eq!(app.size, SLIVER);
         assert!(app.animation.is_none());
+    }
+
+    #[test]
+    fn peek_message_shows_in_compact() {
+        let mut app = ready();
+        let _ = app.update(Message::PeekTest);
+        assert_eq!(app.presence.state(), State::Peek);
+        assert!(app.presence.message().is_some());
+        assert_eq!(app.animation.as_ref().unwrap().to, COMPACT);
+    }
+
+    #[test]
+    fn send_marks_presence_busy() {
+        let mut app = ready();
+        let _ = app.update(Message::Toggle);
+        assert_eq!(app.presence.state(), State::Open);
+        app.input = "hello".into();
+        let _task = app.update(Message::Send);
+        let _ = app.update(Message::Focus(false));
+        assert_eq!(app.presence.state(), State::Peek);
+        let id = app.request_id;
+        let _ = app.update(Message::Finished(id, Ok(())));
+        assert_eq!(app.presence.message(), Some("All done"));
+    }
+
+    #[test]
+    fn hover_perks_mascot() {
+        let mut app = ready();
+        let _ = app.update(Message::Cursor(true));
+        let _ = app.update(Message::Deadline(
+            Instant::now() + Duration::from_millis(200),
+        ));
+        assert_eq!(app.presence.state(), State::Hover);
+        assert_eq!(app.mood(), Mood::Perk);
     }
 
     #[test]
@@ -1026,7 +1169,7 @@ mod tests {
         app.saving = true;
         let _ = app.update(Message::Saved(Err("disk full".into())));
         assert!(!app.quitting);
-        assert!(app.expanded);
+        assert_eq!(app.presence.state(), State::Open);
         assert!(app.storage_warning.contains("disk full"));
     }
 

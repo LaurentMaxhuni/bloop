@@ -16,6 +16,8 @@ pub enum Mood {
     Happy,
     Oops,
     Sleepy,
+    /// Wide-eyed little hop when the cursor arrives.
+    Perk,
 }
 
 impl Mood {
@@ -23,7 +25,7 @@ impl Mood {
     pub fn animated(self) -> bool {
         matches!(
             self,
-            Self::Thinking | Self::Talking | Self::Happy | Self::Oops
+            Self::Thinking | Self::Talking | Self::Happy | Self::Oops | Self::Perk
         )
     }
 }
@@ -89,6 +91,11 @@ impl<Message> canvas::Program<Message> for Mascot {
                 dx = (self.since * TAU * 7.0).sin() * 1.1 * (1.0 - self.since / 0.7).max(0.0);
             }
             Mood::Sleepy => dy = 0.6,
+            Mood::Perk => {
+                let hop = (self.since * TAU * 0.85).sin().abs() * (1.0 - self.since / 0.6).max(0.0);
+                dy = -hop * 1.6;
+                stretch = hop * 0.5;
+            }
             Mood::Idle | Mood::Typing => {}
         }
         let p = |x: f32, y: f32| Point::new(ox + (x + dx) * u, oy + (y + dy) * u);
@@ -123,7 +130,7 @@ impl<Message> canvas::Program<Message> for Mascot {
             Mood::Thinking => (0.9, -1.1),
             _ => (0.0, 0.0),
         };
-        if matches!(self.mood, Mood::Idle | Mood::Typing)
+        if matches!(self.mood, Mood::Idle | Mood::Typing | Mood::Perk)
             && let Some(pos) = cursor.position()
         {
             let center = Point::new(
@@ -179,9 +186,10 @@ impl<Message> canvas::Program<Message> for Mascot {
                 }
             }
             _ => {
+                let eye_r = if self.mood == Mood::Perk { 2.3 } else { 1.9 };
                 for x in eyes {
                     frame.fill(
-                        &Path::circle(p(x + look.0, eye_y + look.1), 1.9 * u),
+                        &Path::circle(p(x + look.0, eye_y + look.1), eye_r * u),
                         self.face,
                     );
                     // Tiny highlight makes the eyes read as shiny.
@@ -257,6 +265,9 @@ impl<Message> canvas::Program<Message> for Mascot {
                         .with_color(self.body)
                         .with_line_cap(LineCap::Round),
                 );
+            }
+            Mood::Perk => {
+                frame.fill(&Path::circle(p(12.0, mouth_y + 0.3), 1.0 * u), self.face);
             }
             Mood::Idle | Mood::Typing => {
                 let smile = Path::new(|b| {

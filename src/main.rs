@@ -2,7 +2,6 @@
 
 mod mascot;
 mod platform;
-#[allow(dead_code)] // wired into the UI in the next task
 mod presence;
 mod style;
 mod ui;
@@ -24,7 +23,7 @@ fn run() -> iced::Result {
         )
         .try_init();
     let mut settings = window::Settings {
-        size: ui::COMPACT,
+        size: ui::SLIVER,
         position: window::Position::SpecificWith(|size: Size, monitor: Size| {
             platform::primary_position(size)
                 .unwrap_or(Point::new((monitor.width - size.width) / 2.0, 0.0))
