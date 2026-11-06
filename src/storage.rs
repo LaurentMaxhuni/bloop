@@ -81,6 +81,9 @@ pub fn save(path: &Path, config: &Config, turns: &[Turn]) -> Result<(), String> 
     validate_turns(turns)?;
     let settings = serde_json::to_string(config).map_err(|e| e.to_string())?;
     let history = serde_json::to_string(turns).map_err(|e| e.to_string())?;
+    if settings.len() > 8192 || history.len() > 16 * 1024 * 1024 {
+        return Err("Saved data exceeds supported limits.".into());
+    }
     let connection = connect(path)?;
     // A single statement atomically replaces settings and history together.
     connection
@@ -114,6 +117,22 @@ mod tests {
         let (settings, loaded) = load(&path).unwrap();
         assert_eq!(settings.model, Config::default().model);
         assert_eq!(loaded[0].assistant, "world");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn oversized_serialized_settings_cannot_replace_readable_state() {
+        let path = std::env::temp_dir().join(format!(
+            "bloop-storage-boundary-{}.sqlite3",
+            std::process::id()
+        ));
+        save(&path, &Config::default(), &[]).unwrap();
+        let config = Config {
+            endpoint: format!("https://example.com/{}", "a".repeat(8192)),
+            ..Config::default()
+        };
+        assert!(save(&path, &config, &[]).is_err());
+        assert_eq!(load(&path).unwrap().0.endpoint, Config::default().endpoint);
         std::fs::remove_file(path).unwrap();
     }
 }

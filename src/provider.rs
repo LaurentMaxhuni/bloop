@@ -77,6 +77,16 @@ impl Decoder {
         let content = match self.provider {
             Provider::Ollama => {
                 if value
+                    .get("done_reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|r| r != "stop")
+                {
+                    return Err(Error::Protocol(
+                        "Model stopped before completing its reply. Ask for a shorter answer."
+                            .into(),
+                    ));
+                }
+                if value
                     .pointer("/message/tool_calls")
                     .is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty()))
                 {
@@ -90,8 +100,12 @@ impl Decoder {
                 let reason = value
                     .pointer("/choices/0/finish_reason")
                     .and_then(Value::as_str);
-                if value.pointer("/choices/0/delta/tool_calls").is_some()
-                    || value.pointer("/choices/0/delta/function_call").is_some()
+                if value
+                    .pointer("/choices/0/delta/tool_calls")
+                    .is_some_and(|v| !v.is_null() && v.as_array().is_none_or(|a| !a.is_empty()))
+                    || value
+                        .pointer("/choices/0/delta/function_call")
+                        .is_some_and(|v| !v.is_null())
                     || reason.is_some_and(|r| r != "stop")
                 {
                     return Err(Error::Protocol(
@@ -197,6 +211,40 @@ pub async fn chat<F: Future<Output = bool> + Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_oversized_frames_and_unfinished_streams() {
+        let mut decoder = Decoder::new(Provider::Ollama);
+        assert!(decoder.push(&vec![b'x'; MAX_FRAME + 1]).is_err());
+        let mut decoder = Decoder::new(Provider::Ollama);
+        decoder
+            .push(b"{\"message\":{\"content\":\"partial\"}}\n")
+            .unwrap();
+        assert!(decoder.finish().is_err());
+    }
+
+    #[test]
+    fn refuses_tool_calls_and_token_limit_completions() {
+        let mut decoder = Decoder::new(Provider::OpenAi);
+        assert!(
+            decoder
+                .push(b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{}]}}]}\n\n")
+                .is_err()
+        );
+        let mut decoder = Decoder::new(Provider::Ollama);
+        assert!(
+            decoder
+                .push(b"{\"done\":true,\"done_reason\":\"length\"}\n")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn nullable_tool_fields_do_not_block_text_streams() {
+        let mut decoder = Decoder::new(Provider::OpenAi);
+        let events = decoder.push(b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\",\"tool_calls\":null,\"function_call\":null}}]}\n\n").unwrap();
+        assert_eq!(events, [StreamEvent::Delta("hello".into())]);
+    }
 
     #[test]
     fn fragmented_ndjson_preserves_utf8() {

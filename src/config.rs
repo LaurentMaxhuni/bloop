@@ -31,7 +31,7 @@ impl Default for Config {
             provider: Provider::Ollama,
             endpoint: "http://127.0.0.1:11434".into(),
             model: "qwen3:4b".into(),
-            shortcut: "Ctrl+Alt+Space".into(),
+            shortcut: "Ctrl+Alt+B".into(),
             light: false,
         }
     }
@@ -64,7 +64,7 @@ impl Config {
             return Err("Model must contain 1–200 bytes.".into());
         }
         if self.shortcut.trim().is_empty() || self.shortcut.len() > 100 {
-            return Err("Enter a global shortcut, such as Ctrl+Alt+Space.".into());
+            return Err("Enter a global shortcut, such as Ctrl+Alt+B.".into());
         }
         Ok(())
     }

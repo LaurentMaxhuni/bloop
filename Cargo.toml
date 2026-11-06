@@ -3,11 +3,11 @@ name = "bloop"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-description = "A local-first native AI desktop island"
+description = "A local-first native AI desktop notch"
 license = "MIT"
 
 [dependencies]
-iced = { version = "0.14", default-features = false, features = ["tiny-skia", "tokio", "crisp"] }
+iced = { version = "0.14", default-features = false, features = ["wgpu-bare", "tokio", "crisp", "canvas"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -18,6 +18,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
+# Select only DirectX 12 instead of loading unused GPU backends on Windows.
+wgpu = { version = "27", default-features = false, features = ["std", "wgsl", "dx12"] }
 tray-icon = "0.26"
 global-hotkey = "0.9"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Graphics_Gdi", "Win32_UI_HiDpi"] }
