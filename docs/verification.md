@@ -45,3 +45,21 @@ directory; no OS tools or autonomous agent loop. Phase 3 remains separate work.
 Sandboxed MSVC archive writes and network access were blocked. Cargo dependency
 fetches, native builds/tests, and interactive launches were run with approved
 environment access. No changes to global Rust, Git, or Windows configuration.
+
+## Auto-hide notch (2026-11-06)
+
+Checked on Windows 11 (100 % scale) with a debug build and a scratch `BLOOP_DATA_DIR`,
+using `WindowFromPoint` to see which process owns each screen point:
+
+| Check | Result |
+| --- | --- |
+| At rest only the sliver belongs to bloop; points 70 px right of it and 20 px below it belong to the window underneath | Pass |
+| Resting the cursor on the sliver for 0.7 s shows the pill with the mascot | Pass |
+| Moving away shrinks back to the sliver within 1.2 s | Pass |
+| Clicking the pill opens the full panel | Pass |
+| Activating another window closes the panel | Pass |
+| Settings › Peek test (debug only) shows "Hi! This is a peek." and returns to the sliver by 5 s | Pass |
+| A borderless fullscreen top-most window hides the sliver within the 2 s poll; it returns after the window closes | Pass |
+
+Not checked: a real fullscreen game or video, the lock screen, mixed-DPI monitors,
+and a reply finishing while the panel is closed (covered by unit tests only).

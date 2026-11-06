@@ -14,7 +14,11 @@ cargo build --release
 .\target\release\bloop.exe
 ```
 
-Click the notch or press **Ctrl+Alt+B**. Open **Settings** to select your
+At rest bloop is a thin sliver at the top center of the screen. Rest the mouse on
+it to pop out the pill (it shrinks back when you move away), click the pill or press
+**Ctrl+Alt+B** to open the panel, and click anywhere else to close it. bloop also
+peeks out on its own for a few seconds when it has something to say, and hides
+completely while a fullscreen app, presentation, or the lock screen is up. Open **Settings** to select your
 provider, base URL, model, and global shortcut. A conflicting shortcut produces a
 visible warning; choose another combination. Right-click the tray icon for settings
 and quit. Escape stops an active reply, closes settings, or collapses the notch.
@@ -34,6 +38,8 @@ are outside this milestone.
 
 ## Implemented
 
+- Auto-hiding notch: a 120 × 5 px sliver at rest, a pill on hover (150 ms) or
+  peek (4 s), the full panel on click/shortcut; hidden during fullscreen apps.
 - Always-on-top notch flush with the top of the primary work area, clipped to its
   real silhouette (concave shoulders, rounded bottom) with a native window region.
 - Black-and-white shadcn/ui "neutral" styling in light and dark themes.
