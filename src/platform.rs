@@ -364,6 +364,33 @@ pub fn shape(window: &dyn iced::window::Window, outline: &[(f32, f32)]) {
     }
 }
 
+/// True while a fullscreen app, presentation, or the lock screen should hide the notch.
+/// Errors count as "not fullscreen" so the notch is never stranded.
+#[allow(dead_code)] // polled by the UI in the next task
+pub fn fullscreen_active() -> bool {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::Shell::{
+            QUNS_BUSY, QUNS_NOT_PRESENT, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
+            SHQueryUserNotificationState,
+        };
+        // SAFETY: takes no pointers from us; the wrapper owns its out-parameter.
+        unsafe { SHQueryUserNotificationState() }.is_ok_and(|state| {
+            [
+                QUNS_BUSY,
+                QUNS_NOT_PRESENT,
+                QUNS_PRESENTATION_MODE,
+                QUNS_RUNNING_D3D_FULL_SCREEN,
+            ]
+            .contains(&state)
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// Primary monitor work area; physical coordinates converted to logical units.
 pub fn primary_position(size: Size) -> Option<Point> {
     #[cfg(windows)]
@@ -400,5 +427,13 @@ pub fn primary_position(size: Size) -> Option<Point> {
     {
         let _ = size;
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fullscreen_query_does_not_panic() {
+        let _ = super::fullscreen_active();
     }
 }
