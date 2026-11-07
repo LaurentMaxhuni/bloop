@@ -31,3 +31,6 @@ strip = true
 
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
