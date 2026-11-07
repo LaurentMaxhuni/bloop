@@ -1,5 +1,5 @@
 pub mod config;
 pub mod model;
+pub mod onboarding;
 pub mod provider;
 pub mod storage;
-pub mod onboarding;

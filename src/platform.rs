@@ -569,7 +569,11 @@ fn set_run_value(key: &str, enable: bool) -> Result<(), String> {
     } else {
         // SAFETY: strings are NUL-terminated and outlive the call.
         let status = unsafe {
-            RegDeleteKeyValueW(HKEY_CURRENT_USER, PCWSTR(key.as_ptr()), PCWSTR(name.as_ptr()))
+            RegDeleteKeyValueW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key.as_ptr()),
+                PCWSTR(name.as_ptr()),
+            )
         };
         if status == ERROR_FILE_NOT_FOUND {
             return Ok(());

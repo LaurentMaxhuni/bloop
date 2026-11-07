@@ -1,3 +1,5 @@
+mod onboarding;
+
 use crate::{
     mascot::{self, Mascot, Mood, Notch},
     platform,
@@ -7,6 +9,7 @@ use crate::{
 use bloop::{
     config::{Config, Provider},
     model::{self, MAX_PROMPT, MAX_TURNS, Turn},
+    onboarding::{Detection, Onboarding},
     provider::{self, StreamEvent},
     storage,
 };
@@ -74,6 +77,15 @@ pub enum Message {
     Quit,
     QuitWithoutSaving,
     Escape,
+    OnboardNext,
+    OnboardBack,
+    OnboardSkip,
+    Detect,
+    Detected(Result<Vec<String>, String>),
+    PickModel(String),
+    SetLight(bool),
+    SetAutostart(bool),
+    ShowSetup,
 }
 
 struct Animation {
@@ -111,6 +123,11 @@ pub struct Island {
     blink_until: Option<Instant>,
     /// A short-lived mood (mood, started, ends) triggered by an event.
     reaction: Option<(Mood, Instant, Instant)>,
+    /// First-launch setup in progress (shown in the open panel).
+    onboarding: Option<Onboarding>,
+    detection: Detection,
+    autostart: bool,
+    autostart_error: String,
 }
 
 impl Island {
@@ -145,6 +162,10 @@ impl Island {
             last_activity: Instant::now(),
             blink_until: None,
             reaction: None,
+            onboarding: None,
+            detection: Detection::Checking,
+            autostart: false,
+            autostart_error: String::new(),
         };
         (
             state,
@@ -350,6 +371,9 @@ impl Island {
                 }
                 if let Some(controller) = &self.controller {
                     controller.shortcut(self.config.shortcut.clone());
+                }
+                if !self.config.onboarded {
+                    return self.start_setup();
                 }
             }
             Message::Saved(result) => {
@@ -583,6 +607,70 @@ impl Island {
                 self.cancel();
                 return iced::exit();
             }
+            Message::OnboardNext => {
+                if let Some(onboarding) = &mut self.onboarding {
+                    if onboarding.is_last() {
+                        return self.finish_onboarding();
+                    }
+                    onboarding.next();
+                }
+            }
+            Message::OnboardBack => {
+                if let Some(onboarding) = &mut self.onboarding {
+                    onboarding.back();
+                }
+            }
+            Message::OnboardSkip => {
+                if self.onboarding.is_some() {
+                    return self.finish_onboarding();
+                }
+            }
+            Message::Detect => {
+                if self.onboarding.is_some() {
+                    self.detection = Detection::Checking;
+                    let config = self.draft_config.clone();
+                    return Task::perform(
+                        async move {
+                            provider::list_models(&config)
+                                .await
+                                .map_err(|e| e.to_string())
+                        },
+                        Message::Detected,
+                    );
+                }
+            }
+            Message::Detected(result) => {
+                if self.onboarding.is_none() {
+                    return Task::none();
+                }
+                self.detection = match result {
+                    Ok(models) if !models.is_empty() => {
+                        if !models.contains(&self.draft_config.model) {
+                            self.draft_config.model = models[0].clone();
+                        }
+                        Detection::Found(models)
+                    }
+                    _ => Detection::NotFound,
+                };
+            }
+            Message::PickModel(model) => self.draft_config.model = model,
+            Message::SetLight(light) => {
+                self.config.light = light;
+                self.draft_config.light = light;
+            }
+            Message::SetAutostart(enable) => match platform::set_autostart(enable) {
+                Ok(()) => {
+                    self.autostart = enable;
+                    self.autostart_error.clear();
+                }
+                Err(error) => self.autostart_error = error,
+            },
+            Message::ShowSetup => {
+                self.settings = false;
+                self.config.onboarded = false;
+                let save = self.persist();
+                return Task::batch([save, self.start_setup()]);
+            }
             Message::Escape => {
                 if self.request.is_some() {
                     return self.update(Message::Cancel);
@@ -595,6 +683,46 @@ impl Island {
             }
         }
         Task::none()
+    }
+
+    /// Opens the panel on step one of setup and starts looking for a model server.
+    fn start_setup(&mut self) -> Task<Message> {
+        self.onboarding = Some(Onboarding::new());
+        self.draft_config = self.config.clone();
+        self.autostart = platform::autostart();
+        self.autostart_error.clear();
+        let open = if self.is_open() {
+            Task::none()
+        } else {
+            self.present(Event::Shortcut)
+        };
+        Task::batch([open, self.update(Message::Detect)])
+    }
+
+    /// Ends setup. A valid draft is adopted; an invalid one is dropped so finishing never blocks.
+    fn finish_onboarding(&mut self) -> Task<Message> {
+        self.onboarding = None;
+        let light = self.config.light;
+        if self
+            .draft_config
+            .validate()
+            .and_then(|_| platform::validate_shortcut(&self.draft_config.shortcut))
+            .is_ok()
+        {
+            self.config = self.draft_config.clone();
+            if let Some(controller) = &self.controller {
+                controller.shortcut(self.config.shortcut.clone());
+            }
+        }
+        self.config.light = light;
+        self.config.onboarded = true;
+        self.draft_config = self.config.clone();
+        self.status.clear();
+        self.react(Mood::Happy, 1.2);
+        let save = self.persist();
+        let close = self.present(Event::Dismiss);
+        let peek = self.present(Event::Peek("I'm up here!".into()));
+        Task::batch([save, close, peek])
     }
 
     fn cancel(&mut self) {
@@ -744,23 +872,36 @@ impl Island {
                     text(status).size(12).color(t.muted_foreground),
                 ],
                 Space::new().width(Length::Fill),
-                self.button(if self.light() { "Dark" } else { "Light" }, Variant::Ghost)
-                    .on_press(Message::Theme),
-                self.button(
-                    if self.settings { "Back" } else { "Settings" },
-                    Variant::Ghost
-                )
-                .on_press(Message::Settings),
-                self.button("Hide", Variant::Ghost)
-                    .on_press(Message::Toggle),
             ]
             .spacing(10)
             .align_y(Alignment::Center);
+            let header = if self.onboarding.is_some() {
+                header
+            } else {
+                header
+                    .push(
+                        self.button(if self.light() { "Dark" } else { "Light" }, Variant::Ghost)
+                            .on_press(Message::Theme),
+                    )
+                    .push(
+                        self.button(
+                            if self.settings { "Back" } else { "Settings" },
+                            Variant::Ghost,
+                        )
+                        .on_press(Message::Settings),
+                    )
+            }
+            .push(
+                self.button("Hide", Variant::Ghost)
+                    .on_press(Message::Toggle),
+            );
             let separator = container(Space::new())
                 .width(Length::Fill)
                 .height(1)
                 .style(style::separator(t));
-            let body = if self.settings {
+            let body = if self.onboarding.is_some() {
+                self.onboarding_view()
+            } else if self.settings {
                 self.settings_view()
             } else {
                 self.chat_view()
@@ -986,24 +1127,10 @@ impl Island {
         .into()
     }
 
-    fn settings_view(&self) -> Element<'_, Message> {
+    /// Provider, endpoint and model fields, shared by Settings and setup.
+    fn model_fields(&self) -> widget::Column<'_, Message> {
         let t = self.tokens();
-        fn field<'a>(
-            label: &'a str,
-            control: impl Into<Element<'a, Message>>,
-        ) -> Element<'a, Message> {
-            column![text(label).size(13).font(MEDIUM), control.into()]
-                .spacing(6)
-                .into()
-        }
-        let mut form = column![
-            column![
-                text("Settings").size(20).font(MEDIUM),
-                text("Choose the model bloop talks to.")
-                    .size(13)
-                    .color(t.muted_foreground),
-            ]
-            .spacing(2),
+        column![
             field(
                 "Provider",
                 pick_list(
@@ -1029,6 +1156,21 @@ impl Island {
                 "Model",
                 self.input("qwen3:4b", &self.draft_config.model, Message::Model),
             ),
+        ]
+        .spacing(16)
+    }
+
+    fn settings_view(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let mut form = column![
+            column![
+                text("Settings").size(20).font(MEDIUM),
+                text("Choose the model bloop talks to.")
+                    .size(13)
+                    .color(t.muted_foreground),
+            ]
+            .spacing(2),
+            self.model_fields(),
             field(
                 "Global shortcut",
                 self.input("Ctrl+Alt+B", &self.draft_config.shortcut, Message::Shortcut),
@@ -1038,6 +1180,9 @@ impl Island {
             )
             .size(12)
             .color(t.muted_foreground),
+            self.autostart_toggle(),
+            self.button("Show setup again", Variant::Ghost)
+                .on_press(Message::ShowSetup),
         ]
         .spacing(16);
         if !self.status.is_empty() {
@@ -1078,6 +1223,12 @@ impl Island {
     }
 }
 
+fn field<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    column![text(label).size(13).font(MEDIUM), control.into()]
+        .spacing(6)
+        .into()
+}
+
 fn size_for(shape: Shape) -> Size {
     match shape {
         Shape::Sliver => SLIVER,
@@ -1089,6 +1240,7 @@ fn size_for(shape: Shape) -> Size {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bloop::onboarding::Step;
 
     fn ready() -> Island {
         let (mut app, _) = Island::new();
@@ -1230,5 +1382,95 @@ mod tests {
         let _ = app.update(Message::NewChat);
         let _ = app.update(Message::ConfirmClear);
         assert!(app.turns.is_empty());
+    }
+
+    fn first_launch() -> Island {
+        let mut app = ready();
+        let _ = app.update(Message::Loaded(Ok((Config::default(), Vec::new()))));
+        app
+    }
+
+    #[test]
+    fn first_launch_shows_onboarding() {
+        let app = first_launch();
+        assert!(app.onboarding.is_some());
+        assert!(app.is_open());
+    }
+
+    #[test]
+    fn onboarded_config_skips_setup() {
+        let mut app = ready();
+        let config = Config {
+            onboarded: true,
+            ..Config::default()
+        };
+        let _ = app.update(Message::Loaded(Ok((config, Vec::new()))));
+        assert!(app.onboarding.is_none());
+    }
+
+    #[test]
+    fn finishing_sets_onboarded_and_peeks() {
+        let mut app = first_launch();
+        for _ in 0..4 {
+            let _ = app.update(Message::OnboardNext);
+        }
+        assert!(app.onboarding.as_ref().unwrap().is_last());
+        let _ = app.update(Message::OnboardNext);
+        assert!(app.onboarding.is_none());
+        assert!(app.config.onboarded);
+        assert_eq!(app.presence.state(), State::Peek);
+        assert_eq!(app.presence.message(), Some("I'm up here!"));
+    }
+
+    #[test]
+    fn skip_finishes_with_current_settings() {
+        let mut app = first_launch();
+        let _ = app.update(Message::OnboardSkip);
+        assert!(app.onboarding.is_none());
+        assert!(app.config.onboarded);
+        assert_eq!(app.config.model, "qwen3:4b");
+        assert_eq!(app.presence.state(), State::Peek);
+    }
+
+    #[test]
+    fn invalid_draft_keeps_previous_config_on_finish() {
+        let mut app = first_launch();
+        let _ = app.update(Message::Endpoint("http://example.com".into()));
+        let _ = app.update(Message::OnboardSkip);
+        assert_eq!(app.config.endpoint, "http://127.0.0.1:11434");
+        assert!(app.config.onboarded);
+        assert!(app.onboarding.is_none());
+    }
+
+    #[test]
+    fn detection_picks_installed_model() {
+        let mut app = first_launch();
+        let _ = app.update(Message::Detected(Ok(vec!["llama3.2".into()])));
+        assert_eq!(app.detection, Detection::Found(vec!["llama3.2".into()]));
+        assert_eq!(app.draft_config.model, "llama3.2");
+        let _ = app.update(Message::Detected(Ok(Vec::new())));
+        assert_eq!(app.detection, Detection::NotFound);
+        let _ = app.update(Message::Detected(Err("refused".into())));
+        assert_eq!(app.detection, Detection::NotFound);
+    }
+
+    #[test]
+    fn late_detection_after_finish_is_ignored() {
+        let mut app = first_launch();
+        let _ = app.update(Message::OnboardSkip);
+        let _ = app.update(Message::Detected(Ok(vec!["x".into()])));
+        assert_eq!(app.config.model, "qwen3:4b");
+        assert_eq!(app.draft_config.model, "qwen3:4b");
+        assert!(app.onboarding.is_none());
+    }
+
+    #[test]
+    fn show_setup_again_reopens_step_one() {
+        let mut app = first_launch();
+        let _ = app.update(Message::OnboardSkip);
+        let _ = app.update(Message::ShowSetup);
+        assert_eq!(app.onboarding.as_ref().unwrap().step(), Step::Welcome);
+        assert!(!app.config.onboarded);
+        assert!(app.is_open());
     }
 }
