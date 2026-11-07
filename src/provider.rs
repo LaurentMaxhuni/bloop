@@ -171,7 +171,7 @@ pub async fn chat<F: Future<Output = bool> + Send>(
         }
     };
     let mut request = client.post(url).json(&body);
-    if let Ok(key) = std::env::var("BLOOP_API_KEY") {
+    if let Some(key) = crate::secrets::api_key() {
         request = request.bearer_auth(key);
     }
     let mut response = request.send().await?;
@@ -231,7 +231,7 @@ pub async fn list_models(config: &Config) -> Result<Vec<String>, Error> {
         .no_proxy()
         .build()?;
     let mut request = client.get(url);
-    if let Ok(key) = std::env::var("BLOOP_API_KEY") {
+    if let Some(key) = crate::secrets::api_key() {
         request = request.bearer_auth(key);
     }
     let mut response = request.send().await?;
