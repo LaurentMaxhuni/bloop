@@ -1,3 +1,4 @@
+use bloop::config::NotchPosition;
 use iced::{Point, Size, futures::SinkExt};
 
 pub fn show_fatal(message: &str) {
@@ -391,7 +392,17 @@ pub fn fullscreen_active() -> bool {
 }
 
 /// Primary monitor work area; physical coordinates converted to logical units.
+/// Gap between a left/right notch and the edge of the screen.
+pub const EDGE_INSET: f32 = 24.0;
+
+/// Centred top-of-screen origin for a window of `size` on the primary monitor.
 pub fn primary_position(size: Size) -> Option<Point> {
+    place(size, NotchPosition::Centre)
+}
+
+/// Origin for bloop's window of `size` along the top of the primary monitor's work area,
+/// in logical units.
+pub fn place(size: Size, position: NotchPosition) -> Option<Point> {
     #[cfg(windows)]
     {
         use windows::Win32::{
@@ -416,15 +427,18 @@ pub fn primary_position(size: Size) -> Option<Point> {
         let _ = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut xdpi, &mut ydpi) };
         let scale = xdpi.max(96) as f32 / 96.0;
         let area = info.rcWork;
-        Some(Point::new(
-            (area.left as f32 + (area.right - area.left) as f32 / 2.0) / scale - size.width / 2.0,
-            // Flush with the top edge so it reads as a notch.
-            area.top as f32 / scale,
-        ))
+        let (left, right) = (area.left as f32 / scale, area.right as f32 / scale);
+        let x = match position {
+            NotchPosition::Centre => (left + right) / 2.0 - size.width / 2.0,
+            NotchPosition::Left => left + EDGE_INSET,
+            NotchPosition::Right => right - EDGE_INSET - size.width,
+        };
+        // Flush with the top edge so it reads as a notch.
+        Some(Point::new(x, area.top as f32 / scale))
     }
     #[cfg(not(windows))]
     {
-        let _ = size;
+        let _ = (size, position);
         None
     }
 }

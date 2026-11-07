@@ -7,8 +7,9 @@ use crate::{
     style::{self, MEDIUM, Tokens, Variant},
 };
 use bloop::{
-    config::{Config, Provider, ThemeChoice},
+    config::{Config, NotchPosition, NotchWidth, Provider, ReduceMotion, ThemeChoice},
     model::{self, MAX_PROMPT, MAX_TURNS, Turn},
+    motion::SizeSpring,
     onboarding::{self as setup, Choice, Detection, Onboarding},
     provider::{self, StreamEvent},
     secrets::{self, KeySource},
@@ -28,9 +29,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Starting window size; `place_window` resizes it to `canvas_size` once it exists.
 pub const SLIVER: Size = Size::new(120.0, 5.0);
-pub const COMPACT: Size = Size::new(300.0, 40.0);
-const EXPANDED: Size = Size::new(540.0, 580.0);
 /// Width of the concave curves where the notch meets the top of the screen.
 const SHOULDER: f32 = 10.0;
 /// Collapsed and untouched for this long, the mascot dozes off.
@@ -91,12 +91,6 @@ pub enum Message {
     ShowSetup,
 }
 
-struct Animation {
-    start: Instant,
-    from: Size,
-    to: Size,
-}
-
 pub struct Island {
     config: Config,
     draft_config: Config,
@@ -109,8 +103,16 @@ pub struct Island {
     presence: Presence,
     settings: bool,
     confirming_clear: bool,
-    size: Size,
-    animation: Option<Animation>,
+    /// Drawn notch size; the OS window stays at `canvas_size` and never animates.
+    spring: SizeSpring,
+    /// Previous frame time while the spring moves.
+    last_frame: Option<Instant>,
+    /// Size and offset the click-through region was last cut for, in whole pixels.
+    region: Option<(i32, i32, i32)>,
+    /// Frame intervals while animating, written to `BLOOP_FRAME_LOG` when it settles.
+    frame_log: Vec<f32>,
+    /// Windows' "Animation effects" setting is off.
+    system_reduce: bool,
     window: Option<window::Id>,
     controller: Option<platform::Controller>,
     request_id: u64,
@@ -154,8 +156,11 @@ impl Island {
             presence: Presence::new(),
             settings: false,
             confirming_clear: false,
-            size: SLIVER,
-            animation: None,
+            spring: SizeSpring::new(SLIVER.width, SLIVER.height),
+            last_frame: None,
+            region: None,
+            frame_log: Vec::new(),
+            system_reduce: platform::reduce_motion_system(),
             window: None,
             controller: None,
             request_id: 0,
@@ -321,8 +326,9 @@ impl Island {
         if !self.is_open() {
             events.push(iced::time::every(Duration::from_secs(2)).map(|_| Message::FullscreenPoll));
         }
-        if self.animation.is_some() {
-            events.push(iced::time::every(Duration::from_millis(16)).map(Message::Frame));
+        if self.animating() {
+            // Redraw-synced frames, only while the notch is moving.
+            events.push(window::frames().map(Message::Frame));
         }
         let blinking = self.blink_until.is_some_and(|until| self.now < until);
         if self.mood().animated() || blinking {
@@ -354,7 +360,7 @@ impl Island {
         match message {
             Message::Window(id) => {
                 self.window = id;
-                return self.resize();
+                return self.place_window();
             }
             Message::Tick(now) => {
                 self.now = now;
@@ -442,23 +448,32 @@ impl Island {
                 return Task::batch([close, peek]);
             }
             Message::Frame(now) => {
-                if let Some(animation) = &self.animation {
-                    let t = (now.duration_since(animation.start).as_secs_f32() / 0.22).min(1.0);
-                    let eased = 1.0 - (1.0 - t).powi(3);
-                    self.size = Size::new(
-                        animation.from.width + (animation.to.width - animation.from.width) * eased,
-                        animation.from.height
-                            + (animation.to.height - animation.from.height) * eased,
-                    );
-                    if t >= 1.0 {
-                        self.animation = None;
-                    }
-                    let resize = self.resize();
-                    if self.animation.is_none() && self.is_open() && !self.settings {
-                        return Task::batch([resize, widget::operation::focus("prompt")]);
-                    }
-                    return resize;
+                if !self.animating() {
+                    self.last_frame = None;
+                    return Task::none();
                 }
+                let dt = self.last_frame.map_or(1.0 / 60.0, |last| {
+                    now.saturating_duration_since(last).as_secs_f32()
+                });
+                self.last_frame = Some(now);
+                if self.reduce_motion() {
+                    self.spring.snap();
+                } else {
+                    self.spring.step(self.config.motion.stiffness(), dt);
+                }
+                if std::env::var_os("BLOOP_FRAME_LOG").is_some() {
+                    self.frame_log.push(dt);
+                }
+                let region = self.update_region();
+                if self.animating() {
+                    return region;
+                }
+                self.last_frame = None;
+                self.write_frame_log();
+                if self.is_open() && self.hub_closed() {
+                    return Task::batch([region, widget::operation::focus("prompt")]);
+                }
+                return region;
             }
             Message::Input(value) => {
                 if value.len() <= MAX_PROMPT {
@@ -893,11 +908,12 @@ impl Island {
             self.system_light = platform::light_theme_system();
         }
         if shape != shape_before {
-            self.animation = Some(Animation {
-                start: Instant::now(),
-                from: self.size,
-                to: size_for(shape),
-            });
+            let target = self.size_for(shape);
+            self.spring.set_target(target.width, target.height);
+            if self.reduce_motion() {
+                self.spring.snap();
+                tasks.push(self.update_region());
+            }
         }
         if let Some(id) = self.window {
             let hidden = state == State::Hidden;
@@ -919,28 +935,135 @@ impl Island {
         Task::batch(tasks)
     }
 
-    fn resize(&self) -> Task<Message> {
+    /// Drawn notch size right now.
+    pub fn size(&self) -> Size {
+        let (w, h) = self.spring.size();
+        Size::new(w, h)
+    }
+
+    /// Notch size for each presence shape, from the notch width setting.
+    pub fn size_for(&self, shape: Shape) -> Size {
+        let (w, h) = match shape {
+            Shape::Sliver => NotchWidth::SLIVER,
+            Shape::Compact => self.config.notch_width.compact(),
+            Shape::Expanded => self.config.notch_width.panel(),
+        };
+        Size::new(w, h)
+    }
+
+    /// The fixed window: big enough for the open panel.
+    pub fn canvas_size(&self) -> Size {
+        self.size_for(Shape::Expanded)
+    }
+
+    /// Where the notch is drawn inside the fixed window: top-aligned, placed per position.
+    pub fn notch_rect(&self) -> iced::Rectangle {
+        let (canvas, size) = (self.canvas_size(), self.size());
+        let x = match self.config.notch_position {
+            NotchPosition::Centre => (canvas.width - size.width) / 2.0,
+            NotchPosition::Left => 0.0,
+            NotchPosition::Right => canvas.width - size.width,
+        };
+        iced::Rectangle::new(iced::Point::new(x, 0.0), size)
+    }
+
+    pub fn animating(&self) -> bool {
+        !self.spring.settled()
+    }
+
+    fn reduce_motion(&self) -> bool {
+        match self.config.reduce_motion {
+            ReduceMotion::System => self.system_reduce,
+            ReduceMotion::On => true,
+            ReduceMotion::Off => false,
+        }
+    }
+
+    fn hub_closed(&self) -> bool {
+        !self.settings
+    }
+
+    /// Sizes and places the fixed window, then cuts its click-through region.
+    fn place_window(&mut self) -> Task<Message> {
         let Some(id) = self.window else {
             return Task::none();
         };
-        let position = platform::primary_position(self.size);
-        let outline = mascot::notch_outline(self.size, self.shoulder(), self.corner_radius());
+        let canvas = self.canvas_size();
+        let position = platform::place(canvas, self.config.notch_position);
+        self.region = None;
         Task::batch([
-            window::resize(id, self.size),
-            window::run(id, move |window| platform::shape(window, &outline)).discard(),
+            window::resize(id, canvas),
             position
                 .map(|point| window::move_to(id, point))
                 .unwrap_or_else(Task::none),
+            self.update_region(),
         ])
     }
 
+    /// Re-cuts the window region to the drawn outline when it moved by a whole pixel, so
+    /// clicks outside the visible notch reach the windows below.
+    fn update_region(&mut self) -> Task<Message> {
+        let Some(id) = self.window else {
+            return Task::none();
+        };
+        let rect = self.notch_rect();
+        let key = (
+            rect.width.round() as i32,
+            rect.height.round() as i32,
+            rect.x.round() as i32,
+        );
+        if self.region == Some(key) {
+            return Task::none();
+        }
+        self.region = Some(key);
+        let outline: Vec<(f32, f32)> =
+            mascot::notch_outline(rect.size(), self.shoulder(), self.corner_radius())
+                .into_iter()
+                .map(|(x, y)| (x + rect.x, y))
+                .collect();
+        window::run(id, move |window| platform::shape(window, &outline)).discard()
+    }
+
+    /// With `BLOOP_FRAME_LOG=<file>`, appends one line per animation: frame count, the
+    /// longest interval and how many frames took over 2.5 × the median.
+    fn write_frame_log(&mut self) {
+        let Some(path) = std::env::var_os("BLOOP_FRAME_LOG") else {
+            return;
+        };
+        let mut dts = std::mem::take(&mut self.frame_log);
+        if dts.len() < 2 {
+            return;
+        }
+        dts.remove(0); // the first frame has no real interval
+        let mut sorted = dts.clone();
+        sorted.sort_by(f32::total_cmp);
+        let median = sorted[sorted.len() / 2];
+        let longest = sorted[sorted.len() - 1];
+        let slow = dts.iter().filter(|dt| **dt > median * 2.5).count();
+        let line = format!(
+            "frames={} median_ms={:.2} longest_ms={:.2} slow={}\n",
+            dts.len() + 1,
+            median * 1000.0,
+            longest * 1000.0,
+            slow
+        );
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+
     fn corner_radius(&self) -> f32 {
-        (self.size.height / 2.0).min(26.0)
+        (self.size().height / 2.0).min(26.0)
     }
 
     /// Shoulders shrink with the notch so the 5 px sliver keeps its silhouette.
     fn shoulder(&self) -> f32 {
-        (self.size.height * 0.6).clamp(3.0, SHOULDER)
+        (self.size().height * 0.6).clamp(3.0, SHOULDER)
     }
 
     fn scroll(&self) -> Task<Message> {
@@ -980,85 +1103,40 @@ impl Island {
 
     pub fn view(&self) -> Element<'_, Message> {
         let t = self.tokens();
-        let full = self.is_open() && self.animation.is_none();
-        let status = self.presence.message().unwrap_or(self.status_line());
-        let content: Element<'_, Message> = if self.size.height < COMPACT.height - 6.0 {
-            // Sliver (or mid-animation): just the silhouette.
-            Space::new().into()
-        } else if full {
-            let header = row![
-                self.mascot(30.0),
-                column![
-                    text("bloop").size(15).font(MEDIUM),
-                    text(status).size(12).color(t.muted_foreground),
-                ],
-                Space::new().width(Length::Fill),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center);
-            let header = if self.onboarding.is_some() {
-                header
-            } else {
-                header
-                    .push(
-                        self.button(if self.light() { "Dark" } else { "Light" }, Variant::Ghost)
-                            .on_press(Message::Theme),
-                    )
-                    .push(
-                        self.button(
-                            if self.settings { "Back" } else { "Settings" },
-                            Variant::Ghost,
-                        )
-                        .on_press(Message::Settings),
-                    )
-            }
-            .push(
-                self.button("Hide", Variant::Ghost)
-                    .on_press(Message::Toggle),
-            );
-            let separator = container(Space::new())
-                .width(Length::Fill)
-                .height(1)
-                .style(style::separator(t));
-            let body = if self.onboarding.is_some() {
-                self.onboarding_view()
-            } else if self.settings {
-                self.settings_view()
-            } else {
-                self.chat_view()
-            };
-            column![header, separator, body]
-                .spacing(14)
-                .padding(Padding {
-                    top: 10.0,
-                    bottom: 18.0,
-                    left: SHOULDER + 18.0,
-                    right: SHOULDER + 18.0,
-                })
-                .into()
-        } else {
-            let header = row![
-                self.mascot(26.0),
-                text("bloop").size(14).font(MEDIUM),
-                Space::new().width(Length::Fill),
-                text(status).size(12).color(t.muted_foreground),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center);
-            button(header)
-                .on_press(Message::OpenClick)
-                .style(style::btn(t, Variant::Bare))
-                .padding(Padding {
-                    top: 5.0,
-                    bottom: 9.0,
-                    left: SHOULDER + 10.0,
-                    right: SHOULDER + 18.0,
-                })
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+        let shape = self.presence.shape();
+        let target = self.size_for(shape);
+        let rect = self.notch_rect();
+        let content: Element<'_, Message> = match shape {
+            Shape::Sliver => Space::new().into(),
+            Shape::Expanded => self.panel_content(),
+            Shape::Compact => self.pill_content(),
         };
-        let shape = canvas(Notch {
+        // Content is laid out at its final size and revealed as the notch grows into it:
+        // it fades in over the last 40 % of the way and settles 6 px downward.
+        let (now, goal) = (rect.height.max(1.0), target.height.max(1.0));
+        let ratio = now.min(goal) / now.max(goal);
+        let shown = ((ratio - 0.6) / 0.4).clamp(0.0, 1.0);
+        let content = container(content)
+            .width(target.width)
+            .height(target.height)
+            .padding(Padding {
+                top: 6.0 * (1.0 - shown),
+                ..Padding::ZERO
+            });
+        let veil = container(Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(
+                    iced::Color {
+                        a: 1.0 - shown,
+                        ..t.background
+                    }
+                    .into(),
+                ),
+                ..Default::default()
+            });
+        let silhouette = canvas(Notch {
             fill: t.background,
             outline: self.light().then_some(t.border),
             shoulder: self.shoulder(),
@@ -1066,7 +1144,93 @@ impl Island {
         })
         .width(Length::Fill)
         .height(Length::Fill);
-        stack![shape, content]
+        let notch = container(stack![silhouette, content, veil])
+            .width(rect.width)
+            .height(rect.height)
+            .clip(true);
+        container(row![Space::new().width(rect.x), notch])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    /// The open panel: header, separator and chat, setup or hub.
+    fn panel_content(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let status = self.presence.message().unwrap_or(self.status_line());
+        let header = row![
+            self.mascot(30.0),
+            column![
+                text("bloop").size(15).font(MEDIUM),
+                text(status).size(12).color(t.muted_foreground),
+            ],
+            Space::new().width(Length::Fill),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        let header = if self.onboarding.is_some() {
+            header
+        } else {
+            header
+                .push(
+                    self.button(if self.light() { "Dark" } else { "Light" }, Variant::Ghost)
+                        .on_press(Message::Theme),
+                )
+                .push(
+                    self.button(
+                        if self.settings { "Back" } else { "Settings" },
+                        Variant::Ghost,
+                    )
+                    .on_press(Message::Settings),
+                )
+        }
+        .push(
+            self.button("Hide", Variant::Ghost)
+                .on_press(Message::Toggle),
+        );
+        let separator = container(Space::new())
+            .width(Length::Fill)
+            .height(1)
+            .style(style::separator(t));
+        let body = if self.onboarding.is_some() {
+            self.onboarding_view()
+        } else if self.settings {
+            self.settings_view()
+        } else {
+            self.chat_view()
+        };
+        column![header, separator, body]
+            .spacing(14)
+            .padding(Padding {
+                top: 10.0,
+                bottom: 18.0,
+                left: SHOULDER + 18.0,
+                right: SHOULDER + 18.0,
+            })
+            .into()
+    }
+
+    /// The pill shown on hover and for peeks.
+    fn pill_content(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let status = self.presence.message().unwrap_or(self.status_line());
+        let header = row![
+            self.mascot(26.0),
+            text("bloop").size(14).font(MEDIUM),
+            Space::new().width(Length::Fill),
+            text(status).size(12).color(t.muted_foreground),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        button(header)
+            .on_press(Message::OpenClick)
+            .style(style::btn(t, Variant::Bare))
+            .padding(Padding {
+                top: 5.0,
+                bottom: 9.0,
+                left: SHOULDER + 10.0,
+                right: SHOULDER + 18.0,
+            })
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -1355,17 +1519,10 @@ fn field<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Elemen
         .into()
 }
 
-fn size_for(shape: Shape) -> Size {
-    match shape {
-        Shape::Sliver => SLIVER,
-        Shape::Compact => COMPACT,
-        Shape::Expanded => EXPANDED,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bloop::config::{NotchPosition, ReduceMotion};
     use bloop::onboarding::{Choice, Step};
 
     fn ready() -> Island {
@@ -1390,21 +1547,69 @@ mod tests {
         assert!(app.request.is_none());
     }
 
+    /// Feeds frames 1/60 s apart starting at `from`; returns the time after the last one.
+    fn run_frames(app: &mut Island, from: Instant, count: u32) -> Instant {
+        let mut at = from;
+        for _ in 0..count {
+            let _ = app.update(Message::Frame(at));
+            at += Duration::from_micros(16_667);
+        }
+        at
+    }
+
     #[test]
     fn animation_can_reverse_and_stops_at_rest() {
         let mut app = ready();
-        assert_eq!(app.size, SLIVER);
+        app.config.reduce_motion = ReduceMotion::Off;
+        assert_eq!(app.size(), app.size_for(Shape::Sliver));
         let _ = app.present(Event::Shortcut);
-        let start = app.animation.as_ref().unwrap().start;
-        let _ = app.update(Message::Frame(start + Duration::from_millis(90)));
-        assert!(app.size.width > SLIVER.width && app.size.width < EXPANDED.width);
-        let midpoint = app.size;
+        assert!(app.animating());
+        let t = run_frames(&mut app, Instant::now(), 6);
+        let panel = app.size_for(Shape::Expanded);
+        let mid = app.size();
+        assert!(mid.height > 5.0 && mid.height < panel.height, "{mid:?}");
         let _ = app.present(Event::Shortcut);
-        assert_eq!(app.animation.as_ref().unwrap().from, midpoint);
-        let start = app.animation.as_ref().unwrap().start;
-        let _ = app.update(Message::Frame(start + Duration::from_secs(1)));
-        assert_eq!(app.size, SLIVER);
-        assert!(app.animation.is_none());
+        // Momentum carries on for a moment: no jump back.
+        let t = run_frames(&mut app, t, 1);
+        assert!(app.size().height >= mid.height - 0.5, "{:?}", app.size());
+        run_frames(&mut app, t, 180);
+        assert_eq!(app.size(), app.size_for(Shape::Sliver));
+        assert!(!app.animating());
+    }
+
+    #[test]
+    fn reduce_motion_snaps() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::On;
+        let _ = app.present(Event::Shortcut);
+        assert_eq!(app.size(), app.size_for(Shape::Expanded));
+        assert!(!app.animating());
+    }
+
+    #[test]
+    fn no_frames_when_settled() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::Off;
+        assert!(!app.animating());
+        let _ = app.present(Event::Shortcut);
+        run_frames(&mut app, Instant::now(), 120);
+        assert!(!app.animating());
+        assert_eq!(app.size(), app.size_for(Shape::Expanded));
+    }
+
+    #[test]
+    fn notch_rect_follows_position() {
+        let mut app = ready();
+        let canvas = app.canvas_size();
+        let width = app.size().width;
+        app.config.notch_position = NotchPosition::Centre;
+        assert_eq!(app.notch_rect().x, (canvas.width - width) / 2.0);
+        app.config.notch_position = NotchPosition::Left;
+        assert_eq!(app.notch_rect().x, 0.0);
+        app.config.notch_position = NotchPosition::Right;
+        assert_eq!(app.notch_rect().x, canvas.width - width);
+        assert_eq!(app.notch_rect().y, 0.0);
+        assert_eq!(canvas, Size::new(540.0, 580.0));
     }
 
     #[test]
@@ -1413,7 +1618,8 @@ mod tests {
         let _ = app.update(Message::PeekTest);
         assert_eq!(app.presence.state(), State::Peek);
         assert!(app.presence.message().is_some());
-        assert_eq!(app.animation.as_ref().unwrap().to, COMPACT);
+        let (w, h) = (app.spring.w.target, app.spring.h.target);
+        assert_eq!(Size::new(w, h), app.size_for(Shape::Compact));
     }
 
     #[test]
