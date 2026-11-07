@@ -164,6 +164,196 @@ pub fn hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+const API_URL: &str = "https://api.github.com/repos/LaurentMaxhuni/bloop/releases/latest";
+const MAX_API_REPLY: usize = 256 * 1024;
+const MAX_CHECKSUM_FILE: usize = 1024;
+
+/// HTTP client for updates: follows at most 5 redirects, and only to GitHub's own HTTPS
+/// hosts, so a release asset can never bounce the download somewhere else.
+fn client() -> Result<reqwest::Client, Error> {
+    let policy = reqwest::redirect::Policy::custom(|attempt| {
+        let url = attempt.url();
+        let host = url.host_str().unwrap_or_default();
+        let github = url.scheme() == "https"
+            && (host == "github.com" || host.ends_with(".githubusercontent.com"));
+        if attempt.previous().len() >= 5 || !github {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    });
+    Ok(reqwest::Client::builder()
+        .redirect(policy)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .user_agent("bloop-updater")
+        .build()?)
+}
+
+/// Reads at most `cap` bytes of a successful response.
+async fn read_capped(mut response: reqwest::Response, cap: usize) -> Result<Vec<u8>, Error> {
+    if !response.status().is_success() {
+        return Err(Error::Network(format!(
+            "GitHub returned HTTP {}.",
+            response.status().as_u16()
+        )));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len() + chunk.len() > cap {
+            return Err(Error::Protocol("GitHub's reply was too large.".into()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// The newest published release, if it is newer than `current`.
+pub async fn latest(current: &Version) -> Result<Option<Release>, Error> {
+    latest_from(API_URL, current).await
+}
+
+pub async fn latest_from(api_url: &str, current: &Version) -> Result<Option<Release>, Error> {
+    let response = client()?
+        .get(api_url)
+        .header("Accept", "application/vnd.github+json")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await?;
+    let body = read_capped(response, MAX_API_REPLY).await?;
+    parse_release(&body, current)
+}
+
+/// Downloads a release found by [`latest`]; its asset links must point at GitHub.
+pub async fn download(
+    release: &Release,
+    dir: &Path,
+    progress: impl FnMut(u8),
+) -> Result<std::path::PathBuf, Error> {
+    let from_github = |url: &str| url.starts_with("https://github.com/");
+    if !from_github(&release.installer_url) || !from_github(&release.checksum_url) {
+        return Err(Error::Protocol(
+            "The release's files are not on GitHub.".into(),
+        ));
+    }
+    download_from(release, dir, progress).await
+}
+
+/// Downloads the installer into `dir`, checking size and SHA-256 as it streams. The file is
+/// written as `.part` and only renamed once its checksum matches; a sidecar `.sha256` lets
+/// [`ready`] re-check it later. Older installers in `dir` are removed.
+pub async fn download_from(
+    release: &Release,
+    dir: &Path,
+    mut progress: impl FnMut(u8),
+) -> Result<std::path::PathBuf, Error> {
+    use tokio::io::AsyncWriteExt;
+    let name = release.installer_name();
+    let client = client()?;
+    let checksum_text = read_capped(
+        client
+            .get(&release.checksum_url)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await?,
+        MAX_CHECKSUM_FILE,
+    )
+    .await?;
+    let expected = parse_checksum(&String::from_utf8_lossy(&checksum_text), &name)
+        .ok_or_else(|| Error::Protocol("The release's checksum file is not valid.".into()))?;
+
+    tokio::fs::create_dir_all(dir).await?;
+    let part = dir.join(format!("{name}.part"));
+    let target = dir.join(&name);
+    let limit = release.size.min(MAX_INSTALLER);
+    let result: Result<[u8; 32], Error> = async {
+        let mut response = client
+            .get(&release.installer_url)
+            .timeout(std::time::Duration::from_secs(600))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(Error::Network(format!(
+                "GitHub returned HTTP {}.",
+                response.status().as_u16()
+            )));
+        }
+        let mut file = tokio::fs::File::create(&part).await?;
+        let mut hasher = Sha256::new();
+        let (mut written, mut shown) = (0u64, u8::MAX);
+        while let Some(chunk) = response.chunk().await? {
+            written += chunk.len() as u64;
+            if written > limit {
+                return Err(Error::Protocol(
+                    "The download is larger than announced.".into(),
+                ));
+            }
+            hasher.update(&chunk);
+            file.write_all(&chunk).await?;
+            let percent = (written * 100 / limit.max(1)) as u8;
+            if percent != shown {
+                shown = percent;
+                progress(percent);
+            }
+        }
+        file.flush().await?;
+        if written != release.size {
+            return Err(Error::Protocol("The download ended early.".into()));
+        }
+        Ok(hasher.finalize().into())
+    }
+    .await;
+    let digest = match result {
+        Ok(digest) => digest,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            return Err(error);
+        }
+    };
+    if digest != expected {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(Error::Protocol(
+            "The download's checksum didn't match; it was discarded.".into(),
+        ));
+    }
+    tokio::fs::rename(&part, &target).await?;
+    tokio::fs::write(
+        dir.join(format!("{name}.sha256")),
+        format!("{}  {name}\n", hex(&expected)),
+    )
+    .await?;
+    // Keep only this installer.
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            if file.starts_with("bloop-setup-") && !file.starts_with(&name) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(target)
+}
+
+/// The newest already-downloaded installer newer than `current` whose bytes still match its
+/// saved checksum. Unfinished `.part` files never count.
+pub fn ready(dir: &Path, current: &Version) -> Option<(Version, std::path::PathBuf)> {
+    let mut found: Vec<(Version, std::path::PathBuf)> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            let version = Version::parse(file.strip_prefix("bloop-setup-")?.strip_suffix(".exe")?)?;
+            (version > *current).then_some((version, entry.path()))
+        })
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.into_iter().find(|(version, path)| {
+        let name = installer_name(version);
+        let sidecar = std::fs::read_to_string(dir.join(format!("{name}.sha256"))).ok();
+        let expected = sidecar.and_then(|text| parse_checksum(&text, &name));
+        expected.is_some() && sha256_file(path).ok() == expected
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
