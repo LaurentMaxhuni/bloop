@@ -255,3 +255,23 @@ fn ready_ignores_part_and_older() {
     );
     assert!(update::ready(&dir, &v("0.5.0")).is_none());
 }
+
+#[tokio::test]
+async fn no_releases_yet_is_up_to_date() {
+    // GitHub answers /releases/latest with 404 while a repo has no releases.
+    let base = serve(HashMap::new()).await;
+    assert_eq!(
+        update::latest_from(&format!("{base}/latest"), &v("0.2.0"))
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+/// Real GitHub check (network): `cargo test --test update -- --ignored`.
+#[tokio::test]
+#[ignore = "talks to api.github.com"]
+async fn real_github_latest_does_not_error() {
+    let result = update::latest(&Version::current()).await;
+    assert!(result.is_ok(), "{result:?}");
+}

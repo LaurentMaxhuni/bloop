@@ -219,6 +219,10 @@ pub async fn latest_from(api_url: &str, current: &Version) -> Result<Option<Rele
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        // GitHub's answer while the repository has no published release yet.
+        return Ok(None);
+    }
     let body = read_capped(response, MAX_API_REPLY).await?;
     parse_release(&body, current)
 }

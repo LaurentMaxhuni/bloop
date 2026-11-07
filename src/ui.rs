@@ -21,6 +21,7 @@ use bloop::{
     provider::{self, StreamEvent},
     secrets::{self, KeySource},
     storage,
+    update::{self, Release, Version},
 };
 use iced::{
     Alignment, Element, Length, Padding, Size, Subscription, Task, Theme,
@@ -40,6 +41,8 @@ use std::{
 pub const SLIVER: Size = Size::new(120.0, 5.0);
 /// Width of the concave curves where the notch meets the top of the screen.
 const SHOULDER: f32 = 10.0;
+/// Time between scheduled update checks.
+const UPDATE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// Collapsed and untouched for this long, the mascot dozes off.
 const NAP_AFTER: Duration = Duration::from_secs(45);
 
@@ -107,6 +110,27 @@ pub enum Message {
     SetNotchPosition(NotchPosition),
     SetMascot(bool),
     SetHoverDelay(u16),
+    /// Coarse clock for the update schedule.
+    UpdateTick(Instant),
+    CheckUpdates {
+        manual: bool,
+    },
+    /// Result of a check; `true` when the user asked for it.
+    UpdateChecked(bool, Result<Option<Release>, String>),
+    UpdateProgress(Version, u8),
+    UpdateReady(Result<(Version, PathBuf), String>),
+    InstallUpdate,
+    SetAutoUpdate(bool),
+}
+
+/// Where self-update stands.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateState {
+    Idle,
+    Checking,
+    Downloading(Version, u8),
+    Ready(Version, PathBuf),
+    Failed(String),
 }
 
 pub struct Island {
@@ -136,6 +160,15 @@ pub struct Island {
     icons_ready: bool,
     /// How many times the window was (re)placed; lets tests see display-change handling.
     placements: u32,
+    update_state: UpdateState,
+    /// The last manual check found nothing newer.
+    up_to_date: bool,
+    /// When the next scheduled update check is due.
+    next_check: Instant,
+    /// The "ready" peek waits for a streaming reply to finish.
+    update_peek_pending: bool,
+    /// Starts the downloaded installer; replaced in tests.
+    installer_launcher: fn(&std::path::Path) -> Result<(), String>,
     window: Option<window::Id>,
     controller: Option<platform::Controller>,
     request_id: u64,
@@ -186,6 +219,11 @@ impl Island {
             system_reduce: platform::reduce_motion_system(),
             icons_ready: false,
             placements: 0,
+            update_state: UpdateState::Idle,
+            up_to_date: false,
+            next_check: Instant::now() + Duration::from_secs(30),
+            update_peek_pending: false,
+            installer_launcher: platform::launch_installer,
             window: None,
             controller: None,
             request_id: 0,
@@ -356,6 +394,9 @@ impl Island {
         if !self.is_open() {
             events.push(iced::time::every(Duration::from_secs(2)).map(|_| Message::FullscreenPoll));
         }
+        if self.config.auto_update {
+            events.push(iced::time::every(Duration::from_secs(15)).map(Message::UpdateTick));
+        }
         if self.animating() {
             // Redraw-synced frames, only while the notch is moving.
             events.push(window::frames().map(Message::Frame));
@@ -426,6 +467,12 @@ impl Island {
                 }
                 self.presence
                     .set_hover_delay(Duration::from_millis(self.config.hover_delay_ms.into()));
+                let ready = self
+                    .updates_dir()
+                    .and_then(|dir| update::ready(&dir, &Version::current()));
+                if let Some((version, path)) = ready {
+                    self.update_state = UpdateState::Ready(version, path);
+                }
                 let layout = self.relayout(false);
                 if !self.config.onboarded {
                     return Task::batch([layout, self.start_setup()]);
@@ -466,7 +513,14 @@ impl Island {
                 platform::Event::ShortcutApplied => self.desktop_warning.clear(),
             },
             Message::Toggle => return self.present(Event::Shortcut),
-            Message::OpenClick => return self.present(Event::Click),
+            Message::OpenClick => {
+                if self.presence.state() == State::Peek
+                    && self.presence.message() == self.ready_text().as_deref()
+                {
+                    return self.update(Message::InstallUpdate);
+                }
+                return self.present(Event::Click);
+            }
             Message::Cursor(true) => return self.present(Event::CursorEntered),
             Message::Cursor(false) => return self.present(Event::CursorLeft),
             Message::Focus(true) => {}
@@ -585,14 +639,16 @@ impl Island {
                         presence = Task::batch([presence, failed]);
                     }
                 }
-                return Task::batch([self.persist(), self.scroll(), presence]);
+                let update = self.peek_update_if_pending();
+                return Task::batch([self.persist(), self.scroll(), presence, update]);
             }
             Message::Chunk(..) | Message::Finished(..) => {}
             Message::Cancel => {
                 self.cancel();
                 self.status = "Stopped. Partial reply kept out of model context.".into();
                 self.react(Mood::Oops, 0.8);
-                return self.persist();
+                let update = self.peek_update_if_pending();
+                return Task::batch([self.persist(), update]);
             }
             Message::Settings => {
                 self.hub = match self.hub {
@@ -756,6 +812,74 @@ impl Island {
                 Err(error) => self.autostart_error = error,
             },
             Message::FontLoaded(ok) => self.icons_ready = ok,
+            Message::UpdateTick(now) => {
+                let idle = matches!(
+                    self.update_state,
+                    UpdateState::Idle | UpdateState::Failed(_)
+                );
+                if self.config.auto_update && idle && now >= self.next_check {
+                    self.next_check = now + UPDATE_EVERY;
+                    return self.update(Message::CheckUpdates { manual: false });
+                }
+            }
+            Message::CheckUpdates { manual } => {
+                if matches!(
+                    self.update_state,
+                    UpdateState::Checking | UpdateState::Downloading(..) | UpdateState::Ready(..)
+                ) {
+                    return Task::none();
+                }
+                self.update_state = UpdateState::Checking;
+                self.up_to_date = false;
+                return Task::perform(
+                    async {
+                        update::latest(&Version::current())
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    move |result| Message::UpdateChecked(manual, result),
+                );
+            }
+            Message::UpdateChecked(manual, result) => match result {
+                Ok(Some(release)) => return self.start_download(release),
+                Ok(None) => {
+                    self.update_state = UpdateState::Idle;
+                    self.up_to_date = manual;
+                }
+                Err(error) => {
+                    // Scheduled checks fail quietly and simply try again later.
+                    self.update_state = if manual {
+                        UpdateState::Failed(format!("Couldn't check for updates: {error}"))
+                    } else {
+                        UpdateState::Idle
+                    };
+                }
+            },
+            Message::UpdateProgress(version, percent) => {
+                if let UpdateState::Downloading(current, _) = &self.update_state
+                    && *current == version
+                {
+                    self.update_state = UpdateState::Downloading(version, percent);
+                }
+            }
+            Message::UpdateReady(result) => match result {
+                Ok((version, path)) => {
+                    self.update_state = UpdateState::Ready(version, path);
+                    self.update_peek_pending = true;
+                    return self.peek_update_if_pending();
+                }
+                Err(error) => {
+                    self.update_state =
+                        UpdateState::Failed(format!("Couldn't download the update: {error}"));
+                }
+            },
+            Message::InstallUpdate => return self.install_update(),
+            Message::SetAutoUpdate(on) => {
+                if on {
+                    self.next_check = Instant::now();
+                }
+                return self.apply_live(|c| c.auto_update = on);
+            }
             Message::OpenHub(page) => {
                 if self.hub.is_none() {
                     self.draft_config = self.config.clone();
@@ -1072,6 +1196,97 @@ impl Island {
 
     /// Sizes and places the fixed window, then cuts its click-through region.
     /// Applies an appearance change to the saved and the draft config and saves it now.
+    fn updates_dir(&self) -> Option<PathBuf> {
+        Some(self.db_path.as_ref()?.parent()?.join("updates"))
+    }
+
+    fn ready_text(&self) -> Option<String> {
+        match &self.update_state {
+            UpdateState::Ready(version, _) => {
+                Some(format!("Update {version} ready — click to restart"))
+            }
+            _ => None,
+        }
+    }
+
+    /// One line for the hub's Updates section.
+    pub fn update_status(&self) -> String {
+        match &self.update_state {
+            UpdateState::Idle if self.up_to_date => "Up to date".into(),
+            UpdateState::Idle => String::new(),
+            UpdateState::Checking => "Checking…".into(),
+            UpdateState::Downloading(version, percent) => {
+                format!("Downloading {version} ({percent} %)")
+            }
+            UpdateState::Ready(version, _) => format!("{version} ready"),
+            UpdateState::Failed(error) => error.clone(),
+        }
+    }
+
+    fn start_download(&mut self, release: Release) -> Task<Message> {
+        let Some(dir) = self.updates_dir() else {
+            self.update_state =
+                UpdateState::Failed("Couldn't download the update: no data folder.".into());
+            return Task::none();
+        };
+        let version = release.version;
+        self.update_state = UpdateState::Downloading(version, 0);
+        Task::run(
+            iced::stream::channel(8, async move |mut output| {
+                let mut progress = output.clone();
+                let result = update::download(&release, &dir, |percent| {
+                    let _ = progress.try_send(Message::UpdateProgress(version, percent));
+                })
+                .await
+                .map(|path| (version, path))
+                .map_err(|e| e.to_string());
+                let _ = output.send(Message::UpdateReady(result)).await;
+            }),
+            |message| message,
+        )
+    }
+
+    /// Shows "Update X ready" now, or after the reply that is streaming.
+    fn peek_update_if_pending(&mut self) -> Task<Message> {
+        if !self.update_peek_pending || self.request.is_some() {
+            return Task::none();
+        }
+        self.update_peek_pending = false;
+        match self.ready_text() {
+            Some(text) => self.present(Event::Peek(text)),
+            None => Task::none(),
+        }
+    }
+
+    /// Saves, starts the installer (which reopens bloop) and quits; stays open on failure.
+    fn install_update(&mut self) -> Task<Message> {
+        let UpdateState::Ready(_, path) = &self.update_state else {
+            return Task::none();
+        };
+        if self.request.is_some() {
+            return Task::none();
+        }
+        let path = path.clone();
+        if let (Some(db), false) = (&self.db_path, self.storage_disabled)
+            && let Err(error) = storage::save(db, &self.config, &self.turns)
+        {
+            self.update_state =
+                UpdateState::Failed(format!("Couldn't save before updating: {error}"));
+            return Task::none();
+        }
+        match (self.installer_launcher)(&path) {
+            Ok(()) => {
+                self.quitting = true;
+                iced::exit()
+            }
+            Err(error) => {
+                self.update_state =
+                    UpdateState::Failed(format!("Couldn't start the update: {error}"));
+                Task::none()
+            }
+        }
+    }
+
     fn apply_live(&mut self, change: impl Fn(&mut Config)) -> Task<Message> {
         change(&mut self.config);
         change(&mut self.draft_config);
@@ -1361,7 +1576,13 @@ impl Island {
     /// The pill shown on hover and for peeks.
     fn pill_content(&self) -> Element<'_, Message> {
         let t = self.tokens();
-        let status = self.presence.message().unwrap_or(self.status_line());
+        let ready = self.ready_text();
+        let status = self
+            .presence
+            .message()
+            .map(str::to_owned)
+            .or(ready)
+            .unwrap_or_else(|| self.status_line().to_owned());
         let header = row![
             self.mascot(26.0),
             text("bloop").size(14).font(MEDIUM),
@@ -1619,6 +1840,7 @@ mod tests {
     use bloop::config::{Accent, NotchPosition, NotchWidth, ReduceMotion};
     use bloop::motion::Feel;
     use bloop::onboarding::{Choice, Step};
+    use bloop::update::{Release, Version};
 
     fn ready() -> Island {
         let (mut app, _) = Island::new();
@@ -2065,6 +2287,100 @@ mod tests {
         assert_eq!(app.tile_summary(HubPage::Notch), "M · Centre");
         app.config.provider = Provider::ClaudeCode;
         assert_eq!(app.tile_summary(HubPage::Model), "Claude Code");
+    }
+
+    fn sample_release() -> Release {
+        Release {
+            version: Version::parse("0.9.0").unwrap(),
+            installer_url: "https://github.com/LaurentMaxhuni/bloop/releases/download/v0.9.0/bloop-setup-0.9.0.exe".into(),
+            checksum_url: "https://github.com/LaurentMaxhuni/bloop/releases/download/v0.9.0/bloop-setup-0.9.0.exe.sha256".into(),
+            size: 1000,
+        }
+    }
+
+    fn ready_update() -> Message {
+        Message::UpdateReady(Ok((
+            Version::parse("0.9.0").unwrap(),
+            PathBuf::from("C:/x/bloop-setup-0.9.0.exe"),
+        )))
+    }
+
+    #[test]
+    fn scheduled_check_failure_is_silent() {
+        let mut app = ready();
+        let _ = app.update(Message::UpdateChecked(false, Err("offline".into())));
+        assert_eq!(app.update_state, UpdateState::Idle);
+        assert!(app.update_status().contains("Up to date") || app.update_status().is_empty());
+    }
+
+    #[test]
+    fn manual_check_failure_shows_error() {
+        let mut app = ready();
+        let _ = app.update(Message::UpdateChecked(true, Err("offline".into())));
+        assert!(matches!(app.update_state, UpdateState::Failed(_)));
+        assert_eq!(app.update_status(), "Couldn't check for updates: offline");
+    }
+
+    #[test]
+    fn newer_release_starts_download() {
+        let mut app = ready();
+        let _ = app.update(Message::UpdateChecked(false, Ok(Some(sample_release()))));
+        assert_eq!(
+            app.update_state,
+            UpdateState::Downloading(Version::parse("0.9.0").unwrap(), 0)
+        );
+        let _ = app.update(Message::UpdateProgress(
+            Version::parse("0.9.0").unwrap(),
+            42,
+        ));
+        assert_eq!(app.update_status(), "Downloading 0.9.0 (42 %)");
+    }
+
+    #[test]
+    fn ready_peeks_unless_replying() {
+        let mut app = ready();
+        app.input = "hello".into();
+        let _task = app.update(Message::Send);
+        assert!(app.request.is_some());
+        let _ = app.update(ready_update());
+        assert_ne!(
+            app.presence.message(),
+            Some("Update 0.9.0 ready — click to restart")
+        );
+        let id = app.request_id;
+        let _ = app.update(Message::Finished(id, Ok(())));
+        assert_eq!(
+            app.presence.message(),
+            Some("Update 0.9.0 ready — click to restart")
+        );
+        assert_eq!(app.update_status(), "0.9.0 ready");
+    }
+
+    #[test]
+    fn install_failure_keeps_bloop_open() {
+        let mut app = ready();
+        app.installer_launcher = |_| Err("blocked by antivirus".into());
+        let _ = app.update(ready_update());
+        let _ = app.update(Message::InstallUpdate);
+        assert!(!app.quitting);
+        assert!(matches!(app.update_state, UpdateState::Failed(_)));
+        assert!(app.update_status().contains("blocked by antivirus"));
+    }
+
+    #[test]
+    fn auto_update_off_skips_scheduled_checks() {
+        let mut app = ready();
+        let later = Instant::now() + Duration::from_secs(60);
+        app.config.auto_update = false;
+        let _ = app.update(Message::UpdateTick(later));
+        assert_eq!(app.update_state, UpdateState::Idle);
+        app.config.auto_update = true;
+        let _ = app.update(Message::UpdateTick(later));
+        assert_eq!(app.update_state, UpdateState::Checking);
+        // Not again until six hours later.
+        app.update_state = UpdateState::Idle;
+        let _ = app.update(Message::UpdateTick(later + Duration::from_secs(60)));
+        assert_eq!(app.update_state, UpdateState::Idle);
     }
 
     #[test]

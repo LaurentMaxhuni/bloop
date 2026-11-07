@@ -196,6 +196,8 @@ pub struct Config {
     pub notch_width: NotchWidth,
     pub notch_position: NotchPosition,
     pub mascot: bool,
+    /// Look for new versions on GitHub every six hours.
+    pub auto_update: bool,
     pub hover_delay_ms: u16,
 }
 
@@ -225,6 +227,7 @@ struct ConfigFields {
     notch_position: NotchPosition,
     mascot: bool,
     hover_delay_ms: u16,
+    auto_update: bool,
 }
 
 impl Default for ConfigFields {
@@ -242,6 +245,7 @@ impl Default for ConfigFields {
             notch_width: c.notch_width,
             notch_position: c.notch_position,
             mascot: c.mascot,
+            auto_update: c.auto_update,
             hover_delay_ms: c.hover_delay_ms,
         }
     }
@@ -266,6 +270,7 @@ impl From<StoredConfig> for Config {
             notch_width: f.notch_width,
             notch_position: f.notch_position,
             mascot: f.mascot,
+            auto_update: f.auto_update,
             // Hand-edited or future values snap to the nearest choice instead of failing to load.
             hover_delay_ms: *HOVER_DELAYS_MS
                 .iter()
@@ -290,6 +295,7 @@ impl Default for Config {
             notch_width: NotchWidth::M,
             notch_position: NotchPosition::Centre,
             mascot: true,
+            auto_update: true,
             hover_delay_ms: 150,
         }
     }
@@ -429,6 +435,15 @@ mod tests {
         assert_eq!(back.theme, ThemeChoice::System);
         assert!(!back.mascot);
         assert_eq!(back.hover_delay_ms, 300);
+    }
+
+    #[test]
+    fn config_auto_update_defaults_on() {
+        assert!(super::Config::default().auto_update);
+        let old: super::Config = serde_json::from_str("{}").unwrap();
+        assert!(old.auto_update);
+        let off: super::Config = serde_json::from_str(r#"{"auto_update":false}"#).unwrap();
+        assert!(!off.auto_update);
     }
 
     #[test]

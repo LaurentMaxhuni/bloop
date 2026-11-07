@@ -56,6 +56,41 @@ fn theme_label(theme: ThemeChoice) -> &'static str {
 }
 
 impl Island {
+    /// Version, update status and controls on the Model & shortcut page.
+    fn updates_section(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let ready = matches!(self.update_state, super::UpdateState::Ready(..));
+        let busy = matches!(
+            self.update_state,
+            super::UpdateState::Checking | super::UpdateState::Downloading(..)
+        );
+        let status = self.update_status();
+        let mut actions =
+            row![self.button("Check now", Variant::Outline).on_press_maybe(
+                (!busy && !ready).then_some(Message::CheckUpdates { manual: true })
+            ),]
+            .spacing(8);
+        if ready {
+            actions = actions.push(
+                self.button("Restart to update", Variant::Primary)
+                    .on_press_maybe(self.request.is_none().then_some(Message::InstallUpdate)),
+            );
+        }
+        field(
+            "Updates",
+            column![
+                text(format!("bloop {}", bloop::update::Version::current())).size(14),
+                text(status).size(12).color(t.muted_foreground),
+                actions,
+                toggler(self.config.auto_update)
+                    .label("Check for updates automatically")
+                    .text_size(14)
+                    .on_toggle(Message::SetAutoUpdate),
+            ]
+            .spacing(8),
+        )
+    }
+
     /// One line under each tile's title describing its current values.
     pub(super) fn tile_summary(&self, page: HubPage) -> String {
         let c = &self.config;
@@ -329,6 +364,7 @@ impl Island {
             self.autostart_toggle(),
             self.button("Show setup again", Variant::Ghost)
                 .on_press(Message::ShowSetup),
+            self.updates_section(),
         ]
         .spacing(16);
         if !self.status.is_empty() {

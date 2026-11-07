@@ -669,6 +669,21 @@ pub fn light_theme_system() -> bool {
     }
 }
 
+/// Starts a downloaded installer silently; it waits for bloop to quit, installs, and opens
+/// bloop again (`/RELAUNCH=1`). Previously chosen setup options are kept.
+pub fn launch_installer(path: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new(path)
+        .args([
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/RELAUNCH=1",
+        ])
+        .spawn()
+        .map(drop)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
