@@ -21,6 +21,7 @@ pub enum Icon {
 }
 
 impl Icon {
+    #[cfg(test)]
     pub const ALL: [Icon; 9] = [
         Icon::Sun,
         Icon::Moon,

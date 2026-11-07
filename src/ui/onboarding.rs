@@ -5,7 +5,10 @@ use crate::{
     mascot::Notch,
     style::{self, MEDIUM, Tokens, Variant},
 };
-use bloop::onboarding::{Detection, Onboarding, Step};
+use bloop::{
+    config::ThemeChoice,
+    onboarding::{Detection, Onboarding, Step},
+};
 use iced::{
     Alignment, Color, Element, Length,
     widget::{Space, button, canvas, column, container, pick_list, row, scrollable, text, toggler},
@@ -264,7 +267,7 @@ impl Island {
     fn make_it_yours(&self) -> Element<'_, Message> {
         let preview = |light: bool| {
             let p = Tokens::new(light);
-            let selected = self.light() == light;
+            let selected = self.config.theme != ThemeChoice::System && self.light() == light;
             button(
                 column![
                     container(mini_notch(
@@ -299,6 +302,19 @@ impl Island {
         column![
             self.heading("Make it yours", "Pick a look. You can switch any time."),
             row![preview(false), preview(true)].spacing(12),
+            self.button(
+                if self.config.theme == ThemeChoice::System {
+                    "Following Windows"
+                } else {
+                    "Follow Windows instead"
+                },
+                if self.config.theme == ThemeChoice::System {
+                    Variant::Secondary
+                } else {
+                    Variant::Ghost
+                },
+            )
+            .on_press(Message::SetTheme(ThemeChoice::System)),
             self.autostart_toggle(),
         ]
         .spacing(18)

@@ -53,6 +53,7 @@ pub struct Presence {
     peek_until: Option<Instant>,
     message: Option<String>,
     queued: Option<String>,
+    hover_delay: Duration,
 }
 
 impl Default for Presence {
@@ -62,6 +63,11 @@ impl Default for Presence {
 }
 
 impl Presence {
+    /// How long the cursor rests on the sliver before the pill appears.
+    pub fn set_hover_delay(&mut self, delay: Duration) {
+        self.hover_delay = delay;
+    }
+
     pub fn new() -> Self {
         Self {
             state: State::Sliver,
@@ -72,6 +78,7 @@ impl Presence {
             peek_until: None,
             message: None,
             queued: None,
+            hover_delay: HOVER_DELAY,
         }
     }
 
@@ -107,7 +114,7 @@ impl Presence {
                 self.inside = true;
                 self.leave_at = None;
                 if self.state == State::Sliver {
-                    self.hover_at = Some(now + HOVER_DELAY);
+                    self.hover_at = Some(now + self.hover_delay);
                 }
             }
             Event::CursorLeft => {

@@ -1,4 +1,7 @@
+mod hub;
 mod onboarding;
+
+pub use hub::HubPage;
 
 use crate::{
     icons::{self, Icon},
@@ -8,9 +11,12 @@ use crate::{
     style::{self, MEDIUM, Tokens, Variant},
 };
 use bloop::{
-    config::{Config, NotchPosition, NotchWidth, Provider, ReduceMotion, ThemeChoice},
+    config::{
+        Accent, Config, HOVER_DELAYS_MS, NotchPosition, NotchWidth, Provider, ReduceMotion,
+        ThemeChoice,
+    },
     model::{self, MAX_PROMPT, MAX_TURNS, Turn},
-    motion::SizeSpring,
+    motion::{Feel, SizeSpring},
     onboarding::{self as setup, Choice, Detection, Onboarding},
     provider::{self, StreamEvent},
     secrets::{self, KeySource},
@@ -92,6 +98,15 @@ pub enum Message {
     ShowSetup,
     /// The icon font finished loading (true) or failed (false: keep word labels).
     FontLoaded(bool),
+    OpenHub(HubPage),
+    SetTheme(ThemeChoice),
+    SetAccent(Accent),
+    SetFeel(Feel),
+    SetReduceMotion(ReduceMotion),
+    SetNotchWidth(NotchWidth),
+    SetNotchPosition(NotchPosition),
+    SetMascot(bool),
+    SetHoverDelay(u16),
 }
 
 pub struct Island {
@@ -104,7 +119,8 @@ pub struct Island {
     storage_warning: String,
     loading: bool,
     presence: Presence,
-    settings: bool,
+    /// The customization hub page, when the hub is open.
+    hub: Option<HubPage>,
     confirming_clear: bool,
     /// Drawn notch size; the OS window stays at `canvas_size` and never animates.
     spring: SizeSpring,
@@ -159,7 +175,7 @@ impl Island {
             storage_warning: String::new(),
             loading: true,
             presence: Presence::new(),
-            settings: false,
+            hub: None,
             confirming_clear: false,
             spring: SizeSpring::new(SLIVER.width, SLIVER.height),
             last_frame: None,
@@ -256,7 +272,7 @@ impl Island {
         if !self.is_open() && self.now.saturating_duration_since(self.last_activity) >= NAP_AFTER {
             return Mood::Sleepy;
         }
-        if self.is_open() && !self.settings && !self.input.is_empty() {
+        if self.is_open() && self.hub.is_none() && !self.input.is_empty() {
             return Mood::Typing;
         }
         Mood::Idle
@@ -273,6 +289,9 @@ impl Island {
     }
 
     fn mascot(&self, size: f32) -> Element<'_, Message> {
+        if !self.config.mascot {
+            return Space::new().width(0).into();
+        }
         let t = self.tokens();
         let mood = self.mood();
         let since = self
@@ -402,9 +421,13 @@ impl Island {
                 if let Some(controller) = &self.controller {
                     controller.shortcut(self.config.shortcut.clone());
                 }
+                self.presence
+                    .set_hover_delay(Duration::from_millis(self.config.hover_delay_ms.into()));
+                let layout = self.relayout(false);
                 if !self.config.onboarded {
-                    return self.start_setup();
+                    return Task::batch([layout, self.start_setup()]);
                 }
+                return layout;
             }
             Message::Saved(result) => {
                 self.saving = false;
@@ -569,7 +592,10 @@ impl Island {
                 return self.persist();
             }
             Message::Settings => {
-                self.settings = !self.settings;
+                self.hub = match self.hub {
+                    Some(_) => None,
+                    None => Some(HubPage::Grid),
+                };
                 self.draft_config = self.config.clone();
                 self.key_draft.clear();
                 self.key_status = secrets::key_source();
@@ -608,7 +634,7 @@ impl Island {
                 }
                 self.config = self.draft_config.clone();
                 self.react(Mood::Happy, 1.2);
-                self.settings = false;
+                self.hub = None;
                 self.status.clear();
                 if let Some(controller) = &self.controller {
                     controller.shortcut(self.config.shortcut.clone());
@@ -727,8 +753,39 @@ impl Island {
                 Err(error) => self.autostart_error = error,
             },
             Message::FontLoaded(ok) => self.icons_ready = ok,
+            Message::OpenHub(page) => {
+                if self.hub.is_none() {
+                    self.draft_config = self.config.clone();
+                    self.key_draft.clear();
+                    self.key_status = secrets::key_source();
+                }
+                self.hub = Some(page);
+            }
+            Message::SetTheme(theme) => return self.apply_live(|c| c.theme = theme),
+            Message::SetAccent(accent) => return self.apply_live(|c| c.accent = accent),
+            Message::SetFeel(feel) => return self.apply_live(|c| c.motion = feel),
+            Message::SetReduceMotion(choice) => {
+                return self.apply_live(|c| c.reduce_motion = choice);
+            }
+            Message::SetMascot(on) => return self.apply_live(|c| c.mascot = on),
+            Message::SetHoverDelay(ms) => {
+                if !HOVER_DELAYS_MS.contains(&ms) {
+                    return Task::none();
+                }
+                self.presence
+                    .set_hover_delay(Duration::from_millis(ms.into()));
+                return self.apply_live(|c| c.hover_delay_ms = ms);
+            }
+            Message::SetNotchWidth(width) => {
+                let save = self.apply_live(|c| c.notch_width = width);
+                return Task::batch([save, self.relayout(true)]);
+            }
+            Message::SetNotchPosition(position) => {
+                let save = self.apply_live(|c| c.notch_position = position);
+                return Task::batch([save, self.relayout(true)]);
+            }
             Message::ShowSetup => {
-                self.settings = false;
+                self.hub = None;
                 self.config.onboarded = false;
                 let save = self.persist();
                 return Task::batch([save, self.start_setup()]);
@@ -737,8 +794,8 @@ impl Island {
                 if self.request.is_some() {
                     return self.update(Message::Cancel);
                 }
-                if self.settings {
-                    self.settings = false;
+                if let Some(page) = self.hub {
+                    self.hub = (page != HubPage::Grid).then_some(HubPage::Grid);
                 } else if self.is_open() {
                     return self.present(Event::Dismiss);
                 }
@@ -989,10 +1046,27 @@ impl Island {
     }
 
     fn hub_closed(&self) -> bool {
-        !self.settings
+        self.hub.is_none()
     }
 
     /// Sizes and places the fixed window, then cuts its click-through region.
+    /// Applies an appearance change to the saved and the draft config and saves it now.
+    fn apply_live(&mut self, change: impl Fn(&mut Config)) -> Task<Message> {
+        change(&mut self.config);
+        change(&mut self.draft_config);
+        self.persist()
+    }
+
+    /// After a notch size or position change: retarget the notch and re-place the window.
+    fn relayout(&mut self, animate: bool) -> Task<Message> {
+        let target = self.size_for(self.presence.shape());
+        self.spring.set_target(target.width, target.height);
+        if !animate || self.reduce_motion() {
+            self.spring.snap();
+        }
+        self.place_window()
+    }
+
     fn place_window(&mut self) -> Task<Message> {
         let Some(id) = self.window else {
             return Task::none();
@@ -1219,7 +1293,7 @@ impl Island {
             } else {
                 (Icon::Sun, "Light", "Light mode")
             };
-            let (hub_icon, hub_word, hub_tip) = if self.settings {
+            let (hub_icon, hub_word, hub_tip) = if self.hub.is_some() {
                 (Icon::ArrowLeft, "Back", "Back")
             } else {
                 (Icon::SlidersHorizontal, "Settings", "Customize")
@@ -1235,8 +1309,8 @@ impl Island {
             .style(style::separator(t));
         let body = if self.onboarding.is_some() {
             self.onboarding_view()
-        } else if self.settings {
-            self.settings_view()
+        } else if let Some(page) = self.hub {
+            self.hub_view(page)
         } else {
             self.chat_view()
         };
@@ -1490,68 +1564,6 @@ impl Island {
         }
         fields
     }
-
-    fn settings_view(&self) -> Element<'_, Message> {
-        let t = self.tokens();
-        let mut form = column![
-            column![
-                text("Settings").size(20).font(MEDIUM),
-                text("Choose the model bloop talks to.")
-                    .size(13)
-                    .color(t.muted_foreground),
-            ]
-            .spacing(2),
-            self.model_fields(),
-            field(
-                "Global shortcut",
-                self.input("Ctrl+Alt+B", &self.draft_config.shortcut, Message::Shortcut),
-            ),
-            text(
-                "Keys are stored in Windows Credential Manager, never in bloop's files. Remote endpoints require HTTPS."
-            )
-            .size(12)
-            .color(t.muted_foreground),
-            self.autostart_toggle(),
-            self.button("Show setup again", Variant::Ghost)
-                .on_press(Message::ShowSetup),
-        ]
-        .spacing(16);
-        if !self.status.is_empty() {
-            form = form.push(text(&self.status).size(13).color(t.destructive));
-        }
-        form = form.push(
-            row![
-                self.button("Save changes", Variant::Primary)
-                    .on_press_maybe((!self.loading).then_some(Message::SaveSettings)),
-                Space::new().width(Length::Fill),
-                self.button("Quit bloop", Variant::Ghost)
-                    .on_press(Message::Quit),
-            ]
-            .align_y(Alignment::Center),
-        );
-        #[cfg(debug_assertions)]
-        {
-            form = form.push(
-                self.button("Peek test", Variant::Ghost)
-                    .on_press(Message::PeekTest),
-            );
-        }
-        if !self.storage_warning.is_empty() {
-            form = form
-                .push(text(&self.storage_warning).size(13).color(t.destructive))
-                .push(
-                    self.button("Quit without saving", Variant::Destructive)
-                        .on_press(Message::QuitWithoutSaving),
-                );
-        }
-        if !self.desktop_warning.is_empty() {
-            form = form.push(text(&self.desktop_warning).size(13).color(t.destructive));
-        }
-        scrollable(form)
-            .height(Length::Fill)
-            .style(style::scroll(t))
-            .into()
-    }
 }
 
 fn field<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
@@ -1563,7 +1575,8 @@ fn field<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Elemen
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bloop::config::{NotchPosition, ReduceMotion};
+    use bloop::config::{Accent, NotchPosition, NotchWidth, ReduceMotion};
+    use bloop::motion::Feel;
     use bloop::onboarding::{Choice, Step};
 
     fn ready() -> Island {
@@ -1870,6 +1883,85 @@ mod tests {
         assert!(!app.icons_ready, "a failed font keeps the word labels");
         let _ = app.update(Message::FontLoaded(true));
         assert!(app.icons_ready);
+    }
+
+    #[test]
+    fn hub_navigation() {
+        let mut app = ready();
+        let _ = app.update(Message::Settings);
+        assert_eq!(app.hub, Some(HubPage::Grid));
+        let _ = app.update(Message::OpenHub(HubPage::Look));
+        assert_eq!(app.hub, Some(HubPage::Look));
+        let _ = app.update(Message::Escape);
+        assert_eq!(app.hub, Some(HubPage::Grid));
+        let _ = app.update(Message::Escape);
+        assert_eq!(app.hub, None);
+    }
+
+    #[test]
+    fn look_changes_apply_and_persist_live() {
+        let mut app = ready();
+        let _ = app.update(Message::SetAccent(Accent::Teal));
+        assert_eq!(app.config.accent, Accent::Teal);
+        assert_eq!(app.draft_config.accent, Accent::Teal);
+        assert_eq!(
+            app.tokens().primary,
+            iced::Color::from_rgb8(0x0d, 0x94, 0x88)
+        );
+        let _ = app.update(Message::SetTheme(ThemeChoice::System));
+        assert_eq!(app.config.theme, ThemeChoice::System);
+        let _ = app.update(Message::SetFeel(Feel::Calm));
+        assert_eq!(app.config.motion, Feel::Calm);
+        let _ = app.update(Message::SetReduceMotion(ReduceMotion::On));
+        assert_eq!(app.config.reduce_motion, ReduceMotion::On);
+        let _ = app.update(Message::SetMascot(false));
+        assert!(!app.config.mascot);
+    }
+
+    #[test]
+    fn notch_width_change_resizes_the_notch() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::On;
+        let _ = app.present(Event::Shortcut);
+        assert_eq!(app.size().width, 540.0);
+        let _ = app.update(Message::SetNotchWidth(NotchWidth::L));
+        assert_eq!(app.canvas_size().width, 600.0);
+        assert_eq!(app.size().width, 600.0);
+        let _ = app.update(Message::SetNotchPosition(NotchPosition::Right));
+        assert_eq!(
+            app.notch_rect().x,
+            0.0,
+            "panel fills the canvas, so x is 0 at any position"
+        );
+    }
+
+    #[test]
+    fn hover_delay_applies_to_presence() {
+        let mut app = ready();
+        let _ = app.update(Message::SetHoverDelay(300));
+        assert_eq!(app.config.hover_delay_ms, 300);
+        let start = Instant::now();
+        let _ = app.present_at(Event::CursorEntered, start);
+        let _ = app.present_at(Event::Tick, start + Duration::from_millis(200));
+        assert_ne!(
+            app.presence.state(),
+            State::Hover,
+            "still waiting at 200 ms"
+        );
+        let _ = app.present_at(Event::Tick, start + Duration::from_millis(310));
+        assert_eq!(app.presence.state(), State::Hover);
+    }
+
+    #[test]
+    fn tile_summaries() {
+        let mut app = ready();
+        app.config.accent = Accent::Indigo;
+        app.config.theme = ThemeChoice::Dark;
+        assert_eq!(app.tile_summary(HubPage::Look), "Dark · Indigo");
+        assert_eq!(app.tile_summary(HubPage::Motion), "Smooth");
+        assert_eq!(app.tile_summary(HubPage::Notch), "M · Centre");
+        app.config.provider = Provider::ClaudeCode;
+        assert_eq!(app.tile_summary(HubPage::Model), "Claude Code");
     }
 
     #[test]
