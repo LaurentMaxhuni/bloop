@@ -92,3 +92,23 @@ Not checked: Unsloth Studio against a running server (transport tests cover its
 OpenAI-compatible stream, bearer key and 401 message), saving a key from the Settings UI
 on a real Unsloth, and Escape cancelling a reply while the prompt has focus (it doesn't;
 that predates this work — the Stop button cancels).
+
+## Installer (2026-11-07)
+
+`installer\build.ps1` builds `dist\bloop-setup-0.2.0.exe` (6.5 MB, Inno Setup 6.7.3).
+Checked on Windows 11 by upgrading an existing 0.1.0 install that had chats in it, with
+`/VERYSILENT /TASKS=""`:
+
+| Check | Result |
+| --- | --- |
+| Setup exits 0 with no admin prompt; files land in `%LOCALAPPDATA%\Programs\bloop` | Pass |
+| `bloop.exe` replaced and shows the mascot icon | Pass |
+| Uninstall entry "bloop 0.2.0" written (it was missing from the 0.1.0 install) | Pass |
+| Start Menu shortcut present; no Run value when the task is not selected | Pass |
+| Chats and settings (`%LOCALAPPDATA%\bloop\bloop.sqlite3`) untouched by the upgrade | Pass |
+| The single-instance mutex (`Local\bloop-app`) refuses a second copy | Pass (dev build) |
+
+Not checked: uninstalling (it would remove the user's real install), the "Also delete your
+bloop chats and settings?" prompt, the wizard UI pages, start-with-Windows after signing
+out and in, and SmartScreen on another PC. Bitdefender quarantined the first build and the
+build scripts; add the project and `%USERPROFILE%\.rustup` / `.cargo` as exceptions.
