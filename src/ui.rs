@@ -134,6 +134,8 @@ pub struct Island {
     system_reduce: bool,
     /// Header buttons show icons once the icon font has loaded.
     icons_ready: bool,
+    /// How many times the window was (re)placed; lets tests see display-change handling.
+    placements: u32,
     window: Option<window::Id>,
     controller: Option<platform::Controller>,
     request_id: u64,
@@ -183,6 +185,7 @@ impl Island {
             frame_log: Vec::new(),
             system_reduce: platform::reduce_motion_system(),
             icons_ready: false,
+            placements: 0,
             window: None,
             controller: None,
             request_id: 0,
@@ -974,10 +977,12 @@ impl Island {
             self.system_light = platform::light_theme_system();
         }
         if shape != shape_before {
-            let target = self.size_for(shape);
-            self.spring.set_target(target.width, target.height);
+            if shape_before == Shape::Sliver {
+                // Coming out of the sliver: pick up resolution, scaling or taskbar changes.
+                tasks.push(self.place_window());
+            }
+            self.retarget(shape, now);
             if self.reduce_motion() {
-                self.spring.snap();
                 tasks.push(self.update_region());
             }
         }
@@ -1019,18 +1024,34 @@ impl Island {
 
     /// The fixed window: big enough for the open panel.
     pub fn canvas_size(&self) -> Size {
-        self.size_for(Shape::Expanded)
+        // Always the widest panel: width changes then never resize the window, so the notch
+        // stays inside it while it animates to the new width.
+        let (w, h) = NotchWidth::L.panel();
+        Size::new(w, h)
+    }
+
+    /// Where a rect of `size` sits horizontally in the canvas for the notch position.
+    fn x_in_canvas(&self, width: f32) -> f32 {
+        let canvas = self.canvas_size().width;
+        match self.config.notch_position {
+            NotchPosition::Centre => (canvas - width) / 2.0,
+            NotchPosition::Left => 0.0,
+            NotchPosition::Right => canvas - width,
+        }
+    }
+
+    /// Where the content is laid out: at the shape's final size, not the animated one, so
+    /// text and controls never re-flow while the notch grows. The window region (cut to
+    /// the drawn outline) hides whatever is outside the notch.
+    pub fn content_rect(&self) -> iced::Rectangle {
+        let size = self.size_for(self.presence.shape());
+        iced::Rectangle::new(iced::Point::new(self.x_in_canvas(size.width), 0.0), size)
     }
 
     /// Where the notch is drawn inside the fixed window: top-aligned, placed per position.
     pub fn notch_rect(&self) -> iced::Rectangle {
-        let (canvas, size) = (self.canvas_size(), self.size());
-        let x = match self.config.notch_position {
-            NotchPosition::Centre => (canvas.width - size.width) / 2.0,
-            NotchPosition::Left => 0.0,
-            NotchPosition::Right => canvas.width - size.width,
-        };
-        iced::Rectangle::new(iced::Point::new(x, 0.0), size)
+        let size = self.size();
+        iced::Rectangle::new(iced::Point::new(self.x_in_canvas(size.width), 0.0), size)
     }
 
     pub fn animating(&self) -> bool {
@@ -1059,15 +1080,28 @@ impl Island {
 
     /// After a notch size or position change: retarget the notch and re-place the window.
     fn relayout(&mut self, animate: bool) -> Task<Message> {
-        let target = self.size_for(self.presence.shape());
-        self.spring.set_target(target.width, target.height);
-        if !animate || self.reduce_motion() {
+        self.retarget(self.presence.shape(), Instant::now());
+        if !animate {
             self.spring.snap();
         }
         self.place_window()
     }
 
+    /// Points the spring at `shape`. Starting from rest, the clock starts now, so the first
+    /// frame advances by its real interval instead of a guessed 1/60 s.
+    fn retarget(&mut self, shape: Shape, now: Instant) {
+        if !self.animating() {
+            self.last_frame = Some(now);
+        }
+        let target = self.size_for(shape);
+        self.spring.set_target(target.width, target.height);
+        if self.reduce_motion() {
+            self.spring.snap();
+        }
+    }
+
     fn place_window(&mut self) -> Task<Message> {
+        self.placements += 1;
         let Some(id) = self.window else {
             return Task::none();
         };
@@ -1233,42 +1267,41 @@ impl Island {
         let (now, goal) = (rect.height.max(1.0), target.height.max(1.0));
         let ratio = now.min(goal) / now.max(goal);
         let shown = ((ratio - 0.6) / 0.4).clamp(0.0, 1.0);
+        let notch = |fill: iced::Color, outline: Option<iced::Color>| {
+            canvas(Notch {
+                fill,
+                outline,
+                shoulder: self.shoulder(),
+                radius: self.corner_radius(),
+            })
+            .width(rect.width)
+            .height(rect.height)
+        };
+        let target_rect = self.content_rect();
         let content = container(content)
-            .width(target.width)
-            .height(target.height)
+            .width(target_rect.width)
+            .height(target_rect.height)
             .padding(Padding {
                 top: 6.0 * (1.0 - shown),
                 ..Padding::ZERO
             });
-        let veil = container(Space::new())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(
-                    iced::Color {
-                        a: 1.0 - shown,
-                        ..t.background
-                    }
-                    .into(),
-                ),
-                ..Default::default()
-            });
-        let silhouette = canvas(Notch {
-            fill: t.background,
-            outline: self.light().then_some(t.border),
-            shoulder: self.shoulder(),
-            radius: self.corner_radius(),
-        })
+        // Layers over the whole fixed canvas: the notch fill, the content at its final size,
+        // then a veil in the notch's own shape that fades the content in, with the light
+        // theme's outline drawn last so it stays crisp.
+        let outline = self.light().then_some(t.border);
+        let veil = iced::Color {
+            a: 1.0 - shown,
+            ..t.background
+        };
+        stack![
+            Space::new().width(Length::Fill).height(Length::Fill),
+            place(rect, notch(t.background, None).into()),
+            place(target_rect, content.into()),
+            place(rect, notch(veil, outline).into()),
+        ]
         .width(Length::Fill)
-        .height(Length::Fill);
-        let notch = container(stack![silhouette, content, veil])
-            .width(rect.width)
-            .height(rect.height)
-            .clip(true);
-        container(row![Space::new().width(rect.x), notch])
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        .height(Length::Fill)
+        .into()
     }
 
     /// The open panel: header, separator and chat, setup or hub.
@@ -1566,6 +1599,14 @@ impl Island {
     }
 }
 
+/// `inner` placed `rect.x` from the left of the canvas, top-aligned.
+fn place(rect: iced::Rectangle, inner: Element<'_, Message>) -> Element<'_, Message> {
+    column![row![Space::new().width(rect.x), inner]]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
 fn field<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     column![text(label).size(13).font(MEDIUM), control.into()]
         .spacing(6)
@@ -1632,6 +1673,68 @@ mod tests {
     }
 
     #[test]
+    fn window_is_always_the_widest_canvas() {
+        let mut app = ready();
+        for width in NotchWidth::ALL {
+            app.config.notch_width = width;
+            assert_eq!(app.canvas_size(), Size::new(600.0, 580.0), "{width:?}");
+        }
+    }
+
+    #[test]
+    fn shrinking_width_while_open_keeps_the_notch_inside_the_canvas() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::Off;
+        app.config.notch_width = NotchWidth::L;
+        let _ = app.present(Event::Shortcut);
+        run_frames(&mut app, Instant::now(), 120);
+        let _ = app.update(Message::SetNotchWidth(NotchWidth::S));
+        let mut at = Instant::now();
+        for _ in 0..60 {
+            let rect = app.notch_rect();
+            assert!(
+                rect.x >= 0.0 && rect.x + rect.width <= app.canvas_size().width + 0.01,
+                "{rect:?}"
+            );
+            at = run_frames(&mut app, at, 1);
+        }
+    }
+
+    #[test]
+    fn content_is_laid_out_at_the_target_size_while_growing() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::Off;
+        let _ = app.present(Event::Shortcut);
+        run_frames(&mut app, Instant::now(), 3);
+        assert!(app.size().height < 300.0);
+        let content = app.content_rect();
+        assert_eq!(content.size(), app.size_for(Shape::Expanded));
+        assert_eq!(content.x, (app.canvas_size().width - content.width) / 2.0);
+    }
+
+    #[test]
+    fn first_frame_from_rest_is_a_real_frame_step() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::Off;
+        let start = Instant::now();
+        let _ = app.present(Event::Shortcut);
+        let _ = app.update(Message::Frame(start + Duration::from_micros(2_800)));
+        let grown = app.size().height - 5.0;
+        assert!(grown < 5.0, "first 360 Hz frame jumped {grown} px");
+    }
+
+    #[test]
+    fn showing_the_notch_re_places_the_window() {
+        let mut app = ready();
+        let before = app.placements;
+        let _ = app.present(Event::Shortcut);
+        assert!(
+            app.placements > before,
+            "opening must re-place for display changes"
+        );
+    }
+
+    #[test]
     fn reduce_motion_snaps() {
         let mut app = ready();
         app.config.reduce_motion = ReduceMotion::On;
@@ -1663,7 +1766,7 @@ mod tests {
         app.config.notch_position = NotchPosition::Right;
         assert_eq!(app.notch_rect().x, canvas.width - width);
         assert_eq!(app.notch_rect().y, 0.0);
-        assert_eq!(canvas, Size::new(540.0, 580.0));
+        assert_eq!(canvas, Size::new(600.0, 580.0));
     }
 
     #[test]

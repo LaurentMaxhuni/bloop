@@ -266,7 +266,11 @@ impl From<StoredConfig> for Config {
             notch_width: f.notch_width,
             notch_position: f.notch_position,
             mascot: f.mascot,
-            hover_delay_ms: f.hover_delay_ms,
+            // Hand-edited or future values snap to the nearest choice instead of failing to load.
+            hover_delay_ms: *HOVER_DELAYS_MS
+                .iter()
+                .min_by_key(|&&ms| ms.abs_diff(f.hover_delay_ms))
+                .unwrap_or(&150),
         }
     }
 }
@@ -331,9 +335,6 @@ impl Config {
             if self.model.trim().is_empty() || self.model.len() > 200 {
                 return Err("Model must contain 1–200 bytes.".into());
             }
-        }
-        if !HOVER_DELAYS_MS.contains(&self.hover_delay_ms) {
-            return Err("Hover delay must be 100, 150 or 300 ms.".into());
         }
         if self.shortcut.trim().is_empty() || self.shortcut.len() > 100 {
             return Err("Enter a global shortcut, such as Ctrl+Alt+B.".into());
@@ -431,12 +432,13 @@ mod tests {
     }
 
     #[test]
-    fn bad_hover_delay_rejected() {
-        let c = super::Config {
-            hover_delay_ms: 42,
-            ..super::Config::default()
-        };
-        assert!(c.validate().is_err());
+    fn odd_hover_delay_snaps_to_nearest_choice() {
+        for (saved, loaded) in [(200, 150), (42, 100), (1000, 300), (125, 100), (126, 150)] {
+            let c: super::Config =
+                serde_json::from_str(&format!(r#"{{"hover_delay_ms":{saved}}}"#)).unwrap();
+            assert_eq!(c.hover_delay_ms, loaded, "saved {saved}");
+            assert!(c.validate().is_ok());
+        }
     }
 
     #[test]
