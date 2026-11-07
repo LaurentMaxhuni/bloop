@@ -7,7 +7,11 @@ use crate::{
     provider::{Error, StreamEvent},
 };
 use serde_json::Value;
-use std::path::Path;
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -328,6 +332,317 @@ impl LineDecoder {
             _ => {}
         }
         Ok(())
+    }
+}
+
+/// How long a CLI may stay silent, and run in total, before bloop gives up.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub idle: Duration,
+    pub total: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            idle: Duration::from_secs(60),
+            total: Duration::from_secs(180),
+        }
+    }
+}
+
+/// First `<name>.exe`, `.cmd` or `.bat` in the directories of `path_var`.
+/// PowerShell shims (`.ps1`) are skipped: they need PowerShell to run.
+pub fn find_in(name: &str, path_var: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path_var).find_map(|dir| {
+        ["exe", "cmd", "bat"]
+            .iter()
+            .map(|ext| dir.join(format!("{name}.{ext}")))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+pub fn find(kind: Kind) -> Option<PathBuf> {
+    find_in(kind.program(), &std::env::var_os("PATH")?)
+}
+
+/// Empty folder the CLIs run in, so none of the user's projects are in reach.
+fn work_dir() -> Result<PathBuf, Error> {
+    let data = crate::storage::data_path().map_err(Error::Protocol)?;
+    let dir = data
+        .parent()
+        .map(|p| p.join("cli"))
+        .ok_or_else(|| Error::Protocol("Could not locate bloop's data folder.".into()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| Error::Protocol(format!("Could not create {}: {e}", dir.display())))?;
+    Ok(dir)
+}
+
+/// Runs the installed CLI for one reply.
+pub async fn chat<F: Future<Output = bool> + Send>(
+    kind: Kind,
+    model: &str,
+    messages: &[ChatMessage],
+    emit: impl FnMut(StreamEvent) -> F + Send,
+) -> Result<(), Error> {
+    let Some(program) = find(kind) else {
+        return Err(Error::Protocol(format!(
+            "{} isn't installed. Install it, or pick another provider.",
+            kind.name()
+        )));
+    };
+    let dir = work_dir()?;
+    let args = args(kind, model, &dir);
+    let env: [(&str, &OsStr); 0] = [];
+    stream_in(
+        kind,
+        &program,
+        &args,
+        &flatten(messages),
+        &env,
+        Limits::default(),
+        Some(&dir),
+        emit,
+    )
+    .await
+}
+
+/// Spawns `program`, writes `prompt` to its stdin and decodes its stdout. Extra `env`
+/// variables are for tests. Dropping the returned future kills the whole process tree.
+pub async fn stream_with<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
+    kind: Kind,
+    program: &Path,
+    args: &[String],
+    prompt: &str,
+    env: &[(&str, E)],
+    limits: Limits,
+    emit: impl FnMut(StreamEvent) -> F + Send,
+) -> Result<(), Error> {
+    stream_in(kind, program, args, prompt, env, limits, None, emit).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_in<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
+    kind: Kind,
+    program: &Path,
+    args: &[String],
+    prompt: &str,
+    env: &[(&str, E)],
+    limits: Limits,
+    dir: Option<&Path>,
+    mut emit: impl FnMut(StreamEvent) -> F + Send,
+) -> Result<(), Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // Run the program directly, `.cmd` shims included: the standard library escapes
+    // batch-file arguments safely, which a hand-built `cmd /C` line would not.
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let mut child = command
+        .spawn()
+        .map_err(|e| Error::Protocol(format!("Could not start {}: {e}", kind.name())))?;
+    // Owns the process tree: closing it (on drop, including cancel) kills every process in it.
+    let _job = job::Job::adopt(&child);
+
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let prompt = prompt.to_owned();
+    let writer = tokio::spawn(async move {
+        let _ = stdin.write_all(prompt.as_bytes()).await;
+        let _ = stdin.shutdown().await;
+    });
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    let errors = tokio::spawn(async move {
+        // Keep only the tail; CLIs can be chatty on stderr.
+        let mut tail = Vec::new();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = stderr.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+            tail.extend_from_slice(&buf[..n]);
+            if tail.len() > 16 * 1024 {
+                tail.drain(..tail.len() - 8 * 1024);
+            }
+        }
+        String::from_utf8_lossy(&tail).into_owned()
+    });
+
+    let mut stdout = child.stdout.take().expect("stdout piped");
+    let mut decoder = LineDecoder::new(kind);
+    let deadline = tokio::time::Instant::now() + limits.total;
+    let mut buf = vec![0u8; 16 * 1024];
+    let outcome: Result<(), Error> = async {
+        loop {
+            let idle = tokio::time::Instant::now() + limits.idle;
+            let read = tokio::time::timeout_at(idle.min(deadline), stdout.read(&mut buf)).await;
+            let n = match read {
+                Err(_) if tokio::time::Instant::now() >= deadline => {
+                    return Err(Error::Protocol("The CLI took too long to reply.".into()));
+                }
+                Err(_) => return Err(Error::Protocol("The CLI stopped responding.".into())),
+                Ok(Err(e)) => return Err(Error::Protocol(format!("Could not read the CLI: {e}"))),
+                Ok(Ok(n)) => n,
+            };
+            let events = if n == 0 {
+                decoder.finish()?
+            } else {
+                decoder.push(&buf[..n])?
+            };
+            for event in events {
+                let done = matches!(event, StreamEvent::Done);
+                if !emit(event).await || done {
+                    return Ok(());
+                }
+            }
+            if n == 0 {
+                return Ok(());
+            }
+        }
+    }
+    .await;
+    writer.abort();
+    let Err(error) = outcome else {
+        return Ok(());
+    };
+    // Explain failures with the CLI's own last stderr line once it has exited.
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    let _ = child.start_kill();
+    let tail = tokio::time::timeout(Duration::from_secs(1), errors)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    Err(explain(kind, error, &tail))
+}
+
+/// Adds the CLI's last stderr line (keys masked) and a sign-in hint when it looks signed out.
+fn explain(kind: Kind, error: Error, stderr: &str) -> Error {
+    let Error::Protocol(mut message) = error else {
+        return error;
+    };
+    let last = stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|line| {
+            line.split_whitespace()
+                .map(|word| {
+                    if word.starts_with("sk-") {
+                        "[key]"
+                    } else {
+                        word
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+    if let Some(last) = last {
+        message = format!("{message} {}", short(&last));
+    }
+    let lower = message.to_lowercase();
+    if [
+        "login",
+        "log in",
+        "logged in",
+        "sign in",
+        "signed in",
+        "auth",
+    ]
+    .iter()
+    .any(|w| lower.contains(w))
+    {
+        message.push_str(&format!(
+            " Run `{}` once in a terminal to sign in.",
+            kind.program()
+        ));
+    }
+    Error::Protocol(message)
+}
+
+/// A Windows job object that kills every process in it when closed.
+mod job {
+    pub struct Job {
+        /// Raw job handle, stored as an integer so the stream future stays `Send`.
+        #[cfg(windows)]
+        handle: Option<usize>,
+    }
+
+    impl Job {
+        pub fn adopt(child: &tokio::process::Child) -> Self {
+            #[cfg(windows)]
+            {
+                use windows::Win32::{
+                    Foundation::{CloseHandle, HANDLE},
+                    System::JobObjects::{
+                        AssignProcessToJobObject, CreateJobObjectW,
+                        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                        JobObjectExtendedLimitInformation, SetInformationJobObject,
+                    },
+                };
+                let Some(process) = child.raw_handle() else {
+                    return Self { handle: None };
+                };
+                // SAFETY: no attributes or name; returns an owned handle closed in Drop.
+                let Ok(job) = (unsafe { CreateJobObjectW(None, None) }) else {
+                    return Self { handle: None };
+                };
+                let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                // SAFETY: `info` is a valid struct of the size passed; `job` is live; `process`
+                // is the child's live handle owned by tokio for at least this call.
+                let ok = unsafe {
+                    SetInformationJobObject(
+                        job,
+                        JobObjectExtendedLimitInformation,
+                        (&raw const info).cast(),
+                        std::mem::size_of_val(&info) as u32,
+                    )
+                    .and_then(|()| AssignProcessToJobObject(job, HANDLE(process)))
+                };
+                if ok.is_err() {
+                    // SAFETY: we own `job` and drop it here instead of in Drop.
+                    unsafe {
+                        let _ = CloseHandle(job);
+                    }
+                    return Self { handle: None };
+                }
+                Self {
+                    handle: Some(job.0 as usize),
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = child;
+                Self {}
+            }
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            #[cfg(windows)]
+            if let Some(handle) = self.handle.take() {
+                // SAFETY: we own this job handle; closing it kills the processes in the job.
+                unsafe {
+                    let _ = windows::Win32::Foundation::CloseHandle(
+                        windows::Win32::Foundation::HANDLE(handle as *mut _),
+                    );
+                }
+            }
+        }
     }
 }
 

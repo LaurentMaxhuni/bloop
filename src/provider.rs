@@ -147,6 +147,9 @@ pub async fn chat<F: Future<Output = bool> + Send>(
     mut emit: impl FnMut(StreamEvent) -> F + Send,
 ) -> Result<(), Error> {
     config.validate().map_err(Error::Protocol)?;
+    if let Some(kind) = crate::cli::Kind::of(config.provider) {
+        return crate::cli::chat(kind, &config.model, messages, emit).await;
+    }
     let base = validate_endpoint(&config.endpoint).map_err(Error::Protocol)?;
     let path = match config.provider.wire() {
         Wire::Ollama => "api/chat",
@@ -218,6 +221,10 @@ const MAX_MODELS: usize = 500;
 /// Names of the models the configured provider serves. Used by setup to auto-detect Ollama,
 /// so it validates only the endpoint (the model may still be blank) and gives up after 3 s.
 pub async fn list_models(config: &Config) -> Result<Vec<String>, Error> {
+    if config.provider.is_cli() {
+        // CLIs pick their own default model; there is nothing to list.
+        return Ok(Vec::new());
+    }
     let base = validate_endpoint(&config.endpoint).map_err(Error::Protocol)?;
     let (path, list, field) = match config.provider.wire() {
         Wire::Ollama => ("api/tags", "/models", "name"),
@@ -279,7 +286,11 @@ fn http_error(provider: Provider, status: u16, hint: &str) -> Error {
                 .into(),
         );
     }
-    Error::Protocol(format!("Provider returned HTTP {status}. {hint}").trim_end().into())
+    Error::Protocol(
+        format!("Provider returned HTTP {status}. {hint}")
+            .trim_end()
+            .into(),
+    )
 }
 
 /// CLI providers are routed before reaching the HTTP code (Task 5 wires them up).
