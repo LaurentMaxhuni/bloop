@@ -23,6 +23,8 @@ pub struct Config {
     pub model: String,
     pub shortcut: String,
     pub light: bool,
+    /// First-launch setup finished; old configs without it load as false.
+    pub onboarded: bool,
 }
 
 impl Default for Config {
@@ -33,6 +35,7 @@ impl Default for Config {
             model: "qwen3:4b".into(),
             shortcut: "Ctrl+Alt+B".into(),
             light: false,
+            onboarded: false,
         }
     }
 }
@@ -78,5 +81,22 @@ mod tests {
         assert!(super::validate_endpoint("http://127.0.0.1:11434").is_ok());
         assert!(super::validate_endpoint("https://example.com/v1").is_ok());
         assert!(super::validate_endpoint("https://user:secret@example.com").is_err());
+    }
+
+    #[test]
+    fn old_config_without_onboarded_loads_as_false() {
+        let old: super::Config = serde_json::from_str(
+            r#"{"provider":"Ollama","endpoint":"http://127.0.0.1:11434","model":"m","shortcut":"Ctrl+Alt+B","light":true}"#,
+        )
+        .unwrap();
+        assert!(!old.onboarded);
+        assert!(old.light);
+        let done = super::Config {
+            onboarded: true,
+            ..Default::default()
+        };
+        let back: super::Config =
+            serde_json::from_str(&serde_json::to_string(&done).unwrap()).unwrap();
+        assert!(back.onboarded);
     }
 }
