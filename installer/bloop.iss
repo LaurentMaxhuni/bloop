@@ -61,6 +61,23 @@ begin
   Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
 end;
 
+{ A self-update starts setup and then quits; bloop may still hold its mutex for a moment.
+  Silent setup would abort on AppMutex, so wait (up to 15 s) for it to clear first. This
+  runs before Setup's own AppMutex check. }
+function InitializeSetup(): Boolean;
+var
+  Waited: Integer;
+begin
+  Waited := 0;
+  if Relaunch() then
+    while CheckForMutexes('bloop-app') and (Waited < 150) do
+    begin
+      Sleep(100);
+      Waited := Waited + 1;
+    end;
+  Result := True;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then

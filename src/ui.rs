@@ -472,6 +472,8 @@ impl Island {
                     .and_then(|dir| update::ready(&dir, &Version::current()));
                 if let Some((version, path)) = ready {
                     self.update_state = UpdateState::Ready(version, path);
+                    // Downloaded before a restart: say so once.
+                    self.update_peek_pending = true;
                 }
                 let layout = self.relayout(false);
                 if !self.config.onboarded {
@@ -514,9 +516,10 @@ impl Island {
             },
             Message::Toggle => return self.present(Event::Shortcut),
             Message::OpenClick => {
-                if self.presence.state() == State::Peek
-                    && self.presence.message() == self.ready_text().as_deref()
-                {
+                let ready_peek = self
+                    .ready_text()
+                    .is_some_and(|text| self.presence.message() == Some(text.as_str()));
+                if self.presence.state() == State::Peek && ready_peek {
                     return self.update(Message::InstallUpdate);
                 }
                 return self.present(Event::Click);
@@ -1127,6 +1130,11 @@ impl Island {
                 tasks.push(widget::operation::focus("prompt"));
             }
         }
+        let was_away = matches!(state_before, State::Open | State::Hidden);
+        if was_away && !matches!(state, State::Open | State::Hidden) {
+            // The panel closed or the notch came back: a waiting "update ready" can show now.
+            tasks.push(self.peek_update_if_pending());
+        }
         Task::batch(tasks)
     }
 
@@ -1200,6 +1208,21 @@ impl Island {
         Some(self.db_path.as_ref()?.parent()?.join("updates"))
     }
 
+    /// What the pill says: a peek's message, else "Update X ready" when nothing more
+    /// important (a warning) is pending, else the mascot's status.
+    pub fn pill_status(&self) -> String {
+        if let Some(message) = self.presence.message() {
+            return message.to_owned();
+        }
+        let quiet = self.status.is_empty()
+            && self.storage_warning.is_empty()
+            && self.desktop_warning.is_empty();
+        match &self.update_state {
+            UpdateState::Ready(version, _) if quiet => format!("Update {version} ready"),
+            _ => self.status_line().to_owned(),
+        }
+    }
+
     fn ready_text(&self) -> Option<String> {
         match &self.update_state {
             UpdateState::Ready(version, _) => {
@@ -1248,7 +1271,8 @@ impl Island {
 
     /// Shows "Update X ready" now, or after the reply that is streaming.
     fn peek_update_if_pending(&mut self) -> Task<Message> {
-        if !self.update_peek_pending || self.request.is_some() {
+        let visible = !matches!(self.presence.state(), State::Open | State::Hidden);
+        if !self.update_peek_pending || self.request.is_some() || !visible {
             return Task::none();
         }
         self.update_peek_pending = false;
@@ -1576,13 +1600,7 @@ impl Island {
     /// The pill shown on hover and for peeks.
     fn pill_content(&self) -> Element<'_, Message> {
         let t = self.tokens();
-        let ready = self.ready_text();
-        let status = self
-            .presence
-            .message()
-            .map(str::to_owned)
-            .or(ready)
-            .unwrap_or_else(|| self.status_line().to_owned());
+        let status = self.pill_status();
         let header = row![
             self.mascot(26.0),
             text("bloop").size(14).font(MEDIUM),
@@ -2354,6 +2372,51 @@ mod tests {
             Some("Update 0.9.0 ready — click to restart")
         );
         assert_eq!(app.update_status(), "0.9.0 ready");
+    }
+
+    #[test]
+    fn pill_click_while_busy_reopens_panel() {
+        let mut app = ready();
+        let _ = app.update(Message::Toggle);
+        app.input = "hello".into();
+        let _task = app.update(Message::Send);
+        let _ = app.update(Message::Toggle);
+        assert_eq!(
+            app.presence.state(),
+            State::Peek,
+            "pill stays out while replying"
+        );
+        let _ = app.update(Message::OpenClick);
+        assert_eq!(app.presence.state(), State::Open);
+    }
+
+    #[test]
+    fn ready_peek_waits_for_the_panel_to_close() {
+        let mut app = ready();
+        let _ = app.update(Message::Toggle);
+        assert!(app.is_open());
+        let _ = app.update(ready_update());
+        let _ = app.update(Message::Toggle);
+        assert_eq!(app.presence.state(), State::Peek);
+        assert_eq!(
+            app.presence.message(),
+            Some("Update 0.9.0 ready — click to restart")
+        );
+    }
+
+    #[test]
+    fn hover_pill_does_not_promise_a_restart() {
+        let mut app = ready();
+        let _ = app.update(ready_update());
+        // The peek ends; afterwards hovering shows the pill without "click to restart".
+        let _ = app.present_at(Event::Tick, Instant::now() + Duration::from_secs(10));
+        assert_eq!(app.pill_status(), "Update 0.9.0 ready");
+        app.status = "Could not save: disk full".into();
+        assert_ne!(
+            app.pill_status(),
+            "Update 0.9.0 ready",
+            "warnings still win"
+        );
     }
 
     #[test]

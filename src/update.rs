@@ -172,11 +172,7 @@ const MAX_CHECKSUM_FILE: usize = 1024;
 /// hosts, so a release asset can never bounce the download somewhere else.
 fn client() -> Result<reqwest::Client, Error> {
     let policy = reqwest::redirect::Policy::custom(|attempt| {
-        let url = attempt.url();
-        let host = url.host_str().unwrap_or_default();
-        let github = url.scheme() == "https"
-            && (host == "github.com" || host.ends_with(".githubusercontent.com"));
-        if attempt.previous().len() >= 5 || !github {
+        if attempt.previous().len() >= 5 || !redirect_allowed(attempt.url()) {
             attempt.stop()
         } else {
             attempt.follow()
@@ -187,6 +183,16 @@ fn client() -> Result<reqwest::Client, Error> {
         .connect_timeout(std::time::Duration::from_secs(10))
         .user_agent("bloop-updater")
         .build()?)
+}
+
+/// Redirects may only go to GitHub over HTTPS: the website, its API (which redirects a
+/// renamed or transferred repository) and its download hosts.
+fn redirect_allowed(url: &reqwest::Url) -> bool {
+    let host = url.host_str().unwrap_or_default();
+    url.scheme() == "https"
+        && (host == "github.com"
+            || host == "api.github.com"
+            || host.ends_with(".githubusercontent.com"))
 }
 
 /// Reads at most `cap` bytes of a successful response.
@@ -466,6 +472,24 @@ mod tests {
         assert!(parse_checksum(&format!("{hex}  other.exe"), name).is_none());
         assert!(parse_checksum(&format!("{}  {name}", &hex[..60]), name).is_none());
         assert!(parse_checksum(&format!("zz{}  {name}", &hex[2..]), name).is_none());
+    }
+
+    #[test]
+    fn redirects_stay_on_github_https() {
+        let ok = |url: &str| redirect_allowed(&reqwest::Url::parse(url).unwrap());
+        assert!(ok(
+            "https://github.com/LaurentMaxhuni/bloop/releases/download/v1.0.0/x.exe"
+        ));
+        assert!(ok("https://objects.githubusercontent.com/x"));
+        assert!(ok("https://release-assets.githubusercontent.com/x"));
+        assert!(
+            ok("https://api.github.com/repositories/123/releases/latest"),
+            "repo renamed"
+        );
+        assert!(!ok("http://github.com/x"), "no downgrade");
+        assert!(!ok("https://example.com/x"));
+        assert!(!ok("https://github.com.evil.io/x"));
+        assert!(!ok("https://githubusercontent.com.evil.io/x"));
     }
 
     #[test]
