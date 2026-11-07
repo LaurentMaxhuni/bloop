@@ -6,3 +6,4 @@ pub mod onboarding;
 pub mod provider;
 pub mod secrets;
 pub mod storage;
+pub mod update;

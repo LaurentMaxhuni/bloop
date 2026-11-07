@@ -16,6 +16,7 @@ tokio = { version = "1", features = ["net", "io-util", "time", "sync", "macros",
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 # Select only DirectX 12 instead of loading unused GPU backends on Windows.
