@@ -112,3 +112,20 @@ Architecture and tradeoffs: [decision](docs/architecture.md).
 Implementation checklist: [plan](docs/superpowers/plans/2026-11-06-native-island.md).
 
 Licensed under [MIT](LICENSE).
+
+## Installing
+
+Download `bloop-setup-<version>.exe` and run it. It installs for your user only (no admin
+prompt) into `%LOCALAPPDATA%\Programs\bloop`, adds a Start Menu entry, and can start
+bloop when you sign in. The installer isn't code-signed yet, so Windows SmartScreen
+shows "unknown publisher": choose **More info → Run anyway**. Uninstall from Windows
+Settings › Apps; it asks before deleting your chats and settings.
+
+## Building the installer
+
+Needs Inno Setup 6 (`winget install JRSoftware.InnoSetup`), then:
+
+    powershell -ExecutionPolicy Bypass -File installer\build.ps1
+
+This builds the release exe and writes `dist\bloop-setup-<version>.exe` (version from
+`Cargo.toml`). `installer\make-art.ps1` redraws the icon and wizard art.
