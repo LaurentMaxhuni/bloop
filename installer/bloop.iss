@@ -52,8 +52,15 @@ Root: HKCU; Subkey: "{#RunKey}"; ValueType: string; ValueName: "bloop"; \
 
 [Run]
 Filename: "{app}\bloop.exe"; Description: "Launch bloop"; Flags: nowait postinstall skipifsilent
+; bloop's self-update runs setup silently with /RELAUNCH=1 and quits; this reopens it.
+Filename: "{app}\bloop.exe"; Flags: nowait; Check: Relaunch
 
 [Code]
+function Relaunch(): Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
