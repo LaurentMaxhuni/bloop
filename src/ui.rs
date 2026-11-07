@@ -7,7 +7,7 @@ use crate::{
     style::{self, MEDIUM, Tokens, Variant},
 };
 use bloop::{
-    config::{Config, Provider},
+    config::{Config, Provider, ThemeChoice},
     model::{self, MAX_PROMPT, MAX_TURNS, Turn},
     onboarding::{self as setup, Choice, Detection, Onboarding},
     provider::{self, StreamEvent},
@@ -134,6 +134,8 @@ pub struct Island {
     /// Key typed in Settings or setup, saved on Save / Finish; never stored in the config.
     key_draft: String,
     key_status: KeySource,
+    /// Windows' app theme, used when the theme follows the system.
+    system_light: bool,
 }
 
 impl Island {
@@ -174,6 +176,7 @@ impl Island {
             autostart_error: String::new(),
             key_draft: String::new(),
             key_status: KeySource::None,
+            system_light: false,
         };
         (
             state,
@@ -193,7 +196,11 @@ impl Island {
     }
 
     pub fn light(&self) -> bool {
-        self.config.light
+        match self.config.theme {
+            ThemeChoice::Light => true,
+            ThemeChoice::Dark => false,
+            ThemeChoice::System => self.system_light,
+        }
     }
     pub fn theme(&self) -> Theme {
         let light = self.light();
@@ -588,8 +595,12 @@ impl Island {
                 if self.loading {
                     return Task::none();
                 }
-                self.config.light = !self.config.light;
-                self.draft_config.light = self.config.light;
+                self.config.theme = if self.light() {
+                    ThemeChoice::Dark
+                } else {
+                    ThemeChoice::Light
+                };
+                self.draft_config.theme = self.config.theme;
                 self.react(Mood::Happy, 0.9);
                 return self.persist();
             }
@@ -677,8 +688,12 @@ impl Island {
                 self.key_status = secrets::key_source();
             }
             Message::SetLight(light) => {
-                self.config.light = light;
-                self.draft_config.light = light;
+                self.config.theme = if light {
+                    ThemeChoice::Light
+                } else {
+                    ThemeChoice::Dark
+                };
+                self.draft_config.theme = self.config.theme;
             }
             Message::SetAutostart(enable) => match platform::set_autostart(enable) {
                 Ok(()) => {
@@ -733,7 +748,7 @@ impl Island {
             }
             self.key_draft.clear();
         }
-        let light = self.config.light;
+        let theme = self.config.theme;
         if self
             .draft_config
             .validate()
@@ -745,7 +760,7 @@ impl Island {
                 controller.shortcut(self.config.shortcut.clone());
             }
         }
-        self.config.light = light;
+        self.config.theme = theme;
         self.config.onboarded = true;
         self.draft_config = self.config.clone();
         self.status.clear();
