@@ -55,7 +55,10 @@ fn main() {
     }
     if let Some(path) = env::var_os("FAKE_MARKER") {
         // Stands in for a tool that would run after the event was refused.
-        let after = env::var("FAKE_AFTER_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let after = env::var("FAKE_AFTER_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
         sleep(Duration::from_millis(after));
         fs::write(path, "ran").unwrap();
     }

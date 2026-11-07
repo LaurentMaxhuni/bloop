@@ -66,11 +66,14 @@ and a reply finishing while the panel is closed (covered by unit tests only).
 
 ## Unsloth Studio, Claude Code and Codex providers (2026-11-07)
 
-Automated: `cargo test` — 33 library, 42 app, 6 CLI-process and 10 HTTP-transport tests
-pass; `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean.
+Automated: `cargo test` — 35 library, 44 app, 7 CLI-process and 10 HTTP-transport tests
+pass (plus 3 opt-in real-CLI checks: `cargo test --test cli -- --ignored`, all passing); `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean.
 The CLI-process tests run a fake CLI (`examples/fake_cli.rs`) and prove the prompt
 arrives on stdin, replies stream, the idle deadline fires, a signed-out CLI gets a hint,
 and cancelling kills the CLI and its child, directly and through a `.cmd` shim.
+After the final review: a refused tool event kills the CLI at once, Codex items are
+allowlisted, re-running setup keeps a working configuration, and turn markers carry a
+random per-request nonce.
 
 Checked by hand on Windows 11 with a debug build and a scratch `BLOOP_DATA_DIR`
 (Claude Code 2.1.316, Codex 0.159.3; Ollama and Unsloth Studio not running):
