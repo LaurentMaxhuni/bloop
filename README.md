@@ -129,3 +129,15 @@ Needs Inno Setup 6 (`winget install JRSoftware.InnoSetup`), then:
 
 This builds the release exe and writes `dist\bloop-setup-<version>.exe` (version from
 `Cargo.toml`). `installer\make-art.ps1` redraws the icon and wizard art.
+
+## Publishing an update
+
+Bump `version` in `Cargo.toml`, commit, then (with the GitHub CLI signed in once via
+`gh auth login`):
+
+    powershell -ExecutionPolicy Bypass -File installer\release.ps1 -Notes "What changed"
+
+This builds the installer, writes its SHA-256 next to it and creates the GitHub release
+`v<version>` with both files. Running copies of bloop find it within six hours (or straight
+away with Customize › Model & shortcut › Check now), download it, check the hash and offer
+"Update ready — click to restart".
