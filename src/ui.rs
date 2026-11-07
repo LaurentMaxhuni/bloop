@@ -538,10 +538,7 @@ impl Island {
             }
             Message::Provider(provider) => {
                 self.draft_config.provider = provider;
-                self.draft_config.endpoint = match provider {
-                    Provider::Ollama => "http://127.0.0.1:11434".into(),
-                    Provider::OpenAi => "http://127.0.0.1:8080/v1".into(),
-                };
+                self.draft_config.endpoint = provider.default_endpoint().into();
             }
             Message::Endpoint(value) => self.draft_config.endpoint = value,
             Message::Model(value) => self.draft_config.model = value,
@@ -1134,7 +1131,7 @@ impl Island {
             field(
                 "Provider",
                 pick_list(
-                    [Provider::Ollama, Provider::OpenAi],
+                    Provider::ALL,
                     Some(self.draft_config.provider),
                     Message::Provider,
                 )

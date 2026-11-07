@@ -32,13 +32,13 @@ impl Decoder {
                 if line.last() == Some(&b'\r') {
                     line.pop();
                 }
-                match self.provider {
-                    Provider::Ollama if !line.is_empty() => self.frame(&line, &mut events)?,
-                    Provider::OpenAi if line.is_empty() && !self.data.is_empty() => {
+                match self.provider.wire() {
+                    Wire::Ollama if !line.is_empty() => self.frame(&line, &mut events)?,
+                    Wire::OpenAi if line.is_empty() && !self.data.is_empty() => {
                         let data = std::mem::take(&mut self.data);
                         self.frame(&data, &mut events)?;
                     }
-                    Provider::OpenAi if line.starts_with(b"data:") => {
+                    Wire::OpenAi if line.starts_with(b"data:") => {
                         let data = line[5..].strip_prefix(b" ").unwrap_or(&line[5..]);
                         if self.data.len() + data.len() + 1 > MAX_FRAME {
                             return Err(Error::Protocol("Provider event is too large.".into()));
@@ -61,7 +61,7 @@ impl Decoder {
     }
 
     fn frame(&mut self, data: &[u8], events: &mut Vec<StreamEvent>) -> Result<(), Error> {
-        if self.provider == Provider::OpenAi && data == b"[DONE]" {
+        if self.provider.wire() == Wire::OpenAi && data == b"[DONE]" {
             self.done = true;
             events.push(StreamEvent::Done);
             return Ok(());
@@ -74,8 +74,9 @@ impl Decoder {
                 "Provider reported an error. Check the model name and server logs.".into(),
             ));
         }
-        let content = match self.provider {
-            Provider::Ollama => {
+        let content = match self.provider.wire() {
+            Wire::Cli => None,
+            Wire::Ollama => {
                 if value
                     .get("done_reason")
                     .and_then(Value::as_str)
@@ -96,7 +97,7 @@ impl Decoder {
                 }
                 value.pointer("/message/content").and_then(Value::as_str)
             }
-            Provider::OpenAi => {
+            Wire::OpenAi => {
                 let reason = value
                     .pointer("/choices/0/finish_reason")
                     .and_then(Value::as_str);
@@ -120,7 +121,7 @@ impl Decoder {
         if let Some(content) = content.filter(|s| !s.is_empty()) {
             events.push(StreamEvent::Delta(content.into()));
         }
-        if self.provider == Provider::Ollama
+        if self.provider.wire() == Wire::Ollama
             && value.get("done").and_then(Value::as_bool) == Some(true)
         {
             self.done = true;
@@ -147,9 +148,10 @@ pub async fn chat<F: Future<Output = bool> + Send>(
 ) -> Result<(), Error> {
     config.validate().map_err(Error::Protocol)?;
     let base = validate_endpoint(&config.endpoint).map_err(Error::Protocol)?;
-    let path = match config.provider {
-        Provider::Ollama => "api/chat",
-        Provider::OpenAi => "chat/completions",
+    let path = match config.provider.wire() {
+        Wire::Ollama => "api/chat",
+        Wire::OpenAi => "chat/completions",
+        Wire::Cli => return Err(cli_on_http()),
     };
     let url = format!("{}/{path}", base.as_str().trim_end_matches('/'));
     let client = reqwest::Client::builder()
@@ -159,12 +161,12 @@ pub async fn chat<F: Future<Output = bool> + Send>(
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()?;
-    let body = match config.provider {
-        Provider::Ollama => {
+    let body = match config.provider.wire() {
+        Wire::Ollama | Wire::Cli => {
             json!({"model": config.model.trim(), "messages": messages, "stream": true,
             "options": {"num_predict": 2048}})
         }
-        Provider::OpenAi => {
+        Wire::OpenAi => {
             json!({"model": config.model.trim(), "messages": messages, "stream": true, "max_tokens": 2048})
         }
     };
@@ -216,9 +218,10 @@ const MAX_MODELS: usize = 500;
 /// so it validates only the endpoint (the model may still be blank) and gives up after 3 s.
 pub async fn list_models(config: &Config) -> Result<Vec<String>, Error> {
     let base = validate_endpoint(&config.endpoint).map_err(Error::Protocol)?;
-    let (path, list, field) = match config.provider {
-        Provider::Ollama => ("api/tags", "/models", "name"),
-        Provider::OpenAi => ("models", "/data", "id"),
+    let (path, list, field) = match config.provider.wire() {
+        Wire::Ollama => ("api/tags", "/models", "name"),
+        Wire::OpenAi => ("models", "/data", "id"),
+        Wire::Cli => return Err(cli_on_http()),
     };
     let url = format!("{}/{path}", base.as_str().trim_end_matches('/'));
     let client = reqwest::Client::builder()
@@ -268,6 +271,11 @@ pub async fn list_models(config: &Config) -> Result<Vec<String>, Error> {
         }
     }
     Ok(names)
+}
+
+/// CLI providers are routed before reaching the HTTP code (Task 5 wires them up).
+fn cli_on_http() -> Error {
+    Error::Protocol("This provider runs a local CLI, not an HTTP endpoint.".into())
 }
 
 #[cfg(test)]
@@ -343,7 +351,7 @@ mod tests {
     }
 }
 use crate::{
-    config::{Config, Provider, validate_endpoint},
+    config::{Config, Provider, Wire, validate_endpoint},
     model::{ChatMessage, MAX_OUTPUT},
 };
 use serde_json::{Value, json};

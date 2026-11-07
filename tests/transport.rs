@@ -176,8 +176,12 @@ async fn ollama_lists_models() {
 
 #[tokio::test]
 async fn openai_lists_models_under_base_path() {
-    let (mut config, server) =
-        fixture(Provider::OpenAi, "200 OK", r#"{"data":[{"id":"a"},{"id":"b"}]}"#).await;
+    let (mut config, server) = fixture(
+        Provider::OpenAi,
+        "200 OK",
+        r#"{"data":[{"id":"a"},{"id":"b"}]}"#,
+    )
+    .await;
     config.endpoint.push_str("/v1");
     let models = list_models(&config).await.unwrap();
     assert_eq!(models, ["a", "b"]);
