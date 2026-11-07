@@ -30,11 +30,20 @@ focus activation restrictions, hotkey collisions, and tray message-pump ownershi
 Keep Win32 calls inside the platform module. A dedicated blocking Windows message
 loop owns the tray and global shortcut; UI receives events without polling.
 
-Provider boundary: Ollama NDJSON and OpenAI-compatible SSE (including llama.cpp).
-Bound frame/output/context sizes, distinguish failures from successful completion,
-enforce connect/read/overall deadlines, and cancel by aborting the Iced task.
+Provider boundary: Ollama NDJSON and OpenAI-compatible SSE (including llama.cpp and
+Unsloth Studio). Bound frame/output/context sizes, distinguish failures from successful
+completion, enforce connect/read/overall deadlines, and cancel by aborting the Iced task.
 Remote endpoints are explicit configuration; plaintext HTTP restricted to loopback.
-API keys come from BLOOP_API_KEY and are never written to SQLite or logs.
+API keys come from BLOOP_API_KEY or Windows Credential Manager (`bloop/api-key`,
+`secrets.rs`) and are never written to SQLite or logs.
+
+CLI providers (2026-11-07): Claude Code and Codex run as one subprocess per message
+(`cli.rs`) in chat-only mode. bloop never enables their tools: Claude gets `--tools ""`
+and no MCP or settings; Codex runs read-only without the user's config, plugins, apps or
+memories, and any tool event from either aborts the reply. They run in an empty
+`<data dir>/cli` folder, read the prompt from stdin, and live in a Windows job object so
+cancelling or quitting kills the whole process tree. Win32 calls for this stay in
+`cli.rs` and `secrets.rs`.
 
 Jev considered for future intent/tool selection. Do not add a cloud dependency to
 the local chat MVP. Future model proposals must pass a typed registry and code-owned

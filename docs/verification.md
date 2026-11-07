@@ -63,3 +63,29 @@ using `WindowFromPoint` to see which process owns each screen point:
 
 Not checked: a real fullscreen game or video, the lock screen, mixed-DPI monitors,
 and a reply finishing while the panel is closed (covered by unit tests only).
+
+## Unsloth Studio, Claude Code and Codex providers (2026-11-07)
+
+Automated: `cargo test` — 33 library, 42 app, 6 CLI-process and 10 HTTP-transport tests
+pass; `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean.
+The CLI-process tests run a fake CLI (`examples/fake_cli.rs`) and prove the prompt
+arrives on stdin, replies stream, the idle deadline fires, a signed-out CLI gets a hint,
+and cancelling kills the CLI and its child, directly and through a `.cmd` shim.
+
+Checked by hand on Windows 11 with a debug build and a scratch `BLOOP_DATA_DIR`
+(Claude Code 2.1.316, Codex 0.159.3; Ollama and Unsloth Studio not running):
+
+| Check | Result |
+| --- | --- |
+| Setup's model step lists Claude Code and Codex and preselects one | Pass |
+| Claude Code replies from the notch ("pong") with the user's own sign-in | Pass |
+| Codex replies from the notch ("pong"); badge reads "Codex" | Pass |
+| No bloop-started `claude`/`codex` process remains after a reply | Pass |
+| Force-quitting bloop mid-reply kills `cmd` → `node` → `codex.exe` | Pass |
+| Cancelling a real Codex reply kills its process tree (`cargo test --test cli -- --ignored`) | Pass |
+| Codex starts no MCP servers with bloop's flags (user has Firecrawl, Neon, Supabase configured) | Pass |
+
+Not checked: Unsloth Studio against a running server (transport tests cover its
+OpenAI-compatible stream, bearer key and 401 message), saving a key from the Settings UI
+on a real Unsloth, and Escape cancelling a reply while the prompt has focus (it doesn't;
+that predates this work — the Stop button cancels).
