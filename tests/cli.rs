@@ -243,9 +243,7 @@ async fn real_codex_cancel_kills_tree() {
             .args([
                 "-NoProfile",
                 "-Command",
-                &format!(
-                    "Get-CimInstance Win32_Process | Where-Object {{ $_.Name -in 'codex.exe','node.exe','cmd.exe' }} | ForEach-Object {{ \"$($_.ProcessId) $($_.ParentProcessId)\" }}"
-                ),
+                "Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'codex.exe','node.exe','cmd.exe' } | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }",
             ])
             .output()
             .unwrap();
