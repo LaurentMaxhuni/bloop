@@ -328,3 +328,36 @@ async fn real_codex_replies_through_the_allowlist() {
     .unwrap();
     assert!(!text.trim().is_empty());
 }
+
+/// Real-CLI check (spends a little quota): `cargo test --test cli -- --ignored`.
+#[tokio::test]
+#[ignore = "runs the installed Claude Code CLI"]
+async fn real_claude_follows_a_flattened_conversation() {
+    use bloop::model::ChatMessage;
+    // SAFETY: only this ignored test sets it, pointing the CLI work dir at a temp folder.
+    unsafe {
+        std::env::set_var(
+            "BLOOP_DATA_DIR",
+            std::env::temp_dir().join("bloop-real-claude"),
+        )
+    };
+    let turn = |role: &str, content: &str| ChatMessage {
+        role: role.into(),
+        content: content.into(),
+    };
+    let messages = [
+        turn("user", "My favourite colour is teal. Just say ok."),
+        turn("assistant", "ok"),
+        turn("user", "What is my favourite colour? One word."),
+    ];
+    let mut text = String::new();
+    cli::chat(Kind::Claude, "", &messages, |event| {
+        if let StreamEvent::Delta(d) = event {
+            text.push_str(&d);
+        }
+        std::future::ready(true)
+    })
+    .await
+    .unwrap();
+    assert!(text.to_lowercase().contains("teal"), "{text}");
+}
