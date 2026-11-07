@@ -1,6 +1,7 @@
 mod onboarding;
 
 use crate::{
+    icons::{self, Icon},
     mascot::{self, Mascot, Mood, Notch},
     platform,
     presence::{Event, Presence, Shape, State},
@@ -89,6 +90,8 @@ pub enum Message {
     SetLight(bool),
     SetAutostart(bool),
     ShowSetup,
+    /// The icon font finished loading (true) or failed (false: keep word labels).
+    FontLoaded(bool),
 }
 
 pub struct Island {
@@ -113,6 +116,8 @@ pub struct Island {
     frame_log: Vec<f32>,
     /// Windows' "Animation effects" setting is off.
     system_reduce: bool,
+    /// Header buttons show icons once the icon font has loaded.
+    icons_ready: bool,
     window: Option<window::Id>,
     controller: Option<platform::Controller>,
     request_id: u64,
@@ -161,6 +166,7 @@ impl Island {
             region: None,
             frame_log: Vec::new(),
             system_reduce: platform::reduce_motion_system(),
+            icons_ready: false,
             window: None,
             controller: None,
             request_id: 0,
@@ -187,6 +193,8 @@ impl Island {
             state,
             Task::batch([
                 window::oldest().map(Message::Window),
+                iced::font::load(icons::FONT_BYTES)
+                    .map(|result| Message::FontLoaded(result.is_ok())),
                 Task::perform(
                     async move {
                         let path = load_path?;
@@ -718,6 +726,7 @@ impl Island {
                 }
                 Err(error) => self.autostart_error = error,
             },
+            Message::FontLoaded(ok) => self.icons_ready = ok,
             Message::ShowSetup => {
                 self.settings = false;
                 self.config.onboarded = false;
@@ -1076,6 +1085,40 @@ impl Island {
             .style(style::btn(self.tokens(), variant))
     }
 
+    /// A ghost button showing `icon` with a tooltip, or `word` until the icon font loads.
+    fn icon_button<'a>(
+        &self,
+        icon: Icon,
+        word: &'a str,
+        tip: &'a str,
+        message: Message,
+    ) -> Element<'a, Message> {
+        let t = self.tokens();
+        let (label, padding): (Element<'a, Message>, [u16; 2]) = if self.icons_ready {
+            (
+                text(icon.codepoint().to_string())
+                    .font(icons::FONT)
+                    .size(16)
+                    .into(),
+                [7, 9],
+            )
+        } else {
+            (text(word).size(13).font(MEDIUM).into(), [7, 12])
+        };
+        let button = button(label)
+            .padding(padding)
+            .style(style::btn(t, Variant::Ghost))
+            .on_press(message);
+        widget::tooltip(
+            button,
+            container(text(tip).size(12))
+                .padding([4, 8])
+                .style(style::card(t, t.background)),
+            widget::tooltip::Position::Bottom,
+        )
+        .into()
+    }
+
     fn input<'a>(
         &self,
         placeholder: &'a str,
@@ -1171,23 +1214,21 @@ impl Island {
         let header = if self.onboarding.is_some() {
             header
         } else {
+            let (theme_icon, theme_word, theme_tip) = if self.light() {
+                (Icon::Moon, "Dark", "Dark mode")
+            } else {
+                (Icon::Sun, "Light", "Light mode")
+            };
+            let (hub_icon, hub_word, hub_tip) = if self.settings {
+                (Icon::ArrowLeft, "Back", "Back")
+            } else {
+                (Icon::SlidersHorizontal, "Settings", "Customize")
+            };
             header
-                .push(
-                    self.button(if self.light() { "Dark" } else { "Light" }, Variant::Ghost)
-                        .on_press(Message::Theme),
-                )
-                .push(
-                    self.button(
-                        if self.settings { "Back" } else { "Settings" },
-                        Variant::Ghost,
-                    )
-                    .on_press(Message::Settings),
-                )
+                .push(self.icon_button(theme_icon, theme_word, theme_tip, Message::Theme))
+                .push(self.icon_button(hub_icon, hub_word, hub_tip, Message::Settings))
         }
-        .push(
-            self.button("Hide", Variant::Ghost)
-                .on_press(Message::Toggle),
-        );
+        .push(self.icon_button(Icon::ChevronUp, "Hide", "Hide", Message::Toggle));
         let separator = container(Space::new())
             .width(Length::Fill)
             .height(1)
@@ -1819,6 +1860,16 @@ mod tests {
         assert_eq!(app.status, "");
         assert_eq!(app.config.provider, Provider::ClaudeCode);
         assert!(app.config.model.is_empty());
+    }
+
+    #[test]
+    fn header_uses_icons_once_the_font_loads() {
+        let mut app = ready();
+        assert!(!app.icons_ready);
+        let _ = app.update(Message::FontLoaded(false));
+        assert!(!app.icons_ready, "a failed font keeps the word labels");
+        let _ = app.update(Message::FontLoaded(true));
+        assert!(app.icons_ready);
     }
 
     #[test]

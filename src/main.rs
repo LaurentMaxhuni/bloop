@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod icons;
 mod mascot;
 mod platform;
 mod presence;
