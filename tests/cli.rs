@@ -271,3 +271,23 @@ async fn real_codex_cancel_kills_tree() {
     let alive: Vec<u32> = running.into_iter().filter(|pid| alive(*pid)).collect();
     assert!(alive.is_empty(), "still running after cancel: {alive:?}");
 }
+
+#[tokio::test]
+async fn refused_tool_kills_the_cli_at_once() {
+    let scene = Scene::new("refuse");
+    let marker = scene.file("marker");
+    let env = [
+        ("FAKE_FIXTURE", fixture("codex-tool.jsonl")),
+        ("FAKE_MARKER", marker.clone()),
+        ("FAKE_AFTER_MS", "500".into()),
+    ];
+    let error = cli::stream_with(Kind::Codex, &fake(), &[], "x", &env, Limits::default(), |_| {
+        std::future::ready(true)
+    })
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("Tool execution is unavailable"), "{error}");
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(!marker.exists(), "the CLI kept running after its tool event was refused");
+}

@@ -467,7 +467,7 @@ async fn stream_in<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
         .spawn()
         .map_err(|e| Error::Protocol(format!("Could not start {}: {e}", kind.name())))?;
     // Owns the process tree: closing it (on drop, including cancel) kills every process in it.
-    let _job = job::Job::adopt(&child);
+    let job = job::Job::adopt(&child);
 
     let mut stdin = child.stdin.take().expect("stdin piped");
     let prompt = prompt.to_owned();
@@ -529,9 +529,11 @@ async fn stream_in<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
     let Err(error) = outcome else {
         return Ok(());
     };
-    // Explain failures with the CLI's own last stderr line once it has exited.
-    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    // Kill the whole tree before anything else: after a refused tool event the CLI must not
+    // get even a moment to run it. Whatever it already wrote to stderr stays readable.
+    drop(job);
     let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     let tail = tokio::time::timeout(Duration::from_secs(1), errors)
         .await
         .ok()

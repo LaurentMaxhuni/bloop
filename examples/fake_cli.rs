@@ -8,6 +8,7 @@
 //! - `FAKE_FIXTURE`: JSONL file replayed to stdout, one line at a time.
 //! - `FAKE_DELAY_MS`: pause between lines.
 //! - `FAKE_HANG=1`: after replaying, sleep forever instead of exiting.
+//! - `FAKE_MARKER` / `FAKE_AFTER_MS`: write the marker file this long after replaying.
 //! - `FAKE_STDERR` / `FAKE_EXIT`: text for stderr and the exit code.
 
 use std::{
@@ -51,6 +52,12 @@ fn main() {
             out.flush().unwrap();
             sleep(Duration::from_millis(delay));
         }
+    }
+    if let Some(path) = env::var_os("FAKE_MARKER") {
+        // Stands in for a tool that would run after the event was refused.
+        let after = env::var("FAKE_AFTER_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        sleep(Duration::from_millis(after));
+        fs::write(path, "ran").unwrap();
     }
     if let Ok(text) = env::var("FAKE_STDERR") {
         eprintln!("{text}");
