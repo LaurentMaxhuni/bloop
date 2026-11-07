@@ -9,8 +9,9 @@ use crate::{
 use bloop::{
     config::{Config, Provider},
     model::{self, MAX_PROMPT, MAX_TURNS, Turn},
-    onboarding::{Detection, Onboarding},
+    onboarding::{self as setup, Choice, Detection, Onboarding},
     provider::{self, StreamEvent},
+    secrets::{self, KeySource},
     storage,
 };
 use iced::{
@@ -81,8 +82,10 @@ pub enum Message {
     OnboardBack,
     OnboardSkip,
     Detect,
-    Detected(Result<Vec<String>, String>),
-    PickModel(String),
+    Detected(Vec<Choice>),
+    PickChoice(Choice),
+    ApiKey(String),
+    RemoveKey,
     SetLight(bool),
     SetAutostart(bool),
     ShowSetup,
@@ -128,6 +131,9 @@ pub struct Island {
     detection: Detection,
     autostart: bool,
     autostart_error: String,
+    /// Key typed in Settings or setup, saved on Save / Finish; never stored in the config.
+    key_draft: String,
+    key_status: KeySource,
 }
 
 impl Island {
@@ -166,6 +172,8 @@ impl Island {
             detection: Detection::Checking,
             autostart: false,
             autostart_error: String::new(),
+            key_draft: String::new(),
+            key_status: KeySource::None,
         };
         (
             state,
@@ -532,6 +540,8 @@ impl Island {
             Message::Settings => {
                 self.settings = !self.settings;
                 self.draft_config = self.config.clone();
+                self.key_draft.clear();
+                self.key_status = secrets::key_source();
                 if !self.is_open() {
                     return self.present(Event::Shortcut);
                 }
@@ -555,6 +565,15 @@ impl Island {
                     self.status = error;
                     self.react(Mood::Oops, 1.2);
                     return Task::none();
+                }
+                if !self.key_draft.trim().is_empty() {
+                    if let Err(error) = secrets::set_api_key(Some(&self.key_draft)) {
+                        self.status = error;
+                        self.react(Mood::Oops, 1.2);
+                        return Task::none();
+                    }
+                    self.key_draft.clear();
+                    self.key_status = secrets::key_source();
                 }
                 self.config = self.draft_config.clone();
                 self.react(Mood::Happy, 1.2);
@@ -625,32 +644,36 @@ impl Island {
             Message::Detect => {
                 if self.onboarding.is_some() {
                     self.detection = Detection::Checking;
-                    let config = self.draft_config.clone();
-                    return Task::perform(
-                        async move {
-                            provider::list_models(&config)
-                                .await
-                                .map_err(|e| e.to_string())
-                        },
-                        Message::Detected,
-                    );
+                    if !self.key_draft.trim().is_empty() {
+                        // A key pasted for Unsloth is needed before it will list models.
+                        let _ = secrets::set_api_key(Some(&self.key_draft));
+                        self.key_draft.clear();
+                        self.key_status = secrets::key_source();
+                    }
+                    return Task::perform(setup::detect(), Message::Detected);
                 }
             }
-            Message::Detected(result) => {
+            Message::Detected(choices) => {
                 if self.onboarding.is_none() {
                     return Task::none();
                 }
-                self.detection = match result {
-                    Ok(models) if !models.is_empty() => {
-                        if !models.contains(&self.draft_config.model) {
-                            self.draft_config.model = models[0].clone();
-                        }
-                        Detection::Found(models)
-                    }
-                    _ => Detection::NotFound,
-                };
+                if choices.is_empty() {
+                    self.detection = Detection::NotFound;
+                } else {
+                    let pick = choices[setup::preselect(&choices, &self.draft_config)].clone();
+                    self.apply_choice(&pick);
+                    self.detection = Detection::Found(choices);
+                }
             }
-            Message::PickModel(model) => self.draft_config.model = model,
+            Message::PickChoice(choice) => self.apply_choice(&choice),
+            Message::ApiKey(value) => self.key_draft = value,
+            Message::RemoveKey => {
+                if let Err(error) = secrets::set_api_key(None) {
+                    self.status = error;
+                }
+                self.key_draft.clear();
+                self.key_status = secrets::key_source();
+            }
             Message::SetLight(light) => {
                 self.config.light = light;
                 self.draft_config.light = light;
@@ -688,6 +711,8 @@ impl Island {
         self.draft_config = self.config.clone();
         self.autostart = platform::autostart();
         self.autostart_error.clear();
+        self.key_draft.clear();
+        self.key_status = secrets::key_source();
         let open = if self.is_open() {
             Task::none()
         } else {
@@ -699,6 +724,13 @@ impl Island {
     /// Ends setup. A valid draft is adopted; an invalid one is dropped so finishing never blocks.
     fn finish_onboarding(&mut self) -> Task<Message> {
         self.onboarding = None;
+        if !self.key_draft.trim().is_empty() {
+            // Finishing never blocks; a failed save shows in Settings.
+            if let Err(error) = secrets::set_api_key(Some(&self.key_draft)) {
+                self.status = error;
+            }
+            self.key_draft.clear();
+        }
         let light = self.config.light;
         if self
             .draft_config
@@ -720,6 +752,73 @@ impl Island {
         let close = self.present(Event::Dismiss);
         let peek = self.present(Event::Peek("I'm up here!".into()));
         Task::batch([save, close, peek])
+    }
+
+    /// Where replies come from, shown under the prompt.
+    fn badge_text(&self) -> String {
+        let model = self.config.model.trim();
+        let source = if self.config.provider.is_cli() {
+            self.config.provider.to_string()
+        } else if bloop::config::validate_endpoint(&self.config.endpoint)
+            .is_ok_and(|u| u.scheme() == "http")
+        {
+            "Local".into()
+        } else {
+            "Endpoint".into()
+        };
+        if model.is_empty() {
+            source
+        } else {
+            format!("{source} · {model}")
+        }
+    }
+
+    fn apply_choice(&mut self, choice: &Choice) {
+        self.draft_config.provider = choice.provider;
+        self.draft_config.endpoint = choice.endpoint.clone();
+        self.draft_config.model = choice.model.clone();
+    }
+
+    /// API key field for providers that take one, or where the key comes from.
+    fn key_field(&self) -> Option<Element<'_, Message>> {
+        if !matches!(
+            self.draft_config.provider,
+            Provider::OpenAi | Provider::Unsloth
+        ) {
+            return None;
+        }
+        let t = self.tokens();
+        let note = |copy: &'static str| text(copy).size(12).color(t.muted_foreground);
+        let control: Element<'_, Message> = match self.key_status {
+            KeySource::Environment => note("Using BLOOP_API_KEY from the environment").into(),
+            status => {
+                let input = self
+                    .input(
+                        if status == KeySource::Saved {
+                            "Paste a new key to replace it"
+                        } else {
+                            "Paste the key (sk-…)"
+                        },
+                        &self.key_draft,
+                        Message::ApiKey,
+                    )
+                    .secure(true);
+                let mut column = column![input].spacing(6);
+                if status == KeySource::Saved {
+                    column = column.push(
+                        row![
+                            note("Saved in Windows Credential Manager"),
+                            Space::new().width(Length::Fill),
+                            self.button("Remove key", Variant::Ghost)
+                                .on_press(Message::RemoveKey),
+                        ]
+                        .align_y(Alignment::Center),
+                    );
+                }
+                column.into()
+            }
+        };
+        Some(field("API key", control))
     }
 
     fn cancel(&mut self) {
@@ -1102,16 +1201,9 @@ impl Island {
                     ..Default::default()
                 }),
         );
-        let locality = if bloop::config::validate_endpoint(&self.config.endpoint)
-            .is_ok_and(|u| u.scheme() == "http")
-        {
-            "Local"
-        } else {
-            "Endpoint"
-        };
         body.push(
             row![
-                container(text(format!("{locality} · {}", self.config.model)).size(11))
+                container(text(self.badge_text()).size(11))
                     .padding([2, 8])
                     .style(style::badge(t)),
                 Space::new().width(Length::Fill),
@@ -1127,34 +1219,46 @@ impl Island {
     /// Provider, endpoint and model fields, shared by Settings and setup.
     fn model_fields(&self) -> widget::Column<'_, Message> {
         let t = self.tokens();
-        column![
-            field(
-                "Provider",
-                pick_list(
-                    Provider::ALL,
-                    Some(self.draft_config.provider),
-                    Message::Provider,
-                )
-                .padding([8, 12])
-                .text_size(14)
-                .width(Length::Fill)
-                .style(style::select(t))
-                .menu_style(style::menu(t)),
-            ),
-            field(
+        let mut fields = column![field(
+            "Provider",
+            pick_list(
+                Provider::ALL,
+                Some(self.draft_config.provider),
+                Message::Provider,
+            )
+            .padding([8, 12])
+            .text_size(14)
+            .width(Length::Fill)
+            .style(style::select(t))
+            .menu_style(style::menu(t)),
+        ),]
+        .spacing(16);
+        if !self.draft_config.provider.is_cli() {
+            fields = fields.push(field(
                 "Endpoint base URL",
                 self.input(
-                    "http://127.0.0.1:11434",
+                    self.draft_config.provider.default_endpoint(),
                     &self.draft_config.endpoint,
                     Message::Endpoint,
                 ),
+            ));
+        }
+        fields = fields.push(field(
+            "Model",
+            self.input(
+                if self.draft_config.provider.is_cli() {
+                    "Leave blank for the CLI's default"
+                } else {
+                    "qwen3:4b"
+                },
+                &self.draft_config.model,
+                Message::Model,
             ),
-            field(
-                "Model",
-                self.input("qwen3:4b", &self.draft_config.model, Message::Model),
-            ),
-        ]
-        .spacing(16)
+        ));
+        if let Some(key) = self.key_field() {
+            fields = fields.push(key);
+        }
+        fields
     }
 
     fn settings_view(&self) -> Element<'_, Message> {
@@ -1173,7 +1277,7 @@ impl Island {
                 self.input("Ctrl+Alt+B", &self.draft_config.shortcut, Message::Shortcut),
             ),
             text(
-                "Cloud credentials come from the BLOOP_API_KEY environment variable and are never saved. Remote endpoints require HTTPS."
+                "Keys are stored in Windows Credential Manager, never in bloop's files. Remote endpoints require HTTPS."
             )
             .size(12)
             .color(t.muted_foreground),
@@ -1237,7 +1341,7 @@ fn size_for(shape: Shape) -> Size {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bloop::onboarding::Step;
+    use bloop::onboarding::{Choice, Step};
 
     fn ready() -> Island {
         let (mut app, _) = Island::new();
@@ -1439,15 +1543,27 @@ mod tests {
         assert!(app.onboarding.is_none());
     }
 
+    fn found() -> Vec<Choice> {
+        vec![
+            Choice::ollama("http://127.0.0.1:11434", "llama3.2"),
+            Choice::cli(Provider::ClaudeCode),
+            Choice::cli(Provider::Codex),
+        ]
+    }
+
     #[test]
-    fn detection_picks_installed_model() {
+    fn detection_lists_every_found_provider() {
         let mut app = first_launch();
-        let _ = app.update(Message::Detected(Ok(vec!["llama3.2".into()])));
-        assert_eq!(app.detection, Detection::Found(vec!["llama3.2".into()]));
+        let _ = app.update(Message::Detected(found()));
+        assert_eq!(app.detection, Detection::Found(found()));
+        // Current provider (Ollama) was found, so its first model is preselected.
+        assert_eq!(app.draft_config.provider, Provider::Ollama);
         assert_eq!(app.draft_config.model, "llama3.2");
-        let _ = app.update(Message::Detected(Ok(Vec::new())));
-        assert_eq!(app.detection, Detection::NotFound);
-        let _ = app.update(Message::Detected(Err("refused".into())));
+        let _ = app.update(Message::PickChoice(found()[2].clone()));
+        assert_eq!(app.draft_config.provider, Provider::Codex);
+        assert_eq!(app.draft_config.endpoint, "");
+        assert_eq!(app.draft_config.model, "");
+        let _ = app.update(Message::Detected(Vec::new()));
         assert_eq!(app.detection, Detection::NotFound);
     }
 
@@ -1455,10 +1571,45 @@ mod tests {
     fn late_detection_after_finish_is_ignored() {
         let mut app = first_launch();
         let _ = app.update(Message::OnboardSkip);
-        let _ = app.update(Message::Detected(Ok(vec!["x".into()])));
+        let _ = app.update(Message::Detected(found()));
         assert_eq!(app.config.model, "qwen3:4b");
         assert_eq!(app.draft_config.model, "qwen3:4b");
         assert!(app.onboarding.is_none());
+    }
+
+    #[test]
+    fn cli_provider_clears_endpoint_and_allows_blank_model() {
+        let mut app = ready();
+        let _ = app.update(Message::Settings);
+        let _ = app.update(Message::Provider(Provider::ClaudeCode));
+        assert_eq!(app.draft_config.endpoint, "");
+        let _ = app.update(Message::Model(String::new()));
+        let _ = app.update(Message::SaveSettings);
+        assert_eq!(app.status, "");
+        assert_eq!(app.config.provider, Provider::ClaudeCode);
+        assert!(app.config.model.is_empty());
+    }
+
+    #[test]
+    fn badge_names_the_cli() {
+        let mut app = ready();
+        app.config.provider = Provider::ClaudeCode;
+        app.config.model = String::new();
+        assert_eq!(app.badge_text(), "Claude Code");
+        app.config.model = "sonnet".into();
+        assert_eq!(app.badge_text(), "Claude Code · sonnet");
+        app.config = Config::default();
+        assert_eq!(app.badge_text(), "Local · qwen3:4b");
+    }
+
+    #[test]
+    fn finishing_setup_with_a_cli_keeps_it() {
+        let mut app = first_launch();
+        let _ = app.update(Message::Detected(found()));
+        let _ = app.update(Message::PickChoice(found()[1].clone()));
+        let _ = app.update(Message::OnboardSkip);
+        assert_eq!(app.config.provider, Provider::ClaudeCode);
+        assert!(app.config.onboarded);
     }
 
     #[test]

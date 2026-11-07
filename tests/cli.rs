@@ -214,3 +214,62 @@ fn find_in_prefers_exe_then_cmd() {
     assert_eq!(cli::find_in("codex", &path), Some(b.join("codex.exe")));
     assert_eq!(cli::find_in("claude", &path), None);
 }
+
+/// Real-CLI check (spends a little quota): `cargo test --test cli -- --ignored`.
+#[tokio::test]
+#[ignore = "runs the installed Codex CLI"]
+async fn real_codex_cancel_kills_tree() {
+    let program = cli::find(Kind::Codex).expect("codex installed");
+    let dir = std::env::temp_dir().join("bloop-real-codex");
+    std::fs::create_dir_all(&dir).unwrap();
+    let args = cli::args(Kind::Codex, "", &dir);
+    let env: [(&str, PathBuf); 0] = [];
+    let task = tokio::spawn(async move {
+        let _ = cli::stream_with(
+            Kind::Codex,
+            &program,
+            &args,
+            "Write the numbers 1 to 2000, one per line.",
+            &env,
+            Limits::default(),
+            |_| std::future::ready(true),
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let me = std::process::id();
+    let children = |root: u32| {
+        let out = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "Get-CimInstance Win32_Process | Where-Object {{ $_.Name -in 'codex.exe','node.exe','cmd.exe' }} | ForEach-Object {{ \"$($_.ProcessId) $($_.ParentProcessId)\" }}"
+                ),
+            ])
+            .output()
+            .unwrap();
+        let pairs: Vec<(u32, u32)> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let mut it = l.split_whitespace().map(|v| v.parse().ok());
+                Some((it.next()??, it.next()??))
+            })
+            .collect();
+        let mut tree = vec![root];
+        let mut i = 0;
+        while i < tree.len() {
+            let parent = tree[i];
+            tree.extend(pairs.iter().filter(|(_, p)| *p == parent).map(|(c, _)| *c));
+            i += 1;
+        }
+        tree.split_off(1)
+    };
+    let running = children(me);
+    assert!(!running.is_empty(), "codex never started");
+    task.abort();
+    let _ = task.await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let alive: Vec<u32> = running.into_iter().filter(|pid| alive(*pid)).collect();
+    assert!(alive.is_empty(), "still running after cancel: {alive:?}");
+}

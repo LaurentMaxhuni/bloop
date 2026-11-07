@@ -240,6 +240,19 @@ impl LineDecoder {
                         return Err(refuse());
                     }
                 }
+                // The answer is complete here; Claude Code may spend a few more seconds on a
+                // turn summary before its final `result` line, so don't wait for that.
+                Some("message_delta") => match str_at("/event/delta/stop_reason") {
+                    Some("end_turn" | "stop_sequence") => self.complete(events)?,
+                    Some("max_tokens") => {
+                        return Err(Error::Protocol(
+                            "Model stopped before completing its reply. Ask for a shorter answer."
+                                .into(),
+                        ));
+                    }
+                    Some(_) => return Err(refuse()),
+                    None => {}
+                },
                 Some("content_block_delta")
                     if str_at("/event/delta/type") == Some("text_delta") =>
                 {
@@ -676,6 +689,34 @@ mod tests {
         .unwrap();
         assert_eq!(text(&events), "hi there");
         assert_eq!(events.last(), Some(&StreamEvent::Done));
+    }
+
+    #[test]
+    fn claude_completes_at_end_turn_without_waiting_for_result() {
+        let input = concat!(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}"#,
+            "
+",
+            r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"}}}"#,
+            "
+",
+        );
+        let mut decoder = LineDecoder::new(Kind::Claude);
+        let events = decoder.push(input.as_bytes()).unwrap();
+        assert_eq!(events.last(), Some(&StreamEvent::Done));
+    }
+
+    #[test]
+    fn claude_max_tokens_stop_fails() {
+        let input = concat!(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}"#,
+            "
+",
+            r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}}"#,
+            "
+",
+        );
+        assert!(decode(Kind::Claude, input).is_err());
     }
 
     #[test]

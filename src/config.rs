@@ -197,7 +197,10 @@ mod tests {
         assert_eq!(Provider::Codex.wire(), Wire::Cli);
         assert!(Provider::ClaudeCode.is_cli());
         assert!(!Provider::Unsloth.is_cli());
-        assert_eq!(Provider::Unsloth.default_endpoint(), "http://127.0.0.1:8888/v1");
+        assert_eq!(
+            Provider::Unsloth.default_endpoint(),
+            "http://127.0.0.1:8888/v1"
+        );
         assert_eq!(Provider::ALL.len(), 5);
     }
 }

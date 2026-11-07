@@ -48,8 +48,15 @@ fn read(target: &str) -> Option<String> {
     let target = wide(target);
     let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
     // SAFETY: NUL-terminated target; on success Windows allocates `credential`, freed below.
-    unsafe { CredReadW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, None, &mut credential) }
-        .ok()?;
+    unsafe {
+        CredReadW(
+            PCWSTR(target.as_ptr()),
+            CRED_TYPE_GENERIC,
+            None,
+            &mut credential,
+        )
+    }
+    .ok()?;
     // SAFETY: CredReadW succeeded, so `credential` points to a valid CREDENTIALW whose blob
     // pointer/size describe one allocation; we copy it out before freeing.
     let key = unsafe {
@@ -72,8 +79,7 @@ fn write(target: &str, key: Option<&str>) -> Result<(), String> {
         Win32::{
             Foundation::ERROR_NOT_FOUND,
             Security::Credentials::{
-                CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW,
-                CredWriteW,
+                CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredWriteW,
             },
         },
         core::{PCWSTR, PWSTR},

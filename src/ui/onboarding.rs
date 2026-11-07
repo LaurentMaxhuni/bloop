@@ -151,33 +151,54 @@ impl Island {
         .spacing(16);
         content = match &self.detection {
             Detection::Checking => content.push(
-                text("Looking for Ollama…")
+                text("Looking for Ollama, Unsloth Studio, Claude Code and Codex…")
                     .size(14)
                     .color(t.muted_foreground),
             ),
-            Detection::Found(models) => content.push(
-                column![
-                    text("Found Ollama on this computer.").size(14),
-                    field(
-                        "Model",
-                        pick_list(
-                            models.as_slice(),
-                            Some(self.draft_config.model.clone()),
-                            Message::PickModel,
-                        )
+            Detection::Found(choices) => {
+                let selected = choices
+                    .iter()
+                    .find(|c| {
+                        c.provider == self.draft_config.provider
+                            && c.endpoint == self.draft_config.endpoint
+                            && c.model == self.draft_config.model
+                    })
+                    .cloned();
+                let mut found = column![
+                    row![
+                        text("Found on this computer:").size(14).width(Length::Fill),
+                        self.button("Retry", Variant::Ghost)
+                            .on_press(Message::Detect),
+                    ]
+                    .align_y(Alignment::Center),
+                    pick_list(choices.as_slice(), selected, Message::PickChoice)
+                        .placeholder("Pick one")
                         .padding([8, 12])
                         .text_size(14)
                         .width(Length::Fill)
                         .style(style::select(t))
                         .menu_style(style::menu(t)),
-                    ),
                 ]
-                .spacing(12),
-            ),
+                .spacing(12);
+                if self.draft_config.provider.is_cli() {
+                    found = found.push(
+                        text(format!(
+                            "Uses your {} sign-in. It can only chat here: no files, commands or tools.",
+                            self.draft_config.provider
+                        ))
+                        .size(13)
+                        .color(t.muted_foreground),
+                    );
+                }
+                if let Some(key) = self.key_field() {
+                    found = found.push(key);
+                }
+                content.push(found)
+            }
             Detection::NotFound => content
                 .push(
                     row![
-                        text("Start Ollama, or use an OpenAI-compatible endpoint")
+                        text("Start Ollama or Unsloth Studio, install Claude Code or Codex, or enter an endpoint")
                             .size(14)
                             .color(t.muted_foreground)
                             .width(Length::Fill),
