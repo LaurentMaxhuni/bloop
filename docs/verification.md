@@ -112,3 +112,28 @@ Not checked: uninstalling (it would remove the user's real install), the "Also d
 bloop chats and settings?" prompt, the wizard UI pages, start-with-Windows after signing
 out and in, and SmartScreen on another PC. Bitdefender quarantined the first build and the
 build scripts; add the project and `%USERPROFILE%\.rustup` / `.cargo` as exceptions.
+
+## Smooth motion, icons and customization hub (2026-11-07)
+
+Automated: `cargo test` — 46 library, 58 app, 7 CLI-process and 10 HTTP-transport tests pass;
+`cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean. Springs are
+tested for settling time per preset at 60 and 144 Hz, no overshoot, momentum on reversal,
+and clamped stalls; the app tests cover reversal mid-animation, reduce motion, no frames at
+rest, notch placement, hub navigation, live appearance changes, hover delay and old configs.
+
+Checked by hand on Windows 11 with a debug build, a scratch `BLOOP_DATA_DIR` and
+`BLOOP_FRAME_LOG`, on a 360 Hz monitor (RTX 4070 Ti SUPER):
+
+| Check | Result |
+| --- | --- |
+| Frames follow the display: median interval 2.76 ms (360 Hz) | Pass |
+| 9 of 10 animations had no frame over 2.5 × the median (longest 4–5.6 ms); the first open, which also builds setup, had 10 frames up to 11.2 ms | Pass |
+| Clicks beside the sliver, beside the pill, beside and below the open panel reach the window underneath; inside the notch they reach bloop | Pass |
+| Header shows sun/moon, sliders and chevron icons; "Customize" tooltip on hover | Pass |
+| Hub grid shows four tiles with icons and summaries | Pass |
+| Look: Teal and Light apply instantly (moon icon, teal toggle) | Pass |
+| Notch: L widens the panel to 600 px and Right moves it to the right edge (24 px inset), live | Pass |
+
+Not checked: Reduce motion following the Windows "Animation effects" toggle (changing it is a
+system setting), Follow Windows across a real theme switch, 60 Hz monitors, mixed-DPI or
+multi-monitor setups, and moving the notch between monitors while running.

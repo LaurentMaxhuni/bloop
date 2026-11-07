@@ -45,6 +45,15 @@ memories, and any tool event from either aborts the reply. They run in an empty
 cancelling or quitting kills the whole process tree. Win32 calls for this stay in
 `cli.rs` and `secrets.rs`.
 
+Notch motion (2026-11-07): the OS window is created once at the open panel's size and is
+never resized while animating; only the drawn notch changes size, driven by critically
+damped springs (`motion.rs`) stepped on `window::frames()` (redraw-synced, no subscription
+when settled). The window region is re-cut to the drawn outline whenever it moves a whole
+pixel, so everything outside the notch stays click-through. Width, position, feel and reduce
+motion come from `Config`; reduce motion follows Windows' "Animation effects" by default.
+Header and hub icons come from a 4.5 KB subset of the Lucide icon font (ISC,
+`assets/LUCIDE-LICENSE.txt`); word labels show if it fails to load.
+
 Jev considered for future intent/tool selection. Do not add a cloud dependency to
 the local chat MVP. Future model proposals must pass a typed registry and code-owned
 permissions; model confidence never grants permission. No shell/tool execution in
