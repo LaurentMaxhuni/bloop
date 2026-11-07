@@ -209,3 +209,47 @@ async fn empty_model_list_is_ok_and_empty() {
     assert!(list_models(&config).await.unwrap().is_empty());
     let _ = server.await;
 }
+
+#[tokio::test]
+async fn unsloth_streams_like_openai_with_bearer() {
+    // SAFETY: tests in this binary only ever set this one variable to this one value, so
+    // concurrent readers see either nothing or the same string.
+    unsafe { std::env::set_var("BLOOP_API_KEY", "sk-unsloth-t") };
+    let (mut config, server) = fixture(
+        Provider::Unsloth,
+        "200 OK",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hey\"}}]}\n\ndata: [DONE]\n\n",
+    )
+    .await;
+    config.endpoint.push_str("/v1");
+    let mut text = String::new();
+    chat(&config, &messages(), |event| {
+        if let StreamEvent::Delta(delta) = event {
+            text.push_str(&delta);
+        }
+        std::future::ready(true)
+    })
+    .await
+    .unwrap();
+    assert_eq!(text, "hey");
+    let request = server.await.unwrap().to_lowercase();
+    assert!(request.starts_with("post /v1/chat/completions "));
+    assert!(request.contains("authorization: bearer sk-unsloth-t"));
+}
+
+#[tokio::test]
+async fn unsloth_401_explains_the_key() {
+    for listing in [false, true] {
+        let (config, server) = fixture(Provider::Unsloth, "401 Unauthorized", "{}").await;
+        let error = if listing {
+            list_models(&config).await.unwrap_err()
+        } else {
+            chat(&config, &messages(), |_| std::future::ready(true))
+                .await
+                .unwrap_err()
+        }
+        .to_string();
+        assert!(error.contains("Unsloth Studio rejected the key"), "{error}");
+        let _ = server.await;
+    }
+}

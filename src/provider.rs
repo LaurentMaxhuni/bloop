@@ -176,10 +176,11 @@ pub async fn chat<F: Future<Output = bool> + Send>(
     }
     let mut response = request.send().await?;
     if !response.status().is_success() {
-        return Err(Error::Protocol(format!(
-            "Provider returned HTTP {}. Check endpoint, model, and authentication.",
-            response.status().as_u16()
-        )));
+        return Err(http_error(
+            config.provider,
+            response.status().as_u16(),
+            "Check endpoint, model, and authentication.",
+        ));
     }
     let mut decoder = Decoder::new(config.provider);
     let mut output_size = 0_usize;
@@ -236,10 +237,7 @@ pub async fn list_models(config: &Config) -> Result<Vec<String>, Error> {
     }
     let mut response = request.send().await?;
     if !response.status().is_success() {
-        return Err(Error::Protocol(format!(
-            "Provider returned HTTP {}.",
-            response.status().as_u16()
-        )));
+        return Err(http_error(config.provider, response.status().as_u16(), ""));
     }
     if response
         .content_length()
@@ -271,6 +269,17 @@ pub async fn list_models(config: &Config) -> Result<Vec<String>, Error> {
         }
     }
     Ok(names)
+}
+
+/// A failed HTTP status, explained for the provider that returned it.
+fn http_error(provider: Provider, status: u16, hint: &str) -> Error {
+    if provider == Provider::Unsloth && status == 401 {
+        return Error::Protocol(
+            "Unsloth Studio rejected the key. Copy the key it printed when the model loaded into Settings."
+                .into(),
+        );
+    }
+    Error::Protocol(format!("Provider returned HTTP {status}. {hint}").trim_end().into())
 }
 
 /// CLI providers are routed before reaching the HTTP code (Task 5 wires them up).
