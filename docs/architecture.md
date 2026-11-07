@@ -54,6 +54,15 @@ motion come from `Config`; reduce motion follows Windows' "Animation effects" by
 Header and hub icons come from a 4.5 KB subset of the Lucide icon font (ISC,
 `assets/LUCIDE-LICENSE.txt`); word labels show if it fails to load.
 
+Self-update (2026-11-07): `update.rs` asks the public GitHub Releases API for
+`LaurentMaxhuni/bloop` 30 s after start and every 6 h (switchable in the hub), downloads
+`bloop-setup-X.Y.Z.exe` into `<data dir>/updates` while hashing it, and keeps it only if its
+SHA-256 matches the release's `.sha256` asset. Redirects may only go to GitHub's HTTPS hosts.
+Installing saves state, starts the installer with `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+/RELAUNCH=1` and quits; Inno waits for the `bloop-app` mutex and reopens bloop. The checksum
+catches broken downloads, not a compromised GitHub account; the installer is not code-signed.
+Releases are published with `installer/release.ps1` (GitHub CLI).
+
 Jev considered for future intent/tool selection. Do not add a cloud dependency to
 the local chat MVP. Future model proposals must pass a typed registry and code-owned
 permissions; model confidence never grants permission. No shell/tool execution in
