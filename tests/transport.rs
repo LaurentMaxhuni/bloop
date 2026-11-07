@@ -1,7 +1,7 @@
 use bloop::{
     config::{Config, Provider},
     model::ChatMessage,
-    provider::{StreamEvent, chat},
+    provider::{StreamEvent, chat, list_models},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -48,9 +48,7 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
             let length: usize = headers
                 .lines()
                 .find_map(|line| line.strip_prefix("content-length: "))
-                .unwrap()
-                .parse()
-                .unwrap();
+                .map_or(0, |v| v.parse().unwrap());
             if bytes.len() >= split + 4 + length {
                 return String::from_utf8(bytes).unwrap();
             }
@@ -161,4 +159,49 @@ async fn cancelling_request_closes_streaming_connection() {
     request.abort();
     assert!(request.await.unwrap_err().is_cancelled());
     assert_eq!(server.await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn ollama_lists_models() {
+    let (config, server) = fixture(
+        Provider::Ollama,
+        "200 OK",
+        r#"{"models":[{"name":"qwen3:4b"},{"name":"llama3.2"}]}"#,
+    )
+    .await;
+    let models = list_models(&config).await.unwrap();
+    assert_eq!(models, ["qwen3:4b", "llama3.2"]);
+    assert!(server.await.unwrap().starts_with("GET /api/tags "));
+}
+
+#[tokio::test]
+async fn openai_lists_models_under_base_path() {
+    let (mut config, server) =
+        fixture(Provider::OpenAi, "200 OK", r#"{"data":[{"id":"a"},{"id":"b"}]}"#).await;
+    config.endpoint.push_str("/v1");
+    let models = list_models(&config).await.unwrap();
+    assert_eq!(models, ["a", "b"]);
+    assert!(server.await.unwrap().starts_with("GET /v1/models "));
+}
+
+#[tokio::test]
+async fn list_models_failures_are_errors() {
+    let big = format!(r#"{{"models":[{{"name":"{}"}}]}}"#, "x".repeat(1_150_000));
+    for (status, body, expect) in [
+        ("500 Internal Server Error", "{}", "HTTP 500"),
+        ("200 OK", r#"{"nope":1}"#, "unexpected model list"),
+        ("200 OK", big.as_str(), "too large"),
+    ] {
+        let (config, server) = fixture(Provider::Ollama, status, body).await;
+        let error = list_models(&config).await.unwrap_err().to_string();
+        assert!(error.contains(expect), "{error}");
+        let _ = server.await;
+    }
+}
+
+#[tokio::test]
+async fn empty_model_list_is_ok_and_empty() {
+    let (config, server) = fixture(Provider::Ollama, "200 OK", r#"{"models":[]}"#).await;
+    assert!(list_models(&config).await.unwrap().is_empty());
+    let _ = server.await;
 }

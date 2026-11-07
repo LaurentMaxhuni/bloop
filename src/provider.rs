@@ -208,6 +208,68 @@ pub async fn chat<F: Future<Output = bool> + Send>(
     }
 }
 
+/// Cap on a model-list response body.
+const MAX_LIST: usize = 1024 * 1024;
+const MAX_MODELS: usize = 500;
+
+/// Names of the models the configured provider serves. Used by setup to auto-detect Ollama,
+/// so it validates only the endpoint (the model may still be blank) and gives up after 3 s.
+pub async fn list_models(config: &Config) -> Result<Vec<String>, Error> {
+    let base = validate_endpoint(&config.endpoint).map_err(Error::Protocol)?;
+    let (path, list, field) = match config.provider {
+        Provider::Ollama => ("api/tags", "/models", "name"),
+        Provider::OpenAi => ("models", "/data", "id"),
+    };
+    let url = format!("{}/{path}", base.as_str().trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()?;
+    let mut request = client.get(url);
+    if let Ok(key) = std::env::var("BLOOP_API_KEY") {
+        request = request.bearer_auth(key);
+    }
+    let mut response = request.send().await?;
+    if !response.status().is_success() {
+        return Err(Error::Protocol(format!(
+            "Provider returned HTTP {}.",
+            response.status().as_u16()
+        )));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_LIST as u64)
+    {
+        return Err(Error::Protocol("Model list is too large.".into()));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len() + chunk.len() > MAX_LIST {
+            return Err(Error::Protocol("Model list is too large.".into()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let unexpected = || Error::Protocol("Provider returned an unexpected model list.".into());
+    let value: Value = serde_json::from_slice(&body).map_err(|_| unexpected())?;
+    let items = value
+        .pointer(list)
+        .and_then(Value::as_array)
+        .ok_or_else(unexpected)?;
+    let mut names: Vec<String> = Vec::new();
+    for name in items.iter().filter_map(|item| item.get(field)?.as_str()) {
+        let name = name.trim();
+        if !name.is_empty() && !names.iter().any(|n| n == name) {
+            names.push(name.to_owned());
+            if names.len() == MAX_MODELS {
+                break;
+            }
+        }
+    }
+    Ok(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
