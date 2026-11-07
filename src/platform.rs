@@ -596,11 +596,76 @@ fn delete_tree(key: &str) {
     let _ = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(key.as_ptr())) };
 }
 
+/// True when Windows' "Animation effects" setting is off. Errors count as "animations on".
+pub fn reduce_motion_system() -> bool {
+    #[cfg(windows)]
+    {
+        use windows::{
+            Win32::UI::WindowsAndMessaging::{
+                SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+                SystemParametersInfoW,
+            },
+            core::BOOL,
+        };
+        let mut enabled = BOOL(1);
+        // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL into the pointer we pass.
+        let ok = unsafe {
+            SystemParametersInfoW(
+                SPI_GETCLIENTAREAANIMATION,
+                0,
+                Some((&raw mut enabled).cast()),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+        };
+        ok.is_ok() && !enabled.as_bool()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// True when Windows apps use the light theme. Errors count as dark.
+pub fn light_theme_system() -> bool {
+    #[cfg(windows)]
+    {
+        use windows::{
+            Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
+            core::w,
+        };
+        let mut value = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        // SAFETY: static NUL-terminated strings; `value`/`size` describe one live u32.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+                w!("AppsUseLightTheme"),
+                RRF_RT_REG_DWORD,
+                None,
+                Some((&raw mut value).cast()),
+                Some(&mut size),
+            )
+        };
+        status.is_ok() && value == 1
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn fullscreen_query_does_not_panic() {
         let _ = super::fullscreen_active();
+    }
+
+    #[test]
+    fn system_reads_do_not_panic() {
+        let _ = super::reduce_motion_system();
+        let _ = super::light_theme_system();
     }
 
     #[cfg(windows)]

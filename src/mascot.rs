@@ -39,6 +39,8 @@ pub struct Mascot {
     pub blink: bool,
     pub body: Color,
     pub face: Color,
+    /// Cheek colour on happy faces; `None` keeps a soft tint of the face colour.
+    pub blush: Option<Color>,
 }
 
 impl<Message> canvas::Program<Message> for Mascot {
@@ -205,7 +207,7 @@ impl<Message> canvas::Program<Message> for Mascot {
         if self.mood == Mood::Happy {
             let blush = Color {
                 a: 0.28,
-                ..self.face
+                ..self.blush.unwrap_or(self.face)
             };
             frame.fill(&Path::circle(p(5.6, 15.6), 1.3 * u), blush);
             frame.fill(&Path::circle(p(18.4, 15.6), 1.3 * u), blush);

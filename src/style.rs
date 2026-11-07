@@ -27,7 +27,7 @@ const fn hex(rgb: u32) -> Color {
     )
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tokens {
     pub background: Color,
     pub foreground: Color,
@@ -42,6 +42,17 @@ pub struct Tokens {
 }
 
 impl Tokens {
+    /// The theme with an accent colour on buttons and focus rings; Neutral is today's look.
+    pub fn with_accent(light: bool, accent: bloop::config::Accent) -> Self {
+        let mut t = Self::new(light);
+        if let Some(rgb) = accent.rgb() {
+            t.primary = hex(rgb);
+            t.ring = hex(rgb);
+            t.primary_foreground = hex(0xffffff);
+        }
+        t
+    }
+
     pub const fn new(light: bool) -> Self {
         if light {
             Self {
@@ -295,5 +306,32 @@ pub fn separator(t: Tokens) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(t.border.into()),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bloop::config::Accent;
+
+    #[test]
+    fn accent_neutral_is_today() {
+        for light in [false, true] {
+            assert_eq!(
+                Tokens::with_accent(light, Accent::Neutral),
+                Tokens::new(light)
+            );
+        }
+    }
+
+    #[test]
+    fn accent_sets_primary_and_ring() {
+        for light in [false, true] {
+            let t = Tokens::with_accent(light, Accent::Indigo);
+            assert_eq!(t.primary, hex(0x4f46e5));
+            assert_eq!(t.ring, hex(0x4f46e5));
+            assert_eq!(t.primary_foreground, hex(0xffffff));
+            assert_eq!(t.background, Tokens::new(light).background);
+        }
     }
 }

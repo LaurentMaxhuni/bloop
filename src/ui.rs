@@ -176,7 +176,7 @@ impl Island {
             autostart_error: String::new(),
             key_draft: String::new(),
             key_status: KeySource::None,
-            system_light: false,
+            system_light: platform::light_theme_system(),
         };
         (
             state,
@@ -222,7 +222,7 @@ impl Island {
     }
 
     pub fn tokens(&self) -> Tokens {
-        Tokens::new(self.light())
+        Tokens::with_accent(self.light(), self.config.accent)
     }
 
     /// What the mascot should be feeling right now.
@@ -275,6 +275,7 @@ impl Island {
             blink: self.blink_until.is_some_and(|until| self.now < until),
             body: t.foreground,
             face: t.background,
+            blush: self.config.accent.rgb().map(|_| t.primary),
         })
         .width(size)
         .height(size)
@@ -886,6 +887,10 @@ impl Island {
         let mut tasks = Vec::new();
         if state == State::Hover && state_before != State::Hover {
             self.react(Mood::Perk, 0.6);
+        }
+        if state == State::Open && state_before != State::Open {
+            // "Follow Windows" picks up a theme switch the next time the panel opens.
+            self.system_light = platform::light_theme_system();
         }
         if shape != shape_before {
             self.animation = Some(Animation {
