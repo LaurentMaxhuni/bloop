@@ -345,7 +345,7 @@ pub fn ready(dir: &Path, current: &Version) -> Option<(Version, std::path::PathB
             (version > *current).then_some((version, entry.path()))
         })
         .collect();
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     found.into_iter().find(|(version, path)| {
         let name = installer_name(version);
         let sidecar = std::fs::read_to_string(dir.join(format!("{name}.sha256"))).ok();
