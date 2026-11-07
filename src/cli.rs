@@ -295,17 +295,22 @@ impl LineDecoder {
             .and_then(|i| i.get("type"))
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let tool = matches!(
-            item_type,
-            "command_execution"
-                | "commandExecution"
-                | "file_change"
-                | "fileChange"
-                | "mcp_tool_call"
-                | "mcpToolCall"
-                | "web_search"
-                | "webSearch"
-        );
+        // Allowlist: only items that are plain conversation pass; any other item type (a
+        // command, file change, MCP call, search, or something added in a later release)
+        // counts as a tool and stops the reply.
+        let tool = item.is_some()
+            && !matches!(
+                item_type,
+                "agent_message"
+                    | "assistant_message"
+                    | "agentMessage"
+                    | "user_message"
+                    | "userMessage"
+                    | "reasoning"
+                    | "todo_list"
+                    | "todoList"
+                    | "error"
+            );
         match event.as_str() {
             "item/started" | "item/updated" | "item/completed" if tool => return Err(refuse()),
             "item/agentMessage/delta" => {
@@ -758,6 +763,47 @@ mod tests {
     fn claude_tool_use_block_is_refused() {
         let line = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"Bash"}}}"#;
         assert!(decode(Kind::Claude, &format!("{line}\n")).is_err());
+    }
+
+    #[test]
+    fn unknown_codex_item_types_are_refused() {
+        for item in [
+            "image_view",
+            "imageView",
+            "collab_tool_call",
+            "dynamicToolCall",
+        ] {
+            let line = format!(r#"{{"type":"item.started","item":{{"id":"i","type":"{item}"}}}}"#);
+            let error = decode(
+                Kind::Codex,
+                &format!(
+                    "{line}
+"
+                ),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("Tool execution is unavailable"),
+                "{item}: {error}"
+            );
+        }
+        // Known harmless items still pass.
+        let ok = concat!(
+            r#"{"type":"item.completed","item":{"id":"r","type":"reasoning","text":"…"}}"#,
+            "
+",
+            r#"{"type":"item.started","item":{"id":"t","type":"todo_list","items":[]}}"#,
+            "
+",
+            r#"{"type":"item.completed","item":{"id":"a","type":"agent_message","text":"ok"}}"#,
+            "
+",
+            r#"{"type":"turn.completed"}"#,
+            "
+",
+        );
+        assert!(decode(Kind::Codex, ok).is_ok());
     }
 
     #[test]

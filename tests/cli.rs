@@ -281,13 +281,50 @@ async fn refused_tool_kills_the_cli_at_once() {
         ("FAKE_MARKER", marker.clone()),
         ("FAKE_AFTER_MS", "500".into()),
     ];
-    let error = cli::stream_with(Kind::Codex, &fake(), &[], "x", &env, Limits::default(), |_| {
-        std::future::ready(true)
-    })
+    let error = cli::stream_with(
+        Kind::Codex,
+        &fake(),
+        &[],
+        "x",
+        &env,
+        Limits::default(),
+        |_| std::future::ready(true),
+    )
     .await
     .unwrap_err()
     .to_string();
     assert!(error.contains("Tool execution is unavailable"), "{error}");
     tokio::time::sleep(Duration::from_millis(1200)).await;
-    assert!(!marker.exists(), "the CLI kept running after its tool event was refused");
+    assert!(
+        !marker.exists(),
+        "the CLI kept running after its tool event was refused"
+    );
+}
+
+/// Real-CLI check (spends a little quota): `cargo test --test cli -- --ignored`.
+#[tokio::test]
+#[ignore = "runs the installed Codex CLI"]
+async fn real_codex_replies_through_the_allowlist() {
+    let program = cli::find(Kind::Codex).expect("codex installed");
+    let dir = std::env::temp_dir().join("bloop-real-codex");
+    std::fs::create_dir_all(&dir).unwrap();
+    let env: [(&str, PathBuf); 0] = [];
+    let mut text = String::new();
+    cli::stream_with(
+        Kind::Codex,
+        &program,
+        &cli::args(Kind::Codex, "", &dir),
+        "Think it through, then answer in one short sentence: why is the sky blue?",
+        &env,
+        Limits::default(),
+        |event| {
+            if let StreamEvent::Delta(d) = event {
+                text.push_str(&d);
+            }
+            std::future::ready(true)
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!text.trim().is_empty());
 }
