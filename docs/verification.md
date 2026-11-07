@@ -137,3 +137,30 @@ Checked by hand on Windows 11 with a debug build, a scratch `BLOOP_DATA_DIR` and
 Not checked: Reduce motion following the Windows "Animation effects" toggle (changing it is a
 system setting), Follow Windows across a real theme switch, 60 Hz monitors, mixed-DPI or
 multi-monitor setups, and moving the notch between monitors while running.
+
+## Auto-update (2026-11-07)
+
+Automated: `cargo test` — 52 library, 72 app, 7 CLI-process, 10 HTTP-transport and 9 update
+tests pass (plus opt-in network checks: `cargo test --test update -- --ignored`); clippy
+`-D warnings` and `fmt --check` are clean. Update tests run a local fake GitHub: newer/none,
+rate limit and HTML replies, no releases yet (404), checksum mismatch, size overrun, refused
+off-GitHub redirects, and leftover `.part` files.
+
+A throwaway probe installer showed that a silent setup started while the app's mutex is held
+exits with code 1 (nothing installed), and that `InitializeSetup` runs before Inno's AppMutex
+check, so bloop's installer now waits there (up to 15 s) during self-updates.
+
+End to end on Windows 11 with real releases on `LaurentMaxhuni/bloop`:
+
+| Check | Result |
+| --- | --- |
+| `installer\release.ps1` builds, writes the `.sha256` and publishes v0.3.0 and v0.3.1 | Pass |
+| The public API lists both assets; the checksum file matches the updater's format | Pass |
+| Silent upgrade 0.2.0 → 0.3.0 with `/RELAUNCH=1` installs and reopens bloop | Pass |
+| A running 0.3.0 finds v0.3.1 33 s after start, downloads 6.9 MB and verifies it | Pass |
+| It peeks "Update 0.3.1 ready — click to restart"; one click updates and 0.3.1 is running 3 s later | Pass |
+| Chats (8 turns), provider, setup state, shortcuts and start-with-Windows choice kept across both updates | Pass |
+
+Not checked: the 6-hour repeat, "Check now" and the auto-update switch by hand (unit tests
+only), a download interrupted by quitting, an installer blocked by antivirus at launch, and
+renaming the repository. The ready message wraps to two lines in the pill.
