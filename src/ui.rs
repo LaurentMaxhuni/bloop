@@ -660,8 +660,10 @@ impl Island {
                 if choices.is_empty() {
                     self.detection = Detection::NotFound;
                 } else {
-                    let pick = choices[setup::preselect(&choices, &self.draft_config)].clone();
-                    self.apply_choice(&pick);
+                    if let Some(index) = setup::preselect(&choices, &self.draft_config) {
+                        let pick = choices[index].clone();
+                        self.apply_choice(&pick);
+                    }
                     self.detection = Detection::Found(choices);
                 }
             }
@@ -774,9 +776,12 @@ impl Island {
     }
 
     fn apply_choice(&mut self, choice: &Choice) {
+        // Re-picking the CLI already in use keeps the model the user typed for it.
+        if !(choice.provider.is_cli() && choice.provider == self.draft_config.provider) {
+            self.draft_config.model = choice.model.clone();
+        }
         self.draft_config.provider = choice.provider;
         self.draft_config.endpoint = choice.endpoint.clone();
-        self.draft_config.model = choice.model.clone();
     }
 
     /// API key field for providers that take one, or where the key comes from.
@@ -1600,6 +1605,41 @@ mod tests {
         assert_eq!(app.badge_text(), "Claude Code · sonnet");
         app.config = Config::default();
         assert_eq!(app.badge_text(), "Local · qwen3:4b");
+    }
+
+    #[test]
+    fn rerunning_setup_keeps_a_custom_endpoint() {
+        let mut app = ready();
+        app.config = Config {
+            provider: Provider::OpenAi,
+            endpoint: "https://api.example.com/v1".into(),
+            model: "my-model".into(),
+            onboarded: true,
+            ..Config::default()
+        };
+        let _ = app.update(Message::ShowSetup);
+        let _ = app.update(Message::Detected(found()));
+        let _ = app.update(Message::OnboardSkip);
+        assert_eq!(app.config.provider, Provider::OpenAi);
+        assert_eq!(app.config.endpoint, "https://api.example.com/v1");
+        assert_eq!(app.config.model, "my-model");
+    }
+
+    #[test]
+    fn rerunning_setup_keeps_the_cli_model() {
+        let mut app = ready();
+        app.config = Config {
+            provider: Provider::ClaudeCode,
+            endpoint: String::new(),
+            model: "sonnet".into(),
+            onboarded: true,
+            ..Config::default()
+        };
+        let _ = app.update(Message::ShowSetup);
+        let _ = app.update(Message::Detected(found()));
+        let _ = app.update(Message::OnboardSkip);
+        assert_eq!(app.config.provider, Provider::ClaudeCode);
+        assert_eq!(app.config.model, "sonnet");
     }
 
     #[test]

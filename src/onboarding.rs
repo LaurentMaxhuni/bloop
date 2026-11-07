@@ -125,14 +125,32 @@ impl Choice {
     }
 }
 
-/// Index of the choice to preselect: the current provider and model if found, else the
-/// current provider, else the first.
-pub fn preselect(choices: &[Choice], current: &Config) -> usize {
+/// Which found choice to select without asking, if any. Re-running setup must never
+/// replace a configuration that works but that detection can't see (a remote endpoint,
+/// llama.cpp, another port), so only these count:
+/// - the exact provider, endpoint and model;
+/// - the same CLI (the caller keeps the user's model);
+/// - the same server whose current model isn't installed there (its first model);
+/// - untouched first-launch defaults (the first thing found).
+pub fn preselect(choices: &[Choice], current: &Config) -> Option<usize> {
+    let same_server = |c: &Choice| c.provider == current.provider && c.endpoint == current.endpoint;
     choices
         .iter()
-        .position(|c| c.provider == current.provider && c.model == current.model)
-        .or_else(|| choices.iter().position(|c| c.provider == current.provider))
-        .unwrap_or(0)
+        .position(|c| same_server(c) && c.model == current.model)
+        .or_else(|| {
+            choices
+                .iter()
+                .position(|c| c.provider.is_cli() && c.provider == current.provider)
+        })
+        .or_else(|| choices.iter().position(same_server))
+        .or_else(|| {
+            let fresh = Config::default();
+            (current.provider == fresh.provider
+                && current.endpoint == fresh.endpoint
+                && current.model == fresh.model
+                && !choices.is_empty())
+            .then_some(0)
+        })
 }
 
 /// Looks for Ollama, Unsloth Studio (ports 8888 and 8000) and the Claude Code and Codex
@@ -206,26 +224,44 @@ mod tests {
     #[test]
     fn preselect_keeps_current_provider_and_model() {
         use crate::config::{Config, Provider};
+        let ollama = "http://127.0.0.1:11434";
         let choices = vec![
-            Choice::ollama("http://127.0.0.1:11434", "a"),
-            Choice::ollama("http://127.0.0.1:11434", "qwen3:4b"),
+            Choice::ollama(ollama, "a"),
+            Choice::ollama(ollama, "qwen3:4b"),
             Choice::cli(Provider::Codex),
         ];
-        assert_eq!(preselect(&choices, &Config::default()), 1);
+        // Exact match.
+        assert_eq!(preselect(&choices, &Config::default()), Some(1));
+        // Same server, model not installed there: its first model.
+        let missing = Config {
+            model: "gone".into(),
+            ..Config::default()
+        };
+        assert_eq!(preselect(&choices, &missing), Some(0));
+        // Same CLI.
         let codex = Config {
             provider: Provider::Codex,
+            model: "gpt-5.5".into(),
             ..Config::default()
         };
-        assert_eq!(preselect(&choices, &codex), 2);
-        let unsloth = Config {
-            provider: Provider::Unsloth,
+        assert_eq!(preselect(&choices, &codex), Some(2));
+        // A setup detection never sees (remote endpoint, llama.cpp, other port): untouched.
+        let remote = Config {
+            provider: Provider::OpenAi,
+            endpoint: "https://api.example.com/v1".into(),
+            model: "m".into(),
             ..Config::default()
         };
-        assert_eq!(preselect(&choices, &unsloth), 0);
+        assert_eq!(preselect(&choices, &remote), None);
+        let other_port = Config {
+            endpoint: "http://127.0.0.1:11500".into(),
+            ..Config::default()
+        };
+        assert_eq!(preselect(&choices, &other_port), None);
+        // Untouched defaults with Ollama missing: the first thing found.
+        let only_cli = vec![Choice::cli(Provider::ClaudeCode)];
+        assert_eq!(preselect(&only_cli, &Config::default()), Some(0));
         assert_eq!(Choice::cli(Provider::ClaudeCode).to_string(), "Claude Code");
-        assert_eq!(
-            Choice::ollama("http://127.0.0.1:11434", "a").to_string(),
-            "Ollama — a"
-        );
+        assert_eq!(Choice::ollama(ollama, "a").to_string(), "Ollama — a");
     }
 }
