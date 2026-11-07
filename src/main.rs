@@ -9,6 +9,10 @@ mod ui;
 use iced::{Color, Point, Size, window};
 
 fn main() {
+    // A second copy (e.g. installer launch while autostart runs) exits quietly.
+    let Some(_instance) = platform::single_instance() else {
+        return;
+    };
     if let Err(error) = run() {
         platform::show_fatal(&error.to_string());
         std::process::exit(1);

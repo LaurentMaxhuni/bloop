@@ -429,10 +429,199 @@ pub fn primary_position(size: Size) -> Option<Point> {
     }
 }
 
+#[cfg(windows)]
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(Some(0)).collect()
+}
+
+/// Holds the app-wide mutex the installer checks (`AppMutex=bloop-app`).
+pub struct Instance {
+    #[cfg(windows)]
+    handle: windows::Win32::Foundation::HANDLE,
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        // SAFETY: the handle came from CreateMutexW and is closed exactly once here.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+/// `None` when another bloop is already running in this session.
+pub fn single_instance() -> Option<Instance> {
+    #[cfg(windows)]
+    {
+        instance_named(r"Local\bloop-app")
+    }
+    #[cfg(not(windows))]
+    {
+        Some(Instance {})
+    }
+}
+
+#[cfg(windows)]
+fn instance_named(name: &str) -> Option<Instance> {
+    use windows::{
+        Win32::{
+            Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError},
+            System::Threading::CreateMutexW,
+        },
+        core::PCWSTR,
+    };
+    let name = wide(name);
+    // SAFETY: the name is NUL-terminated UTF-16 that outlives the call; no attributes.
+    let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }.ok()?;
+    // SAFETY: reads this thread's last error right after CreateMutexW.
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        // SAFETY: we own this handle and do not use it again.
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        return None;
+    }
+    Some(Instance { handle })
+}
+
+#[cfg(windows)]
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(windows)]
+const RUN_VALUE: &str = "bloop";
+
+/// Whether bloop starts when the user signs in (the HKCU Run value exists).
+pub fn autostart() -> bool {
+    #[cfg(windows)]
+    {
+        run_value(RUN_KEY).is_some()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+pub fn set_autostart(enable: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        set_run_value(RUN_KEY, enable)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = enable;
+        Err("Start with Windows is only available on Windows.".into())
+    }
+}
+
+#[cfg(windows)]
+fn run_value(key: &str) -> Option<String> {
+    use windows::{
+        Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW},
+        core::PCWSTR,
+    };
+    let (key, name) = (wide(key), wide(RUN_VALUE));
+    let mut buffer = vec![0u16; 1024];
+    let mut bytes = (buffer.len() * 2) as u32;
+    // SAFETY: strings are NUL-terminated; buffer and its byte size describe one live allocation.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key.as_ptr()),
+            PCWSTR(name.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut bytes),
+        )
+    };
+    if status.is_err() {
+        return None;
+    }
+    let len = (bytes as usize / 2).saturating_sub(1);
+    Some(String::from_utf16_lossy(&buffer[..len]))
+}
+
+#[cfg(windows)]
+fn set_run_value(key: &str, enable: bool) -> Result<(), String> {
+    use windows::{
+        Win32::{
+            Foundation::ERROR_FILE_NOT_FOUND,
+            System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW},
+        },
+        core::PCWSTR,
+    };
+    let (key, name) = (wide(key), wide(RUN_VALUE));
+    let status = if enable {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let data = wide(&format!("\"{}\"", exe.display()));
+        // SAFETY: strings are NUL-terminated; data pointer and byte length cover the same Vec.
+        unsafe {
+            RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key.as_ptr()),
+                PCWSTR(name.as_ptr()),
+                REG_SZ.0,
+                Some(data.as_ptr().cast()),
+                (data.len() * 2) as u32,
+            )
+        }
+    } else {
+        // SAFETY: strings are NUL-terminated and outlive the call.
+        let status = unsafe {
+            RegDeleteKeyValueW(HKEY_CURRENT_USER, PCWSTR(key.as_ptr()), PCWSTR(name.as_ptr()))
+        };
+        if status == ERROR_FILE_NOT_FOUND {
+            return Ok(());
+        }
+        status
+    };
+    status
+        .ok()
+        .map_err(|e| format!("Could not change start with Windows: {}", e.message()))
+}
+
+#[cfg(all(windows, test))]
+fn delete_tree(key: &str) {
+    use windows::{
+        Win32::System::Registry::{HKEY_CURRENT_USER, RegDeleteTreeW},
+        core::PCWSTR,
+    };
+    let key = wide(key);
+    // SAFETY: NUL-terminated key under HKCU used only by tests.
+    let _ = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(key.as_ptr())) };
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn fullscreen_query_does_not_panic() {
         let _ = super::fullscreen_active();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn second_instance_is_refused() {
+        let name = r"Local\bloop-test-instance";
+        let first = super::instance_named(name);
+        assert!(first.is_some());
+        assert!(super::instance_named(name).is_none());
+        drop(first);
+        assert!(super::instance_named(name).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_value_round_trip() {
+        let key = r"Software\bloop-test\Run";
+        super::set_run_value(key, true).unwrap();
+        let value = super::run_value(key).expect("value written");
+        assert!(value.starts_with('"') && value.ends_with('"'));
+        let exe = std::env::current_exe().unwrap();
+        assert!(value.contains(exe.file_name().unwrap().to_str().unwrap()));
+        super::set_run_value(key, false).unwrap();
+        assert!(super::run_value(key).is_none());
+        super::set_run_value(key, false).unwrap();
+        super::delete_tree(r"Software\bloop-test");
     }
 }
