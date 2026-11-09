@@ -58,7 +58,13 @@ impl Island {
     /// transparent for the notch.
     pub(super) fn app_view(&self) -> Element<'_, Message> {
         let t = self.tokens();
-        container(self.dashboard_view())
+        // Setup replaces the dashboard until it finishes or the window closes.
+        let content = if self.onboarding.is_some() {
+            self.onboarding_view()
+        } else {
+            self.dashboard_view()
+        };
+        container(content)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_| container::Style {

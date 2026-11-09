@@ -506,12 +506,11 @@ impl Island {
                     self.update_peek_pending = true;
                 }
                 let layout = self.relayout(false);
-                let notch = self.open_notch();
-                let windows = match startup(self.launch, self.config.onboarded) {
-                    Startup::NotchOnly => Task::none(),
-                    Startup::Dashboard => self.open_app_window(),
-                    // Setup still runs in the notch for now.
-                    Startup::Onboarding => self.start_setup(),
+                // First-run setup lives in the app window; the notch appears when it ends.
+                let (notch, windows) = match startup(self.launch, self.config.onboarded) {
+                    Startup::NotchOnly => (self.open_notch(), Task::none()),
+                    Startup::Dashboard => (self.open_notch(), self.open_app_window()),
+                    Startup::Onboarding => (Task::none(), self.start_setup()),
                 };
                 return Task::batch([layout, notch, windows]);
             }
@@ -569,7 +568,12 @@ impl Island {
             Message::CloseRequested(id) => {
                 if self.app_window == Some(id) {
                     self.app_window = None;
-                    return window::close(id);
+                    let close = window::close(id);
+                    if self.onboarding.take().is_some() {
+                        // Setup stays pending (`onboarded` is still false); the notch takes over.
+                        return Task::batch([close, self.open_notch()]);
+                    }
+                    return close;
                 }
                 if self.window == Some(id) {
                     return self.update(Message::Quit);
@@ -966,20 +970,16 @@ impl Island {
         Task::none()
     }
 
-    /// Opens the panel on step one of setup and starts looking for a model server.
+    /// Shows step one of setup in the app window and starts looking for a model server.
     fn start_setup(&mut self) -> Task<Message> {
+        let window = self.open_app_window();
         self.onboarding = Some(Onboarding::new());
         self.draft_config = self.config.clone();
         self.autostart = platform::autostart();
         self.autostart_error.clear();
         self.key_draft.clear();
         self.key_status = secrets::key_source();
-        let open = if self.is_open() {
-            Task::none()
-        } else {
-            self.present(Event::Shortcut)
-        };
-        Task::batch([open, self.update(Message::Detect)])
+        Task::batch([window, self.update(Message::Detect)])
     }
 
     /// Ends setup. A valid draft is adopted; an invalid one is dropped so finishing never blocks.
@@ -1008,11 +1008,13 @@ impl Island {
         self.config.onboarded = true;
         self.draft_config = self.config.clone();
         self.status.clear();
+        self.page = AppPage::Home;
         self.react(Mood::Happy, 1.2);
         let save = self.persist();
+        let notch = self.open_notch();
         let close = self.present(Event::Dismiss);
         let peek = self.present(Event::Peek("I'm up here!".into()));
-        Task::batch([save, close, peek])
+        Task::batch([save, notch, close, peek])
     }
 
     /// Where replies come from, shown under the prompt.
@@ -1592,34 +1594,25 @@ impl Island {
         ]
         .spacing(10)
         .align_y(Alignment::Center);
-        let header = if self.onboarding.is_some() {
-            header
+        let (theme_icon, theme_word, theme_tip) = if self.light() {
+            (Icon::Moon, "Dark", "Dark mode")
         } else {
-            let (theme_icon, theme_word, theme_tip) = if self.light() {
-                (Icon::Moon, "Dark", "Dark mode")
-            } else {
-                (Icon::Sun, "Light", "Light mode")
-            };
-            header
-                .push(self.icon_button(theme_icon, theme_word, theme_tip, Message::Theme))
-                .push(self.icon_button(
-                    Icon::SlidersHorizontal,
-                    "Settings",
-                    "Settings",
-                    Message::OpenWindow,
-                ))
-        }
-        .push(self.icon_button(Icon::ChevronUp, "Hide", "Hide", Message::Toggle));
+            (Icon::Sun, "Light", "Light mode")
+        };
+        let header = header
+            .push(self.icon_button(theme_icon, theme_word, theme_tip, Message::Theme))
+            .push(self.icon_button(
+                Icon::SlidersHorizontal,
+                "Settings",
+                "Settings",
+                Message::OpenWindow,
+            ))
+            .push(self.icon_button(Icon::ChevronUp, "Hide", "Hide", Message::Toggle));
         let separator = container(Space::new())
             .width(Length::Fill)
             .height(1)
             .style(style::separator(t));
-        let body = if self.onboarding.is_some() {
-            self.onboarding_view()
-        } else {
-            self.chat_view()
-        };
-        column![header, separator, body]
+        column![header, separator, self.chat_view()]
             .spacing(14)
             .padding(Padding {
                 top: 10.0,
@@ -2150,15 +2143,56 @@ mod tests {
 
     fn first_launch() -> Island {
         let mut app = ready();
+        // A real first launch has no notch yet; setup runs in the app window.
+        app.window = None;
         let _ = app.update(Message::Loaded(Ok((Config::default(), Vec::new()))));
         app
     }
 
     #[test]
-    fn first_launch_shows_onboarding() {
+    fn first_launch_shows_onboarding_in_the_window() {
         let app = first_launch();
         assert!(app.onboarding.is_some());
-        assert!(app.is_open());
+        assert!(app.app_window.is_some());
+        assert!(app.window.is_none());
+    }
+
+    #[test]
+    fn finishing_opens_notch_and_home() {
+        let mut app = first_launch();
+        let _ = app.update(Message::OnboardSkip);
+        assert!(app.config.onboarded);
+        assert!(app.window.is_some());
+        assert!(app.app_window.is_some());
+        assert_eq!(app.page, AppPage::Home);
+    }
+
+    #[test]
+    fn closing_mid_setup_opens_notch_and_keeps_setup_pending() {
+        let mut app = first_launch();
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::CloseRequested(id));
+        assert!(!app.config.onboarded);
+        assert!(app.onboarding.is_none());
+        assert!(app.window.is_some());
+        assert!(app.app_window.is_none());
+    }
+
+    #[test]
+    fn open_request_during_setup_keeps_the_step() {
+        let mut app = first_launch();
+        let _ = app.update(Message::OnboardNext);
+        let step = app.onboarding.as_ref().unwrap().step();
+        let _ = app.update(Message::OpenWindow);
+        assert_eq!(app.onboarding.as_ref().unwrap().step(), step);
+    }
+
+    #[test]
+    fn background_first_launch_still_onboards() {
+        let mut app = Island::new(Launch::Background).0;
+        let _ = app.update(Message::Loaded(Ok((Config::default(), vec![]))));
+        assert!(app.onboarding.is_some());
+        assert!(app.app_window.is_some());
     }
 
     #[test]
@@ -2579,7 +2613,8 @@ mod tests {
         let _ = app.update(Message::ShowSetup);
         assert_eq!(app.onboarding.as_ref().unwrap().step(), Step::Welcome);
         assert!(!app.config.onboarded);
-        assert!(app.is_open());
+        assert!(app.app_window.is_some());
+        assert!(app.window.is_some());
     }
 
     fn loaded_onboarded() -> Message {
