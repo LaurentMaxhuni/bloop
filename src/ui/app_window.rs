@@ -1,7 +1,7 @@
 //! The decorated app window and the windows' open/focus plumbing.
 
 use super::{AppPage, Island, Message, notch_settings};
-use crate::platform;
+use crate::{icons, platform};
 use bloop::secrets;
 use iced::{Element, Length, Size, Task, widget::container, window};
 
@@ -40,8 +40,13 @@ impl Island {
         self.autostart_error.clear();
         let (id, open) = window::open(app_settings());
         self.app_window = Some(id);
-        open.then(|id| window::run(id, platform::apply_app_icon))
-            .discard()
+        let mut font = Some(self.icon_font());
+        open.then(move |id| {
+            Task::batch([
+                window::run(id, platform::apply_app_icon).discard(),
+                font.take().unwrap_or_else(Task::none),
+            ])
+        })
     }
 
     /// Opens the notch window once; `Message::Window` places it when it exists.
@@ -51,7 +56,23 @@ impl Island {
         }
         let (id, open) = window::open(notch_settings());
         self.window = Some(id);
-        open.map(|id| Message::Window(Some(id)))
+        let mut font = Some(self.icon_font());
+        open.then(move |id| {
+            Task::batch([
+                Task::done(Message::Window(Some(id))),
+                font.take().unwrap_or_else(Task::none),
+            ])
+        })
+    }
+
+    /// Loads the icon font the first time a window opens. Iced drops font loads issued
+    /// before any window (and so any renderer) exists, which left the header on its word
+    /// labels; the load must run after the window is created.
+    fn icon_font(&mut self) -> Task<Message> {
+        if std::mem::replace(&mut self.icon_font_requested, true) {
+            return Task::none();
+        }
+        iced::font::load(icons::FONT_BYTES).map(|result| Message::FontLoaded(result.is_ok()))
     }
 
     /// The dashboard on its own opaque background, since the daemon's background stays

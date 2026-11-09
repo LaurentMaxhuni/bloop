@@ -188,6 +188,8 @@ pub struct Island {
     system_reduce: bool,
     /// Header buttons show icons once the icon font has loaded.
     icons_ready: bool,
+    /// The icon font was requested; Iced can only load fonts once a window exists.
+    icon_font_requested: bool,
     /// How many times the window was (re)placed; lets tests see display-change handling.
     placements: u32,
     update_state: UpdateState,
@@ -253,6 +255,7 @@ impl Island {
             frame_log: Vec::new(),
             system_reduce: platform::reduce_motion_system(),
             icons_ready: false,
+            icon_font_requested: false,
             placements: 0,
             update_state: UpdateState::Idle,
             up_to_date: false,
@@ -285,19 +288,15 @@ impl Island {
         };
         (
             state,
-            Task::batch([
-                iced::font::load(icons::FONT_BYTES)
-                    .map(|result| Message::FontLoaded(result.is_ok())),
-                Task::perform(
-                    async move {
-                        let path = load_path?;
-                        tokio::task::spawn_blocking(move || storage::load(&path))
-                            .await
-                            .map_err(|e| e.to_string())?
-                    },
-                    Message::Loaded,
-                ),
-            ]),
+            Task::batch([Task::perform(
+                async move {
+                    let path = load_path?;
+                    tokio::task::spawn_blocking(move || storage::load(&path))
+                        .await
+                        .map_err(|e| e.to_string())?
+                },
+                Message::Loaded,
+            )]),
         )
     }
 
@@ -2319,6 +2318,25 @@ mod tests {
         assert_eq!(app.status, "");
         assert_eq!(app.config.provider, Provider::ClaudeCode);
         assert!(app.config.model.is_empty());
+    }
+
+    #[test]
+    fn icon_font_is_requested_once_the_first_window_opens() {
+        let (mut app, _) = Island::new(Launch::Background);
+        assert!(
+            !app.icon_font_requested,
+            "no window yet, so no renderer to load into"
+        );
+        let _ = app.update(Message::Loaded(Ok((
+            Config {
+                onboarded: true,
+                ..Config::default()
+            },
+            Vec::new(),
+        ))));
+        assert!(app.icon_font_requested);
+        let _ = app.update(Message::OpenWindow);
+        assert!(app.icon_font_requested);
     }
 
     #[test]
