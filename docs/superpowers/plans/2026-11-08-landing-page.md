@@ -10,6 +10,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-08-landing-page-design.md`
 
+**Update 2026-11-09:** bloop gained an app window (PR LaurentMaxhuni/bloop#1): onboarding and
+all settings moved out of the notch into a dashboard (Home, Appearance, Model, Shortcut &
+startup, About). Task 2's "hub tiles" become a mock of that window, Task 4's switches live on
+its Appearance page, and the mascot also thinks/talks/cheers/naps in the hero chat. Icons are
+inline Lucide SVG (`site/icons.js`).
+
 ## Global Constraints
 
 - No external scripts or fonts; font stack `"Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif`.
@@ -43,9 +49,9 @@
 
 **Files:** Create `site/index.html`, `site/styles.css`, `site/mascot.js`, `site/favicon.svg`.
 
-**Interfaces — Produces:** `export function mascotSVG({ mood, blink, look:[x,y] }) -> string` (moods idle, perk, happy); CSS tokens `--bg --fg --muted --border --secondary --accent --accent-fg` for light/dark with `[data-theme]` overrides; `--accent` defaults to the neutral foreground.
+**Interfaces — Produces:** `export function mascotSVG({ mood, blink, look:[x,y] }) -> string` (moods idle, perk, happy, thinking, talking, sleepy); CSS tokens `--bg --fg --muted --border --secondary --accent --accent-fg` for light/dark with `[data-theme]` overrides; `--accent` defaults to the neutral foreground.
 
-- [ ] All six sections from the spec with static content, semantic landmarks, one `h1`, download/GitHub links pointing at the fallback URLs, footer install note. Mini-notches and hub tiles in CSS.
+- [ ] All six sections from the spec with static content, semantic landmarks, one `h1`, download/GitHub links pointing at the fallback URLs, footer install note. Mini-notches and the app-window mock (sidebar + onboarding strip + Appearance page) in CSS.
 - [ ] Browser pane check at 1440 px: renders, no console errors. Commit `feat(site): landing page structure and look`.
 
 ### Task 3: The live hero notch
