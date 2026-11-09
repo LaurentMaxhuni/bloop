@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>spring.js tests</title>
+<pre id="out">running…</pre>
+<script type="module">
+const out = document.getElementById('out');
+const results = [];
+const check = (name, ok, detail = '') => results.push({ name, ok, detail });
+try {
+  const { FEEL, Spring, SizeSpring } = await import('./spring.js');
+  const budgets = { snappy: 0.6, smooth: 0.9, calm: 1.4 };
+  for (const [feel, k] of Object.entries(FEEL)) {
+    for (const hz of [60, 144]) {
+      const s = new Spring(5); s.target = 580;
+      let t = 0, peak = 5;
+      while (!s.settled() && t < 5) { s.step(k, 1 / hz); t += 1 / hz; peak = Math.max(peak, s.value); }
+      check(`${feel} settles within ${budgets[feel]}s at ${hz}Hz`, t <= budgets[feel], `took ${t.toFixed(3)}s`);
+      check(`${feel} no overshoot at ${hz}Hz`, peak <= 580.5, `peak ${peak.toFixed(2)}`);
+    }
+  }
+  {
+    const s = new Spring(5); s.target = 580;
+    for (let i = 0; i < 6; i++) s.step(FEEL.smooth, 1 / 60);
+    const before = s.value; s.target = 5; s.step(FEEL.smooth, 1 / 60);
+    check('reversal keeps moving forward one frame', s.value > before, `${before.toFixed(2)} → ${s.value.toFixed(2)}`);
+  }
+  {
+    const s = new Spring(5); s.target = 580; s.step(FEEL.snappy, 0.5);
+    check('dt clamped to 1/30 s', s.value < 638 && s.value < 580, `value ${s.value.toFixed(2)}`);
+  }
+  {
+    const s = new Spring(5); s.target = 580; s.step(FEEL.smooth, 1 / 60); s.snap();
+    check('snap zeroes velocity and lands on target', s.velocity === 0 && s.value === 580);
+  }
+  {
+    const z = new SizeSpring(120, 5); z.setTarget(300, 40);
+    for (let i = 0; i < 200 && !z.settled(); i++) z.step(FEEL.smooth, 1 / 60);
+    check('SizeSpring settles on both axes', z.settled() && z.w === 300 && z.h === 40, `${z.w}×${z.h}`);
+  }
+} catch (e) {
+  check('module loads', false, String(e));
+}
+const failed = results.filter(r => !r.ok);
+out.textContent = (failed.length ? `FAIL ${failed.length}/${results.length}\n` : `PASS ${results.length}/${results.length}\n`) +
+  results.map(r => `${r.ok ? 'ok  ' : 'FAIL'} ${r.name}${r.detail ? ' — ' + r.detail : ''}`).join('\n');
+document.title = failed.length ? 'FAIL' : 'PASS';
+</script>
+</html>
