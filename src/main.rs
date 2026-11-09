@@ -11,7 +11,11 @@ use iced::{Color, Point, Size, window};
 
 fn main() {
     // A second copy (e.g. installer launch while autostart runs) exits quietly.
+    let launch = bloop::launch::launch_kind(std::env::args());
     let Some(_instance) = platform::single_instance() else {
+        if bloop::launch::signals_running_copy(launch) {
+            platform::signal_running_copy();
+        }
         return;
     };
     if let Err(error) = run() {

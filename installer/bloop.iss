@@ -48,12 +48,12 @@ Name: "{userdesktop}\bloop"; Filename: "{app}\bloop.exe"; Tasks: desktopicon
 
 [Registry]
 Root: HKCU; Subkey: "{#RunKey}"; ValueType: string; ValueName: "bloop"; \
-  ValueData: """{app}\bloop.exe"""; Flags: uninsdeletevalue; Tasks: autostart
+  ValueData: """{app}\bloop.exe"" --background"; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
 Filename: "{app}\bloop.exe"; Description: "Launch bloop"; Flags: nowait postinstall skipifsilent
 ; bloop's self-update runs setup silently with /RELAUNCH=1 and quits; this reopens it.
-Filename: "{app}\bloop.exe"; Flags: nowait; Check: Relaunch
+Filename: "{app}\bloop.exe"; Parameters: "--background"; Flags: nowait; Check: Relaunch
 
 [Code]
 function Relaunch(): Boolean;
