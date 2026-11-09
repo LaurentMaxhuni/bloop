@@ -13,7 +13,6 @@ pub enum Icon {
     Moon,
     SlidersHorizontal,
     ChevronUp,
-    ArrowLeft,
     Palette,
     Sparkles,
     PanelTop,
@@ -22,12 +21,11 @@ pub enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Icon; 9] = [
+    pub const ALL: [Icon; 8] = [
         Icon::Sun,
         Icon::Moon,
         Icon::SlidersHorizontal,
         Icon::ChevronUp,
-        Icon::ArrowLeft,
         Icon::Palette,
         Icon::Sparkles,
         Icon::PanelTop,
@@ -40,7 +38,6 @@ impl Icon {
             Icon::Moon => '\u{e11e}',
             Icon::SlidersHorizontal => '\u{e29a}',
             Icon::ChevronUp => '\u{e070}',
-            Icon::ArrowLeft => '\u{e048}',
             Icon::Palette => '\u{e1dd}',
             Icon::Sparkles => '\u{e412}',
             Icon::PanelTop => '\u{e435}',

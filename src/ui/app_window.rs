@@ -1,12 +1,9 @@
 //! The decorated app window and the windows' open/focus plumbing.
 
-use super::{Island, Message, notch_settings};
-use crate::{platform, style::MEDIUM};
-use iced::{
-    Element, Length, Size, Task,
-    widget::{column, container, text},
-    window,
-};
+use super::{AppPage, Island, Message, notch_settings};
+use crate::platform;
+use bloop::secrets;
+use iced::{Element, Length, Size, Task, widget::container, window};
 
 /// Default and minimum size of the app window, in logical pixels.
 const APP_SIZE: Size = Size::new(900.0, 620.0);
@@ -29,11 +26,18 @@ pub(super) fn app_settings() -> window::Settings {
 }
 
 impl Island {
-    /// Brings the app window forward, opening it (with bloop's icon) if it is closed.
+    /// Brings the app window forward, opening it (with bloop's icon) if it is closed. A
+    /// fresh window starts on Home with the drafts reset; focusing an open one keeps both.
     pub(super) fn open_app_window(&mut self) -> Task<Message> {
         if let Some(id) = self.app_window {
             return Task::batch([window::minimize(id, false), window::gain_focus(id)]);
         }
+        self.page = AppPage::Home;
+        self.draft_config = self.config.clone();
+        self.key_draft.clear();
+        self.key_status = secrets::key_source();
+        self.autostart = platform::autostart();
+        self.autostart_error.clear();
         let (id, open) = window::open(app_settings());
         self.app_window = Some(id);
         open.then(|id| window::run(id, platform::apply_app_icon))
@@ -50,12 +54,11 @@ impl Island {
         open.map(|id| Message::Window(Some(id)))
     }
 
-    /// Placeholder content until the dashboard lands. Paints its own opaque background,
-    /// since the daemon's background stays transparent for the notch.
+    /// The dashboard on its own opaque background, since the daemon's background stays
+    /// transparent for the notch.
     pub(super) fn app_view(&self) -> Element<'_, Message> {
         let t = self.tokens();
-        container(column![text("bloop").size(22).font(MEDIUM)].spacing(12))
-            .padding(24)
+        container(self.dashboard_view())
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_| container::Style {

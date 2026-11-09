@@ -1,8 +1,8 @@
 mod app_window;
-mod hub;
+mod dashboard;
 mod onboarding;
 
-pub use hub::HubPage;
+pub use dashboard::AppPage;
 
 use crate::{
     icons::{self, Icon},
@@ -105,7 +105,6 @@ pub enum Message {
     Chunk(u64, StreamEvent),
     Finished(u64, Result<(), String>),
     Cancel,
-    Settings,
     Provider(Provider),
     Endpoint(String),
     Model(String),
@@ -131,7 +130,8 @@ pub enum Message {
     ShowSetup,
     /// The icon font finished loading (true) or failed (false: keep word labels).
     FontLoaded(bool),
-    OpenHub(HubPage),
+    /// Show a dashboard page in the app window.
+    ShowPage(AppPage),
     SetTheme(ThemeChoice),
     SetAccent(Accent),
     SetFeel(Feel),
@@ -173,8 +173,8 @@ pub struct Island {
     storage_warning: String,
     loading: bool,
     presence: Presence,
-    /// The customization hub page, when the hub is open.
-    hub: Option<HubPage>,
+    /// The dashboard page showing in the app window.
+    page: AppPage,
     confirming_clear: bool,
     /// Drawn notch size; the OS window stays at `canvas_size` and never animates.
     spring: SizeSpring,
@@ -245,7 +245,7 @@ impl Island {
             storage_warning: String::new(),
             loading: true,
             presence: Presence::new(),
-            hub: None,
+            page: AppPage::Home,
             confirming_clear: false,
             spring: SizeSpring::new(SLIVER.width, SLIVER.height),
             last_frame: None,
@@ -354,7 +354,7 @@ impl Island {
         if !self.is_open() && self.now.saturating_duration_since(self.last_activity) >= NAP_AFTER {
             return Mood::Sleepy;
         }
-        if self.is_open() && self.hub.is_none() && !self.input.is_empty() {
+        if self.is_open() && !self.input.is_empty() {
             return Mood::Typing;
         }
         Mood::Idle
@@ -616,7 +616,7 @@ impl Island {
                 }
                 self.last_frame = None;
                 self.write_frame_log();
-                if self.is_open() && self.hub_closed() {
+                if self.is_open() {
                     return Task::batch([region, widget::operation::focus("prompt")]);
                 }
                 return region;
@@ -708,18 +708,6 @@ impl Island {
                 let update = self.peek_update_if_pending();
                 return Task::batch([self.persist(), update]);
             }
-            Message::Settings => {
-                self.hub = match self.hub {
-                    Some(_) => None,
-                    None => Some(HubPage::Grid),
-                };
-                self.draft_config = self.config.clone();
-                self.key_draft.clear();
-                self.key_status = secrets::key_source();
-                if !self.is_open() {
-                    return self.present(Event::Shortcut);
-                }
-            }
             Message::Provider(provider) => {
                 self.draft_config.provider = provider;
                 self.draft_config.endpoint = provider.default_endpoint().into();
@@ -751,7 +739,6 @@ impl Island {
                 }
                 self.config = self.draft_config.clone();
                 self.react(Mood::Happy, 1.2);
-                self.hub = None;
                 self.status.clear();
                 if let Some(controller) = &self.controller {
                     controller.shortcut(self.config.shortcut.clone());
@@ -938,14 +925,7 @@ impl Island {
                 }
                 return self.apply_live(|c| c.auto_update = on);
             }
-            Message::OpenHub(page) => {
-                if self.hub.is_none() {
-                    self.draft_config = self.config.clone();
-                    self.key_draft.clear();
-                    self.key_status = secrets::key_source();
-                }
-                self.hub = Some(page);
-            }
+            Message::ShowPage(page) => self.page = page,
             Message::SetTheme(theme) => return self.apply_live(|c| c.theme = theme),
             Message::SetAccent(accent) => return self.apply_live(|c| c.accent = accent),
             Message::SetFeel(feel) => return self.apply_live(|c| c.motion = feel),
@@ -970,7 +950,6 @@ impl Island {
                 return Task::batch([save, self.relayout(true)]);
             }
             Message::ShowSetup => {
-                self.hub = None;
                 self.config.onboarded = false;
                 let save = self.persist();
                 return Task::batch([save, self.start_setup()]);
@@ -979,9 +958,7 @@ impl Island {
                 if self.request.is_some() {
                     return self.update(Message::Cancel);
                 }
-                if let Some(page) = self.hub {
-                    self.hub = (page != HubPage::Grid).then_some(HubPage::Grid);
-                } else if self.is_open() {
+                if self.is_open() {
                     return self.present(Event::Dismiss);
                 }
             }
@@ -1253,10 +1230,6 @@ impl Island {
         }
     }
 
-    fn hub_closed(&self) -> bool {
-        self.hub.is_none()
-    }
-
     /// Sizes and places the fixed window, then cuts its click-through region.
     /// Applies an appearance change to the saved and the draft config and saves it now.
     fn updates_dir(&self) -> Option<PathBuf> {
@@ -1287,7 +1260,7 @@ impl Island {
         }
     }
 
-    /// One line for the hub's Updates section.
+    /// One line for the dashboard's update status.
     pub fn update_status(&self) -> String {
         match &self.update_state {
             UpdateState::Idle if self.up_to_date => "Up to date".into(),
@@ -1605,7 +1578,7 @@ impl Island {
         .into()
     }
 
-    /// The open panel: header, separator and chat, setup or hub.
+    /// The open panel: header, separator and chat or setup.
     fn panel_content(&self) -> Element<'_, Message> {
         let t = self.tokens();
         let status = self.presence.message().unwrap_or(self.status_line());
@@ -1627,14 +1600,14 @@ impl Island {
             } else {
                 (Icon::Sun, "Light", "Light mode")
             };
-            let (hub_icon, hub_word, hub_tip) = if self.hub.is_some() {
-                (Icon::ArrowLeft, "Back", "Back")
-            } else {
-                (Icon::SlidersHorizontal, "Settings", "Customize")
-            };
             header
                 .push(self.icon_button(theme_icon, theme_word, theme_tip, Message::Theme))
-                .push(self.icon_button(hub_icon, hub_word, hub_tip, Message::Settings))
+                .push(self.icon_button(
+                    Icon::SlidersHorizontal,
+                    "Settings",
+                    "Settings",
+                    Message::OpenWindow,
+                ))
         }
         .push(self.icon_button(Icon::ChevronUp, "Hide", "Hide", Message::Toggle));
         let separator = container(Space::new())
@@ -1643,8 +1616,6 @@ impl Island {
             .style(style::separator(t));
         let body = if self.onboarding.is_some() {
             self.onboarding_view()
-        } else if let Some(page) = self.hub {
-            self.hub_view(page)
         } else {
             self.chat_view()
         };
@@ -2272,7 +2243,7 @@ mod tests {
     #[test]
     fn cli_provider_clears_endpoint_and_allows_blank_model() {
         let mut app = ready();
-        let _ = app.update(Message::Settings);
+        let _ = app.update(Message::OpenWindow);
         let _ = app.update(Message::Provider(Provider::ClaudeCode));
         assert_eq!(app.draft_config.endpoint, "");
         let _ = app.update(Message::Model(String::new()));
@@ -2293,16 +2264,62 @@ mod tests {
     }
 
     #[test]
-    fn hub_navigation() {
+    fn dashboard_navigation() {
         let mut app = ready();
-        let _ = app.update(Message::Settings);
-        assert_eq!(app.hub, Some(HubPage::Grid));
-        let _ = app.update(Message::OpenHub(HubPage::Look));
-        assert_eq!(app.hub, Some(HubPage::Look));
+        let _ = app.update(Message::OpenWindow);
+        assert_eq!(app.page, AppPage::Home);
+        let _ = app.update(Message::ShowPage(AppPage::Appearance));
+        assert_eq!(app.page, AppPage::Appearance);
+        // Escape in the notch no longer walks back through settings pages.
         let _ = app.update(Message::Escape(app.window.unwrap()));
-        assert_eq!(app.hub, Some(HubPage::Grid));
-        let _ = app.update(Message::Escape(app.window.unwrap()));
-        assert_eq!(app.hub, None);
+        assert_eq!(app.page, AppPage::Appearance);
+    }
+
+    #[test]
+    fn notch_settings_icon_opens_dashboard_home() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        assert!(app.app_window.is_some());
+        assert_eq!(app.page, AppPage::Home);
+    }
+
+    #[test]
+    fn reopening_keeps_unsaved_model_draft() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let _ = app.update(Message::ShowPage(AppPage::Model));
+        let _ = app.update(Message::Model("draft-model".into()));
+        let _ = app.update(Message::OpenWindow);
+        assert_eq!(app.draft_config.model, "draft-model");
+        assert_eq!(app.page, AppPage::Model);
+    }
+
+    #[test]
+    fn opening_a_closed_window_resets_the_draft_and_page() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let _ = app.update(Message::ShowPage(AppPage::Model));
+        let _ = app.update(Message::Model("draft-model".into()));
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::CloseRequested(id));
+        let _ = app.update(Message::OpenWindow);
+        assert_eq!(app.draft_config.model, app.config.model);
+        assert_eq!(app.page, AppPage::Home);
+    }
+
+    #[test]
+    fn appearance_changes_apply_live() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let _ = app.update(Message::SetNotchWidth(NotchWidth::L));
+        assert_eq!(app.config.notch_width, NotchWidth::L);
+    }
+
+    #[test]
+    fn dashboard_pages_have_titles_and_subset_icons() {
+        assert_eq!(AppPage::Shortcut.title(), "Shortcut & startup");
+        assert_eq!(AppPage::Home.icon(), Some(Icon::Sparkles));
+        assert_eq!(AppPage::About.icon(), None);
     }
 
     #[test]
@@ -2357,18 +2374,6 @@ mod tests {
         );
         let _ = app.present_at(Event::Tick, start + Duration::from_millis(310));
         assert_eq!(app.presence.state(), State::Hover);
-    }
-
-    #[test]
-    fn tile_summaries() {
-        let mut app = ready();
-        app.config.accent = Accent::Indigo;
-        app.config.theme = ThemeChoice::Dark;
-        assert_eq!(app.tile_summary(HubPage::Look), "Dark · Indigo");
-        assert_eq!(app.tile_summary(HubPage::Motion), "Smooth");
-        assert_eq!(app.tile_summary(HubPage::Notch), "M · Centre");
-        app.config.provider = Provider::ClaudeCode;
-        assert_eq!(app.tile_summary(HubPage::Model), "Claude Code");
     }
 
     fn sample_release() -> Release {
