@@ -541,12 +541,14 @@ impl Island {
                     controller.shortcut(self.config.shortcut.clone());
                     self.controller = Some(controller);
                 }
-                platform::Event::Toggle => return self.present(Event::Shortcut),
+                platform::Event::Toggle => return self.update(Message::Toggle),
                 platform::Event::Settings => return self.update(Message::OpenWindow),
                 platform::Event::Quit => return self.update(Message::Quit),
                 platform::Event::Warning(error) => self.desktop_warning = error,
                 platform::Event::ShortcutApplied => self.desktop_warning.clear(),
             },
+            // No notch yet (first-run setup): the shortcut brings the setup window forward.
+            Message::Toggle if self.window.is_none() => return self.open_app_window(),
             Message::Toggle => return self.present(Event::Shortcut),
             Message::OpenClick => {
                 let ready_peek = self
@@ -571,7 +573,8 @@ impl Island {
                     let close = window::close(id);
                     if self.onboarding.take().is_some() {
                         // Setup stays pending (`onboarded` is still false); the notch takes over.
-                        return Task::batch([close, self.open_notch()]);
+                        let dismiss = self.present(Event::Dismiss);
+                        return Task::batch([close, dismiss, self.open_notch()]);
                     }
                     return close;
                 }
@@ -2160,11 +2163,13 @@ mod tests {
     #[test]
     fn finishing_opens_notch_and_home() {
         let mut app = first_launch();
+        let _ = app.update(Message::ShowPage(AppPage::About));
         let _ = app.update(Message::OnboardSkip);
         assert!(app.config.onboarded);
         assert!(app.window.is_some());
         assert!(app.app_window.is_some());
         assert_eq!(app.page, AppPage::Home);
+        assert_eq!(app.presence.message(), Some("I'm up here!"));
     }
 
     #[test]
@@ -2183,8 +2188,37 @@ mod tests {
         let mut app = first_launch();
         let _ = app.update(Message::OnboardNext);
         let step = app.onboarding.as_ref().unwrap().step();
+        let window = app.app_window;
         let _ = app.update(Message::OpenWindow);
         assert_eq!(app.onboarding.as_ref().unwrap().step(), step);
+        assert_eq!(app.app_window, window);
+    }
+
+    #[test]
+    fn shortcut_during_setup_does_not_open_a_phantom_notch() {
+        let mut app = first_launch();
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::Toggle);
+        assert!(!app.is_open());
+        let _ = app.update(Message::Platform(platform::Event::Toggle));
+        assert!(!app.is_open());
+        assert_eq!(app.app_window, Some(id));
+        let _ = app.update(Message::Toggle);
+        let _ = app.update(Message::Toggle);
+        let _ = app.update(Message::CloseRequested(id));
+        assert!(!app.is_open());
+        assert!(app.window.is_some());
+    }
+
+    #[test]
+    fn window_closed_clears_only_the_matching_app_window() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::WindowClosed(window::Id::unique()));
+        assert_eq!(app.app_window, Some(id));
+        let _ = app.update(Message::WindowClosed(id));
+        assert!(app.app_window.is_none());
     }
 
     #[test]

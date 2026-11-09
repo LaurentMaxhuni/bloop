@@ -710,6 +710,28 @@ fn run_command(exe: &std::path::Path) -> String {
     format!("\"{}\" --background", exe.display())
 }
 
+/// Whether an existing Run value must be rewritten (absent means autostart is off: leave it).
+fn needs_migration(current: Option<&str>, expected: &str) -> bool {
+    current.is_some_and(|value| value != expected)
+}
+
+/// Rewrites a Run value left by an older build (no `--background`) so sign-in starts quietly.
+pub fn migrate_autostart() {
+    #[cfg(windows)]
+    if let Err(error) = migrate_run_value(RUN_KEY) {
+        tracing::warn!("could not migrate the autostart entry: {error}");
+    }
+}
+
+#[cfg(windows)]
+fn migrate_run_value(key: &str) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if needs_migration(run_value(key).as_deref(), &run_command(&exe)) {
+        set_run_value(key, true)?;
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn run_value(key: &str) -> Option<String> {
     use windows::{
@@ -904,6 +926,46 @@ mod tests {
         assert!(super::run_value(key).is_none());
         super::set_run_value(key, false).unwrap();
         super::delete_tree(r"Software\bloop-test");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_rewrites_old_value_and_never_creates_one() {
+        use windows::{
+            Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW},
+            core::PCWSTR,
+        };
+        let key = r"Software\bloop-test-migrate\Run";
+        super::migrate_run_value(key).unwrap();
+        assert!(super::run_value(key).is_none());
+        let exe = std::env::current_exe().unwrap();
+        let old = super::wide(&format!("\"{}\"", exe.display()));
+        let (k, n) = (super::wide(key), super::wide(super::RUN_VALUE));
+        // SAFETY: strings are NUL-terminated; data pointer and byte length cover the same Vec.
+        unsafe {
+            RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                PCWSTR(k.as_ptr()),
+                PCWSTR(n.as_ptr()),
+                REG_SZ.0,
+                Some(old.as_ptr().cast()),
+                (old.len() * 2) as u32,
+            )
+        }
+        .ok()
+        .unwrap();
+        super::migrate_run_value(key).unwrap();
+        let value = super::run_value(key).unwrap();
+        assert!(value.ends_with(" --background"));
+        super::delete_tree(r"Software\bloop-test-migrate");
+    }
+
+    #[test]
+    fn needs_migration_only_for_a_stale_existing_value() {
+        let expected = r#""C:\b.exe" --background"#;
+        assert!(!super::needs_migration(None, expected));
+        assert!(!super::needs_migration(Some(expected), expected));
+        assert!(super::needs_migration(Some(r#""C:\b.exe""#), expected));
     }
 
     #[test]

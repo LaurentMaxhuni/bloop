@@ -10,6 +10,12 @@ mod ui;
 use iced::Color;
 
 fn main() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "bloop=info".into()),
+        )
+        .try_init();
     // A second copy (e.g. installer launch while autostart runs) exits quietly.
     let launch = bloop::launch::launch_kind(std::env::args());
     let Some(_instance) = platform::single_instance() else {
@@ -18,6 +24,7 @@ fn main() {
         }
         return;
     };
+    platform::migrate_autostart();
     if let Err(error) = run(launch) {
         platform::show_fatal(&error.to_string());
         std::process::exit(1);
@@ -25,12 +32,6 @@ fn main() {
 }
 
 fn run(launch: bloop::launch::Launch) -> iced::Result {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "bloop=info".into()),
-        )
-        .try_init();
     iced::daemon(
         move || ui::Island::new(launch),
         ui::Island::update,

@@ -151,5 +151,5 @@ Bump `version` in `Cargo.toml`, commit, then (with the GitHub CLI signed in once
 
 This builds the installer, writes its SHA-256 next to it and creates the GitHub release
 `v<version>` with both files. Running copies of bloop find it within six hours (or straight
-away with Customize › Model & shortcut › Check now), download it, check the hash and offer
+away with the app window's **About › Check now**), download it, check the hash and offer
 "Update ready — click to restart".

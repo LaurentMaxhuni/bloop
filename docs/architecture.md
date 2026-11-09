@@ -51,7 +51,7 @@ damped springs (`motion.rs`) stepped on `window::frames()` (redraw-synced, no su
 when settled). The window region is re-cut to the drawn outline whenever it moves a whole
 pixel, so everything outside the notch stays click-through. Width, position, feel and reduce
 motion come from `Config`; reduce motion follows Windows' "Animation effects" by default.
-Header and hub icons come from a 4.5 KB subset of the Lucide icon font (ISC,
+Header and sidebar icons come from a 4.5 KB subset of the Lucide icon font (ISC,
 `assets/LUCIDE-LICENSE.txt`); word labels show if it fails to load.
 
 Self-update (2026-11-07): `update.rs` asks the public GitHub Releases API for
