@@ -1,5 +1,8 @@
 # bloop
 
+Landing page: <https://laurentmaxhuni.github.io/bloop/> (source in `site/`, published by
+`.github/workflows/pages.yml`; preview locally with `python -m http.server -d site`).
+
 A native, local-first AI chat notch for Windows. Rust + Iced, without a browser
 runtime or bundled inference engine. First runnable milestone, not yet an autonomous
 desktop agent.

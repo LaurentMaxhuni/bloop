@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bloop — your AI, tucked into the top of your screen</title>
+<meta name="description" content="bloop is a tiny AI chat notch for Windows. It rests as a thin sliver at the top of your screen and opens into a chat with your own model: Ollama, llama.cpp, Unsloth Studio, Claude Code or Codex.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="bloop — your AI, tucked into the top of your screen">
+<meta property="og:description" content="A tiny AI chat notch for Windows that talks to your own model.">
+<meta property="og:url" content="https://laurentmaxhuni.github.io/bloop/">
+<meta property="og:image" content="https://laurentmaxhuni.github.io/bloop/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<script>
+  // Apply the remembered theme before first paint, so the page never flashes.
+  try { const t = localStorage.getItem('bloop-theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch {}
+  try { const a = localStorage.getItem('bloop-accent'); if (a) document.documentElement.dataset.accent = a; } catch {}
+</script>
+<link rel="stylesheet" href="styles.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<!-- Lucide icons (ISC licence, lucide.dev), only the ones this page uses. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></symbol>
+    <symbol id="i-github" viewBox="0 0 24 24"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></symbol>
+    <symbol id="i-house" viewBox="0 0 24 24"><path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-palette" viewBox="0 0 24 24"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></symbol>
+    <symbol id="i-keyboard" viewBox="0 0 24 24"><path d="M10 8h.01"/><path d="M12 12h.01"/><path d="M14 8h.01"/><path d="M16 12h.01"/><path d="M18 8h.01"/><path d="M6 8h.01"/><path d="M7 16h10"/><path d="M8 12h.01"/><rect width="20" height="16" x="2" y="4" rx="2"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M21 4h-7"/><path d="M10 4H3"/><path d="M21 12h-9"/><path d="M8 12H3"/><path d="M21 20h-5"/><path d="M12 20H3"/><path d="M14 2v4"/><path d="M8 10v4"/><path d="M16 18v4"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><path d="M12 19h8"/><path d="m4 17 6-6-6-6"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></symbol>
+    <symbol id="i-zap" viewBox="0 0 24 24"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></symbol>
+    <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></symbol>
+    <symbol id="i-hard-drive" viewBox="0 0 24 24"><path d="M22 12H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M6 16h.01"/><path d="M10 16h.01"/></symbol>
+    <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/></symbol>
+    <symbol id="i-shield-check" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></symbol>
+    <symbol id="i-pointer" viewBox="0 0 24 24"><path d="M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z"/></symbol>
+    <symbol id="i-message" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></symbol>
+    <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></symbol>
+    <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-square" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/></symbol>
+    <symbol id="i-rotate" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-app-window" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/></symbol>
+    <symbol id="i-shield-alert" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol>
+  </defs>
+</svg>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<!-- The live notch: fixed at the top centre, like the app. -->
+<div class="notch" id="notch" data-state="sliver">
+  <svg class="notch-shape" aria-hidden="true" focusable="false"><path class="notch-fill"/><path class="notch-line"/></svg>
+  <div class="notch-content" id="notch-content">
+    <div class="notch-pill" aria-hidden="true">
+      <span class="mascot" data-mascot="pill" style="--size:26px"></span>
+      <span class="pill-name">bloop</span>
+      <span class="pill-status" data-status>Ask anything</span>
+    </div>
+    <div class="notch-panel" id="notch-panel" role="dialog" aria-label="bloop chat demo" hidden>
+      <header class="panel-head">
+        <span class="mascot" data-mascot="panel" style="--size:30px"></span>
+        <div class="panel-title">
+          <strong>bloop</strong>
+          <span data-status>Ask anything</span>
+        </div>
+        <span class="panel-model">qwen3:4b · Ollama</span>
+        <button class="icon-btn" type="button" id="panel-replay" aria-label="Replay the demo chat" title="Replay"><svg class="i"><use href="#i-rotate"/></svg></button>
+        <button class="icon-btn" type="button" id="panel-close" aria-label="Close the chat" title="Close (Esc)"><svg class="i"><use href="#i-x"/></svg></button>
+      </header>
+      <div class="panel-sep"></div>
+      <div class="chat" id="chat" aria-live="polite"></div>
+      <div class="composer" aria-hidden="true">
+        <span class="composer-text" id="composer-text"></span><span class="caret"></span>
+        <span class="composer-ph" id="composer-ph">Message bloop…</span>
+        <span class="composer-send"><svg class="i"><use href="#i-arrow-up"/></svg></span>
+      </div>
+      <p class="panel-foot">A scripted demo — the real one talks to your own model.</p>
+    </div>
+  </div>
+  <button class="notch-hit" id="notch-hit" type="button" aria-expanded="false" aria-controls="notch-panel" aria-label="bloop — open the chat demo"></button>
+</div>
+
+<header class="bar">
+  <div class="bar-inner">
+    <a class="brand" href="#top" aria-label="bloop home">
+      <span class="mascot" data-mascot="brand" style="--size:22px"></span>
+      <span>bloop</span>
+    </a>
+    <nav class="bar-nav" aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#models">Models</a>
+      <a href="#window">App window</a>
+      <a href="#private">Privacy</a>
+    </nav>
+    <div class="bar-actions">
+      <a class="icon-btn" href="https://github.com/LaurentMaxhuni/bloop" aria-label="bloop on GitHub" title="GitHub"><svg class="i"><use href="#i-github"/></svg></a>
+      <button class="icon-btn" type="button" id="theme-toggle" aria-label="Theme: follow system" title="Theme: follow system"><svg class="i"><use href="#i-monitor"/></svg></button>
+      <a class="btn btn-primary btn-sm bar-download" data-download href="https://github.com/LaurentMaxhuni/bloop/releases/latest"><svg class="i"><use href="#i-download"/></svg>Download</a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero" id="top">
+    <div class="hero-wall" aria-hidden="true"></div>
+    <div class="wrap hero-inner">
+      <div class="hero-mascot">
+        <span class="mascot" data-mascot="hero" style="--size:112px"></span>
+      </div>
+      <p class="hint" id="hint"><svg class="i"><use href="#i-arrow-up"/></svg><span data-hint-text>The notch up top is real. Rest your mouse on it.</span></p>
+      <h1>Your AI, tucked into the top of your screen.</h1>
+      <p class="lede">bloop is a tiny chat notch for Windows. It rests as a thin sliver at the top of your screen, pops open when you need it, and talks to <em>your</em> model: Ollama, llama.cpp, Unsloth Studio, Claude Code or Codex.</p>
+      <div class="cta">
+        <a class="btn btn-primary btn-lg" data-download href="https://github.com/LaurentMaxhuni/bloop/releases/latest">
+          <svg class="i"><use href="#i-download"/></svg>
+          <span>Download for Windows</span>
+          <span class="btn-meta" data-download-meta hidden></span>
+        </a>
+        <a class="btn btn-outline btn-lg" href="https://github.com/LaurentMaxhuni/bloop"><svg class="i"><use href="#i-github"/></svg>View on GitHub</a>
+      </div>
+      <p class="fine">Free and open source · MIT · Windows 10 and 11 · native Rust, no browser inside</p>
+    </div>
+  </section>
+
+  <section class="section" id="how" aria-labelledby="how-title">
+    <div class="wrap">
+      <p class="eyebrow">How it works</p>
+      <h2 id="how-title">Out of the way until you want it.</h2>
+      <p class="sub">The notch is just for chatting. It grows with the same spring motion you feel in the hero, then tucks itself away again.</p>
+      <ol class="steps">
+        <li class="step">
+          <div class="screen" aria-hidden="true">
+            <span class="mini-notch" data-mini="sliver"></span>
+            <svg class="i cursor-i"><use href="#i-pointer"/></svg>
+          </div>
+          <h3><span class="num">1</span>Rest your mouse on the sliver</h3>
+          <p>A 120-pixel sliver hugs the top of your screen. Hover it and it pops into a pill; move away and it shrinks back.</p>
+        </li>
+        <li class="step">
+          <div class="screen" aria-hidden="true">
+            <span class="mini-notch" data-mini="pill"></span>
+          </div>
+          <h3><span class="num">2</span>Click to chat</h3>
+          <p>The pill opens into a panel. Replies stream in as they're written, and Bloop thinks, talks and cheers along.</p>
+        </li>
+        <li class="step">
+          <div class="screen" aria-hidden="true">
+            <span class="mini-notch" data-mini="panel"></span>
+            <span class="keys"><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>B</kbd></span>
+          </div>
+          <h3><span class="num">3</span><span>Press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>B</kbd> from anywhere</span></h3>
+          <p>A global shortcut opens and closes it from any app. It also hides itself during fullscreen apps and presentations.</p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="section" id="models" aria-labelledby="models-title">
+    <div class="wrap">
+      <p class="eyebrow">Bring your own model</p>
+      <h2 id="models-title">Your model, your machine.</h2>
+      <p class="sub">bloop doesn't ship a model or phone home. Point it at what you already run.</p>
+      <ul class="models">
+        <li class="model">
+          <span class="model-icon"><svg class="i"><use href="#i-server"/></svg></span>
+          <h3>Ollama</h3>
+          <p>Any installed model, streamed from <code>127.0.0.1:11434</code>. Default <code>qwen3:4b</code>.</p>
+        </li>
+        <li class="model">
+          <span class="model-icon"><svg class="i"><use href="#i-cpu"/></svg></span>
+          <h3>llama.cpp</h3>
+          <p>The llama.cpp server or any OpenAI-compatible endpoint, local or remote.</p>
+        </li>
+        <li class="model">
+          <span class="model-icon"><svg class="i"><use href="#i-zap"/></svg></span>
+          <h3>Unsloth Studio</h3>
+          <p>Chat with the models you fine-tune, on <code>127.0.0.1:8888</code>.</p>
+        </li>
+        <li class="model">
+          <span class="model-icon"><svg class="i"><use href="#i-terminal"/></svg></span>
+          <h3>Claude Code</h3>
+          <p>Uses the CLI you're already signed in to, in chat-only mode.</p>
+        </li>
+        <li class="model">
+          <span class="model-icon"><svg class="i"><use href="#i-terminal"/></svg></span>
+          <h3>Codex</h3>
+          <p>Same for the Codex CLI: one message in, one reply out.</p>
+        </li>
+        <li class="model model-more">
+          <span class="model-icon"><svg class="i"><use href="#i-globe"/></svg></span>
+          <h3>Anything OpenAI-compatible</h3>
+          <p>LM Studio, vLLM, a server down the hall. If it speaks <code>/chat/completions</code>, bloop can talk to it.</p>
+        </li>
+      </ul>
+      <ul class="notes">
+        <li><svg class="i"><use href="#i-hard-drive"/></svg>Local-first: nothing is downloaded or started for you.</li>
+        <li><svg class="i"><use href="#i-key"/></svg>API keys live in Windows Credential Manager, never in a file.</li>
+        <li><svg class="i"><use href="#i-terminal"/></svg>CLIs run chat-only: no tools, no file access.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="section" id="window" aria-labelledby="window-title">
+    <div class="wrap window-grid">
+      <div class="window-copy">
+        <p class="eyebrow">A real app window</p>
+        <h2 id="window-title">Set it up once. Then just chat.</h2>
+        <p class="sub">Setup and settings live in a normal desktop window, so the notch can stay tiny. The first launch walks you through it:</p>
+        <ol class="onboard">
+          <li><span class="num">1</span><div><strong>Welcome</strong><span>Meet Bloop.</span></div></li>
+          <li><span class="num">2</span><div><strong>Model</strong><span>bloop finds Ollama, Unsloth Studio and the CLIs you have.</span></div></li>
+          <li><span class="num">3</span><div><strong>How it works</strong><span>Sliver, pill, panel, shortcut.</span></div></li>
+          <li><span class="num">4</span><div><strong>Make it yours</strong><span>Theme, accent and motion.</span></div></li>
+          <li><span class="num">5</span><div><strong>All set</strong><span>The notch peeks out so you know where it lives.</span></div></li>
+        </ol>
+        <p class="sub small">After that, the notch's settings icon or the tray's <strong>Settings</strong> bring the window back. Closing it leaves bloop running.</p>
+      </div>
+
+      <div class="appwin" id="appwin">
+        <div class="appwin-bar" aria-hidden="true">
+          <span class="mascot" data-mascot="window" style="--size:16px"></span>
+          <span class="appwin-title">bloop</span>
+          <span class="appwin-ctl"><svg class="i"><use href="#i-minus"/></svg><svg class="i"><use href="#i-square"/></svg><svg class="i"><use href="#i-x"/></svg></span>
+        </div>
+        <div class="appwin-body">
+          <div class="appwin-nav" role="tablist" aria-label="Dashboard pages (demo)" aria-orientation="vertical">
+            <button role="tab" id="tab-home" aria-controls="page-home" aria-selected="false" tabindex="-1"><svg class="i"><use href="#i-house"/></svg><span>Home</span></button>
+            <button role="tab" id="tab-appearance" aria-controls="page-appearance" aria-selected="true"><svg class="i"><use href="#i-palette"/></svg><span>Appearance</span></button>
+            <button role="tab" id="tab-model" aria-controls="page-model" aria-selected="false" tabindex="-1"><svg class="i"><use href="#i-cpu"/></svg><span>Model</span></button>
+            <button role="tab" id="tab-shortcut" aria-controls="page-shortcut" aria-selected="false" tabindex="-1"><svg class="i"><use href="#i-keyboard"/></svg><span>Shortcut &amp; startup</span></button>
+            <button role="tab" id="tab-about" aria-controls="page-about" aria-selected="false" tabindex="-1"><svg class="i"><use href="#i-info"/></svg><span>About</span></button>
+          </div>
+
+          <div class="appwin-page" role="tabpanel" id="page-home" aria-labelledby="tab-home" hidden>
+            <div class="home-hello">
+              <span class="mascot" data-mascot="home" style="--size:44px"></span>
+              <div><h3>bloop is running</h3><p class="muted">Rest your mouse on the notch, or press Ctrl+Alt+B.</p></div>
+            </div>
+            <dl class="kv">
+              <div><dt>Model</dt><dd>qwen3:4b · Ollama</dd></div>
+              <div><dt>Shortcut</dt><dd><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>B</kbd></dd></div>
+              <div><dt>Updates</dt><dd><span class="dot"></span>Up to date</dd></div>
+            </dl>
+          </div>
+
+          <div class="appwin-page" role="tabpanel" id="page-appearance" aria-labelledby="tab-appearance">
+            <h3>Appearance</h3>
+            <p class="muted">These work on this page too. Try them.</p>
+            <div class="field">
+              <span class="label" id="lbl-theme">Theme</span>
+              <div class="seg" role="radiogroup" aria-labelledby="lbl-theme" data-seg="theme">
+                <button type="button" role="radio" data-value="system" aria-checked="true">Follow Windows</button>
+                <button type="button" role="radio" data-value="light" aria-checked="false">Light</button>
+                <button type="button" role="radio" data-value="dark" aria-checked="false">Dark</button>
+              </div>
+            </div>
+            <div class="field">
+              <span class="label" id="lbl-accent">Accent</span>
+              <div class="swatches" role="radiogroup" aria-labelledby="lbl-accent" data-seg="accent">
+                <button type="button" role="radio" data-value="neutral" aria-checked="true" aria-label="Neutral" style="--sw:var(--fg)"></button>
+                <button type="button" role="radio" data-value="indigo" aria-checked="false" aria-label="Indigo" style="--sw:#4f46e5"></button>
+                <button type="button" role="radio" data-value="teal" aria-checked="false" aria-label="Teal" style="--sw:#0d9488"></button>
+                <button type="button" role="radio" data-value="rose" aria-checked="false" aria-label="Rose" style="--sw:#e11d48"></button>
+                <button type="button" role="radio" data-value="amber" aria-checked="false" aria-label="Amber" style="--sw:#d97706"></button>
+                <button type="button" role="radio" data-value="lime" aria-checked="false" aria-label="Lime" style="--sw:#65a30d"></button>
+              </div>
+            </div>
+            <div class="field">
+              <span class="label" id="lbl-feel">Motion</span>
+              <div class="seg" role="radiogroup" aria-labelledby="lbl-feel" data-seg="feel">
+                <button type="button" role="radio" data-value="snappy" aria-checked="false">Snappy</button>
+                <button type="button" role="radio" data-value="smooth" aria-checked="true">Smooth</button>
+                <button type="button" role="radio" data-value="calm" aria-checked="false">Calm</button>
+              </div>
+            </div>
+            <button class="btn btn-outline btn-sm" type="button" id="peek-test"><svg class="i"><use href="#i-sparkles"/></svg>Peek the notch</button>
+          </div>
+
+          <div class="appwin-page" role="tabpanel" id="page-model" aria-labelledby="tab-model" hidden>
+            <h3>Model</h3>
+            <p class="muted">Choose the model bloop talks to.</p>
+            <div class="field"><span class="label">Provider</span><span class="input select">Ollama</span></div>
+            <div class="field"><span class="label">Base URL</span><span class="input mono">http://127.0.0.1:11434</span></div>
+            <div class="field"><span class="label">Model</span><span class="input mono">qwen3:4b</span></div>
+            <span class="btn btn-primary btn-sm fake">Save changes</span>
+          </div>
+
+          <div class="appwin-page" role="tabpanel" id="page-shortcut" aria-labelledby="tab-shortcut" hidden>
+            <h3>Shortcut &amp; startup</h3>
+            <div class="field"><span class="label">Global shortcut</span><span class="input mono">Ctrl+Alt+B</span><span class="help">Opens and closes the notch from anywhere.</span></div>
+            <div class="toggle-row"><span>Start with Windows</span><span class="switch on" aria-hidden="true"></span></div>
+            <div class="toggle-row"><span>Hover delay</span><span class="muted">150 ms</span></div>
+            <div class="toggle-row"><span>Show the mascot</span><span class="switch on" aria-hidden="true"></span></div>
+          </div>
+
+          <div class="appwin-page" role="tabpanel" id="page-about" aria-labelledby="tab-about" hidden>
+            <h3>About</h3>
+            <dl class="kv">
+              <div><dt>Version</dt><dd data-version>0.3.1</dd></div>
+              <div><dt>Updates</dt><dd><span class="dot"></span>Up to date</dd></div>
+            </dl>
+            <div class="toggle-row"><span>Check for updates automatically</span><span class="switch on" aria-hidden="true"></span></div>
+            <div class="row-btns"><span class="btn btn-outline btn-sm fake"><svg class="i"><use href="#i-refresh"/></svg>Check now</span><span class="btn btn-outline btn-sm fake">Run setup again</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="private" aria-labelledby="private-title">
+    <div class="wrap">
+      <p class="eyebrow">Private by design</p>
+      <h2 id="private-title">Your chats stay on your computer.</h2>
+      <ul class="pillars">
+        <li><span class="model-icon"><svg class="i"><use href="#i-hard-drive"/></svg></span><h3>Stored locally</h3><p>Conversations live in a SQLite file in your own data folder. Nothing syncs anywhere.</p></li>
+        <li><span class="model-icon"><svg class="i"><use href="#i-eye-off"/></svg></span><h3>No tracking</h3><p>No accounts, analytics or telemetry, in the app or on this page.</p></li>
+        <li><span class="model-icon"><svg class="i"><use href="#i-shield-check"/></svg></span><h3>Checked updates</h3><p>Updates come from GitHub Releases and are verified against a SHA-256 checksum before they install.</p></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="section final" aria-labelledby="final-title">
+    <div class="wrap final-inner">
+      <span class="mascot" data-mascot="final" style="--size:72px"></span>
+      <h2 id="final-title">Ready when you are.</h2>
+      <p class="sub">One small installer. bloop updates itself after that.</p>
+      <div class="cta">
+        <a class="btn btn-primary btn-lg" data-download href="https://github.com/LaurentMaxhuni/bloop/releases/latest">
+          <svg class="i"><use href="#i-download"/></svg>
+          <span>Download for Windows</span>
+          <span class="btn-meta" data-download-meta hidden></span>
+        </a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <div class="install-note">
+      <svg class="i"><use href="#i-shield-alert"/></svg>
+      <p><strong>First install:</strong> bloop isn't code-signed yet, so Windows SmartScreen may say "unknown publisher". Choose <strong>More info → Run anyway</strong>. When the installer finishes, <strong>Launch bloop</strong> opens setup in the app window.</p>
+    </div>
+    <div class="foot-row">
+      <span class="brand small"><span class="mascot" data-mascot="foot" style="--size:18px"></span>bloop</span>
+      <nav class="foot-links" aria-label="Links">
+        <a href="https://github.com/LaurentMaxhuni/bloop">GitHub</a>
+        <a href="https://github.com/LaurentMaxhuni/bloop/releases">Release notes</a>
+        <a href="https://github.com/LaurentMaxhuni/bloop/blob/main/LICENSE">MIT licence</a>
+      </nav>
+      <span class="muted small">Icons by Lucide (ISC).</span>
+    </div>
+  </div>
+</footer>
+</body>
+</html>

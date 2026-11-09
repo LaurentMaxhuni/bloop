@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<title>bloop social card</title>
+<!-- Source of og.png: open at 1200×630 and screenshot (see docs/superpowers/plans/2026-11-08-landing-page.md, Task 5). -->
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+<style>
+  html, body { width: 1200px; height: 630px; margin: 0; overflow: hidden; }
+  .card { position: relative; width: 1200px; height: 630px; background: var(--bg); display: flex; align-items: center; gap: 64px; padding: 0 96px; }
+  .card .hero-wall { inset: 0; -webkit-mask-image: radial-gradient(ellipse 60% 70% at 30% 40%, #000 20%, transparent 80%); mask-image: radial-gradient(ellipse 60% 70% at 30% 40%, #000 20%, transparent 80%); }
+  .og-notch { position: absolute; top: 0; left: 50%; transform: translateX(-50%); }
+  .og-pill { position: absolute; inset: 0; display: flex; align-items: center; gap: 10px; padding: 0 30px 6px 24px; font-size: 20px; }
+  .og-copy { position: relative; }
+  .og-copy h1 { font-size: 76px; max-width: 12ch; }
+  .og-copy p { margin-top: 22px; font-size: 26px; color: var(--muted-strong); }
+  .og-copy .brand { font-size: 30px; margin-bottom: 28px; gap: 12px; }
+</style>
+<body>
+<div class="card">
+  <div class="hero-wall"></div>
+  <span class="og-notch mini-notch" data-og-notch></span>
+  <div class="og-copy">
+    <div class="brand"><span class="mascot" data-m="idle" style="--size:34px"></span>bloop</div>
+    <h1>Your AI, tucked into the top of your screen.</h1>
+    <p>A tiny chat notch for Windows that talks to your own model.</p>
+  </div>
+  <span class="mascot" data-m="happy" style="--size:260px; position:relative; flex:none"></span>
+</div>
+<script type="module">
+  import { mascotSVG } from './mascot.js';
+  for (const el of document.querySelectorAll('[data-m]')) el.innerHTML = mascotSVG({ mood: el.dataset.m, since: 0.15 });
+  const n = document.querySelector('[data-og-notch]');
+  const w = 420, h = 56, s = 10, r = 26, k = 0.5522848;
+  const d = `M0 0C${s*k} 0 ${s} ${s*(1-k)} ${s} ${s}L${s} ${h-r}C${s} ${h-r+r*k} ${s+r-r*k} ${h} ${s+r} ${h}L${w-s-r} ${h}C${w-s-r+r*k} ${h} ${w-s} ${h-r+r*k} ${w-s} ${h-r}L${w-s} ${s}C${w-s} ${s*(1-k)} ${w-s*k} 0 ${w} 0`;
+  n.style.cssText += `width:${w}px;height:${h}px`;
+  n.innerHTML = `<svg width="${w}" height="${h}"><path class="notch-fill" d="${d}Z"/><path class="notch-line" d="${d}"/></svg><div class="og-pill"><span class="mascot" data-p style="--size:34px"></span><strong>bloop</strong><span class="muted" style="margin-left:auto">Ask anything</span></div>`;
+  n.querySelector('[data-p]').innerHTML = mascotSVG({ mood: 'perk', since: 0.2 });
+  document.body.dataset.ready = '1';
+</script>
+</body>
+</html>

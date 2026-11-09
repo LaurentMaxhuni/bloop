@@ -1,6 +1,6 @@
 # Landing page — design
 
-Date: 2026-11-08 · Status: awaiting review
+Date: 2026-11-08 · Status: approved · Updated 2026-11-09 for the app window (PR LaurentMaxhuni/bloop#1)
 
 ## Goal
 
@@ -19,9 +19,11 @@ macOS/Linux downloads, localisation.
 ## Structure
 
 `site/index.html`, `site/styles.css`, `site/app.js`, `site/spring.js`, `site/mascot.js` (SVG mascot),
-`site/favicon.svg`, `site/og.png` (1200×630 social card). No framework, no bundler, no
+the handful of Lucide icons used as an inline SVG sprite in `index.html` (ISC licence noted),
+`site/favicon.svg`, `site/og.png` (1200×630 social card, rendered from `site/og.html`). No framework, no bundler, no
 external scripts; fonts are the system stack (`"Segoe UI Variable Text", "Segoe UI",
-system-ui, sans-serif`) like the app.
+system-ui, sans-serif`) like the app. Colours are the app's shadcn/ui "neutral" tokens from
+`src/style.rs`, light and dark.
 
 ## Sections
 
@@ -34,16 +36,23 @@ system-ui, sans-serif`) like the app.
    screen." with a one-line subhead, **Download for Windows** (`vX.Y.Z · N.N MB`) and
    **View on GitHub**.
 2. **How it works.** Three static mini-notches (sliver, pill, panel) with "Rest your mouse
-   on the sliver", "Click to chat", "Ctrl+Alt+B from anywhere".
+   on the sliver", "Click to chat", "Ctrl+Alt+B from anywhere". The notch is only for
+   chatting; setup and settings live in the app window (section 4).
 3. **Bring your own model.** Cards for Ollama, Unsloth Studio, Claude Code, Codex and any
    OpenAI-compatible server; notes: local-first, keys in Windows Credential Manager, CLIs run
    chat-only.
-4. **Make it yours.** The hub's four tiles recreated. The six accent swatches recolour the
-   page (buttons, links, mascot blush) and are remembered in `localStorage` (wrapped in
-   try/catch); a Snappy / Smooth / Calm switch changes the hero notch's spring.
+4. **A real app window for setup.** (Was "the hub's four tiles": the notch's Customize hub
+   was replaced by the app window in PR #1.) A static mock of the bloop window: first run
+   walks through Welcome → Model → How it works → Make it yours → All set, then the
+   dashboard with its sidebar (Home, Appearance, Model, Shortcut & startup, About). The
+   Appearance page in the mock is live: the six accent swatches recolour the page (buttons,
+   links, mascot blush) and are remembered in `localStorage` (wrapped in try/catch); a
+   Snappy / Smooth / Calm switch changes the hero notch's spring. Copy: the notch's settings
+   icon or the tray's Settings open the window; closing it leaves bloop running.
 5. **Private by design.** Chats stay in a local SQLite file; no tracking; updates are
    checked against a SHA-256 from GitHub before installing.
-6. **Footer.** Install note (Windows SmartScreen shows "unknown publisher" until the app is
+6. **Footer.** Install note (the installer's "Launch bloop" opens setup in the app window;
+   Windows SmartScreen shows "unknown publisher" until the app is
    code-signed: More info → Run anyway), MIT licence, GitHub link, release notes link.
 
 ## Behaviour
