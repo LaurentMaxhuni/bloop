@@ -2622,14 +2622,40 @@ mod tests {
         assert!(!app.quitting);
     }
 
+    /// Cursor enters window `id`, then the hover delay passes.
+    fn hover_in(app: &mut Island, id: window::Id) {
+        let _ = app.update(Message::Cursor(id, true));
+        let _ = app.update(Message::Deadline(
+            Instant::now() + Duration::from_millis(200),
+        ));
+    }
+
     #[test]
     fn app_window_cursor_does_not_touch_the_notch() {
         let mut app = ready();
         let _ = app.update(Message::OpenWindow);
         let id = app.app_window.unwrap();
-        let before = app.presence.shape();
-        let _ = app.update(Message::Cursor(id, true));
-        assert_eq!(app.presence.shape(), before);
+        hover_in(&mut app, id);
+        assert_eq!(app.presence.state(), State::Sliver);
+        // The same hover over the notch does pop the pill.
+        let notch = app.window.unwrap();
+        hover_in(&mut app, notch);
+        assert_eq!(app.presence.state(), State::Hover);
+    }
+
+    #[test]
+    fn app_window_focus_loss_leaves_the_notch_open() {
+        let mut app = ready();
+        let notch = app.window.unwrap();
+        let _ = app.update(Message::Toggle);
+        assert!(app.is_open());
+        let _ = app.update(Message::OpenWindow);
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::Focus(id, false));
+        assert!(app.is_open());
+        // The notch losing focus still dismisses it.
+        let _ = app.update(Message::Focus(notch, false));
+        assert!(!app.is_open());
     }
 
     #[test]
