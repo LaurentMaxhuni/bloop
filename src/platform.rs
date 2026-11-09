@@ -527,8 +527,6 @@ pub fn signal_running_copy() {
 }
 
 /// Yields `()` each time a second launch asks this copy to open its window.
-// used from Task 3's daemon
-#[allow(dead_code)]
 pub fn open_requests() -> impl iced::futures::Stream<Item = ()> {
     iced::stream::channel(4, async |mut output| {
         #[cfg(windows)]
@@ -587,8 +585,6 @@ fn wait_for_open_requests(sender: tokio::sync::mpsc::UnboundedSender<()>) {
 }
 
 /// Sets the window's big and small icons from the exe's embedded resource (id 1).
-// used from Task 3's daemon
-#[allow(dead_code)]
 pub fn apply_app_icon(window: &dyn iced::window::Window) {
     #[cfg(windows)]
     {
@@ -597,8 +593,9 @@ pub fn apply_app_icon(window: &dyn iced::window::Window) {
             Foundation::{HINSTANCE, HWND, LPARAM, WPARAM},
             System::LibraryLoader::GetModuleHandleW,
             UI::WindowsAndMessaging::{
-                GetSystemMetrics, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW,
-                SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SendMessageW, WM_SETICON,
+                GetSystemMetrics, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR, LR_SHARED,
+                LoadImageW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SendMessageW,
+                WM_SETICON,
             },
         };
         let Ok(handle) = window.window_handle() else {
@@ -620,6 +617,8 @@ pub fn apply_app_icon(window: &dyn iced::window::Window) {
             // SAFETY: plain metric queries.
             let (width, height) = unsafe { (GetSystemMetrics(width), GetSystemMetrics(height)) };
             // SAFETY: resource id 1 is passed as MAKEINTRESOURCE (an integer in the pointer).
+            // LR_SHARED: the system owns and caches the handle, so reopening the window
+            // reuses it instead of leaking a new one each time.
             let icon = unsafe {
                 LoadImageW(
                     Some(instance),
@@ -627,7 +626,7 @@ pub fn apply_app_icon(window: &dyn iced::window::Window) {
                     IMAGE_ICON,
                     width,
                     height,
-                    LR_DEFAULTCOLOR,
+                    LR_DEFAULTCOLOR | LR_SHARED,
                 )
             };
             if let Ok(icon) = icon {

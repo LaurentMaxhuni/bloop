@@ -7,7 +7,7 @@ mod presence;
 mod style;
 mod ui;
 
-use iced::{Color, Point, Size, window};
+use iced::Color;
 
 fn main() {
     // A second copy (e.g. installer launch while autostart runs) exits quietly.
@@ -18,48 +18,34 @@ fn main() {
         }
         return;
     };
-    if let Err(error) = run() {
+    if let Err(error) = run(launch) {
         platform::show_fatal(&error.to_string());
         std::process::exit(1);
     }
 }
 
-fn run() -> iced::Result {
+fn run(launch: bloop::launch::Launch) -> iced::Result {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "bloop=info".into()),
         )
         .try_init();
-    let mut settings = window::Settings {
-        size: ui::SLIVER,
-        position: window::Position::SpecificWith(|size: Size, monitor: Size| {
-            platform::primary_position(size)
-                .unwrap_or(Point::new((monitor.width - size.width) / 2.0, 0.0))
-        }),
-        decorations: false,
-        transparent: true,
-        resizable: false,
-        level: window::Level::AlwaysOnTop,
-        exit_on_close_request: false,
-        ..Default::default()
-    };
-    #[cfg(windows)]
-    {
-        settings.platform_specific.skip_taskbar = true;
-    }
-    iced::application(ui::Island::new, ui::Island::update, ui::Island::view)
-        .title("bloop")
-        .window(settings)
-        .executor::<Executor>()
-        .default_font(style::REGULAR)
-        .theme(ui::Island::theme)
-        .style(|app, _| iced::theme::Style {
-            background_color: Color::TRANSPARENT,
-            text_color: app.tokens().foreground,
-        })
-        .subscription(ui::Island::subscription)
-        .run()
+    iced::daemon(
+        move || ui::Island::new(launch),
+        ui::Island::update,
+        ui::Island::view,
+    )
+    .title(ui::Island::title)
+    .executor::<Executor>()
+    .default_font(style::REGULAR)
+    .theme(ui::Island::theme)
+    .style(|app, _| iced::theme::Style {
+        background_color: Color::TRANSPARENT,
+        text_color: app.tokens().foreground,
+    })
+    .subscription(ui::Island::subscription)
+    .run()
 }
 
 /// Two workers cover one stream and UI tasks without scaling threads to CPU count.

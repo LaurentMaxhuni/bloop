@@ -1,3 +1,4 @@
+mod app_window;
 mod hub;
 mod onboarding;
 
@@ -15,6 +16,7 @@ use bloop::{
         Accent, Config, HOVER_DELAYS_MS, NotchPosition, NotchWidth, Provider, ReduceMotion,
         ThemeChoice,
     },
+    launch::{Launch, Startup, startup},
     model::{self, MAX_PROMPT, MAX_TURNS, Turn},
     motion::{Feel, SizeSpring},
     onboarding::{self as setup, Choice, Detection, Onboarding},
@@ -46,6 +48,28 @@ const UPDATE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// Collapsed and untouched for this long, the mascot dozes off.
 const NAP_AFTER: Duration = Duration::from_secs(45);
 
+/// The notch window: borderless, transparent, always on top and out of the taskbar.
+pub fn notch_settings() -> window::Settings {
+    let mut settings = window::Settings {
+        size: SLIVER,
+        position: window::Position::SpecificWith(|size: Size, monitor: Size| {
+            platform::primary_position(size)
+                .unwrap_or(iced::Point::new((monitor.width - size.width) / 2.0, 0.0))
+        }),
+        decorations: false,
+        transparent: true,
+        resizable: false,
+        level: window::Level::AlwaysOnTop,
+        exit_on_close_request: false,
+        ..Default::default()
+    };
+    #[cfg(windows)]
+    {
+        settings.platform_specific.skip_taskbar = true;
+    }
+    settings
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     Window(Option<window::Id>),
@@ -56,10 +80,16 @@ pub enum Message {
     Toggle,
     /// Click on the compact pill.
     OpenClick,
-    /// Cursor entered (true) or left (false) the window.
-    Cursor(bool),
-    /// Window gained (true) or lost (false) focus.
-    Focus(bool),
+    /// Cursor entered (true) or left (false) a window.
+    Cursor(window::Id, bool),
+    /// A window gained (true) or lost (false) focus.
+    Focus(window::Id, bool),
+    /// Show the app window, opening it if needed.
+    OpenWindow,
+    /// The user asked to close a window (title-bar X, Alt+F4).
+    CloseRequested(window::Id),
+    /// A window finished closing.
+    WindowClosed(window::Id),
     /// A presence deadline (hover/leave/peek) may have passed.
     Deadline(Instant),
     FullscreenPoll,
@@ -87,7 +117,7 @@ pub enum Message {
     KeepChat,
     Quit,
     QuitWithoutSaving,
-    Escape,
+    Escape(window::Id),
     OnboardNext,
     OnboardBack,
     OnboardSkip,
@@ -169,7 +199,12 @@ pub struct Island {
     update_peek_pending: bool,
     /// Starts the downloaded installer; replaced in tests.
     installer_launcher: fn(&std::path::Path) -> Result<(), String>,
+    /// The notch window.
     window: Option<window::Id>,
+    /// The decorated app window, while it is open.
+    app_window: Option<window::Id>,
+    /// How this process was started; decides which windows open once the config loads.
+    launch: Launch,
     controller: Option<platform::Controller>,
     request_id: u64,
     request: Option<iced::task::Handle>,
@@ -197,7 +232,7 @@ pub struct Island {
 }
 
 impl Island {
-    pub fn new() -> (Self, Task<Message>) {
+    pub fn new(launch: Launch) -> (Self, Task<Message>) {
         let path = storage::data_path();
         let load_path = path.clone();
         let state = Self {
@@ -225,6 +260,8 @@ impl Island {
             update_peek_pending: false,
             installer_launcher: platform::launch_installer,
             window: None,
+            app_window: None,
+            launch,
             controller: None,
             request_id: 0,
             request: None,
@@ -249,7 +286,6 @@ impl Island {
         (
             state,
             Task::batch([
-                window::oldest().map(Message::Window),
                 iced::font::load(icons::FONT_BYTES)
                     .map(|result| Message::FontLoaded(result.is_ok())),
                 Task::perform(
@@ -272,7 +308,12 @@ impl Island {
             ThemeChoice::System => self.system_light,
         }
     }
-    pub fn theme(&self) -> Theme {
+    pub fn title(&self, _id: window::Id) -> String {
+        "bloop".into()
+    }
+
+    /// Both windows share one theme.
+    pub fn theme(&self, _id: window::Id) -> Theme {
         let light = self.light();
         let t = self.tokens();
         Theme::custom(
@@ -358,33 +399,22 @@ impl Island {
     pub fn subscription(&self) -> Subscription<Message> {
         let mut events = vec![
             Subscription::run(platform::events).map(Message::Platform),
-            iced::keyboard::listen().filter_map(|event| {
-                if matches!(
-                    event,
-                    iced::keyboard::Event::KeyPressed {
-                        key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
-                        ..
-                    }
-                ) {
-                    Some(Message::Escape)
-                } else {
-                    None
-                }
-            }),
-            window::events().filter_map(|(_, event)| {
-                if matches!(event, window::Event::CloseRequested) {
-                    Some(Message::Quit)
-                } else {
-                    None
-                }
-            }),
-            iced::event::listen_with(|event, _, _| match event {
+            Subscription::run(platform::open_requests).map(|()| Message::OpenWindow),
+            window::close_requests().map(Message::CloseRequested),
+            window::close_events().map(Message::WindowClosed),
+            iced::event::listen_with(|event, status, id| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                    ..
+                }) if status == iced::event::Status::Ignored => Some(Message::Escape(id)),
                 iced::Event::Mouse(iced::mouse::Event::CursorEntered) => {
-                    Some(Message::Cursor(true))
+                    Some(Message::Cursor(id, true))
                 }
-                iced::Event::Mouse(iced::mouse::Event::CursorLeft) => Some(Message::Cursor(false)),
-                iced::Event::Window(window::Event::Focused) => Some(Message::Focus(true)),
-                iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(false)),
+                iced::Event::Mouse(iced::mouse::Event::CursorLeft) => {
+                    Some(Message::Cursor(id, false))
+                }
+                iced::Event::Window(window::Event::Focused) => Some(Message::Focus(id, true)),
+                iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(id, false)),
                 _ => None,
             }),
         ];
@@ -423,7 +453,7 @@ impl Island {
                 | Message::Saved(_)
                 | Message::Deadline(_)
                 | Message::FullscreenPoll
-                | Message::Focus(_)
+                | Message::Focus(..)
         ) {
             self.last_activity = Instant::now();
             self.now = self.last_activity;
@@ -476,10 +506,14 @@ impl Island {
                     self.update_peek_pending = true;
                 }
                 let layout = self.relayout(false);
-                if !self.config.onboarded {
-                    return Task::batch([layout, self.start_setup()]);
-                }
-                return layout;
+                let notch = self.open_notch();
+                let windows = match startup(self.launch, self.config.onboarded) {
+                    Startup::NotchOnly => Task::none(),
+                    Startup::Dashboard => self.open_app_window(),
+                    // Setup still runs in the notch for now.
+                    Startup::Onboarding => self.start_setup(),
+                };
+                return Task::batch([layout, notch, windows]);
             }
             Message::Saved(result) => {
                 self.saving = false;
@@ -509,7 +543,7 @@ impl Island {
                     self.controller = Some(controller);
                 }
                 platform::Event::Toggle => return self.present(Event::Shortcut),
-                platform::Event::Settings => return self.update(Message::Settings),
+                platform::Event::Settings => return self.update(Message::OpenWindow),
                 platform::Event::Quit => return self.update(Message::Quit),
                 platform::Event::Warning(error) => self.desktop_warning = error,
                 platform::Event::ShortcutApplied => self.desktop_warning.clear(),
@@ -524,10 +558,31 @@ impl Island {
                 }
                 return self.present(Event::Click);
             }
-            Message::Cursor(true) => return self.present(Event::CursorEntered),
-            Message::Cursor(false) => return self.present(Event::CursorLeft),
-            Message::Focus(true) => {}
-            Message::Focus(false) => return self.present(Event::FocusLost),
+            // Only the notch drives presence; the app window's pointer, focus and keys are its own.
+            Message::Cursor(id, _) | Message::Focus(id, _) | Message::Escape(id)
+                if self.window != Some(id) => {}
+            Message::Cursor(_, true) => return self.present(Event::CursorEntered),
+            Message::Cursor(_, false) => return self.present(Event::CursorLeft),
+            Message::Focus(_, true) => {}
+            Message::Focus(_, false) => return self.present(Event::FocusLost),
+            Message::OpenWindow => return self.open_app_window(),
+            Message::CloseRequested(id) => {
+                if self.app_window == Some(id) {
+                    self.app_window = None;
+                    return window::close(id);
+                }
+                if self.window == Some(id) {
+                    return self.update(Message::Quit);
+                }
+            }
+            Message::WindowClosed(id) => {
+                if self.app_window == Some(id) {
+                    self.app_window = None;
+                }
+                if self.window == Some(id) {
+                    self.window = None;
+                }
+            }
             Message::Deadline(now) => return self.present_at(Event::Tick, now),
             Message::FullscreenPoll => {
                 return self.present(Event::Fullscreen(platform::fullscreen_active()));
@@ -920,7 +975,7 @@ impl Island {
                 let save = self.persist();
                 return Task::batch([save, self.start_setup()]);
             }
-            Message::Escape => {
+            Message::Escape(_) => {
                 if self.request.is_some() {
                     return self.update(Message::Cancel);
                 }
@@ -1491,7 +1546,14 @@ impl Island {
         }
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self, id: window::Id) -> Element<'_, Message> {
+        if self.app_window == Some(id) {
+            return self.app_view();
+        }
+        self.notch_view()
+    }
+
+    fn notch_view(&self) -> Element<'_, Message> {
         let t = self.tokens();
         let shape = self.presence.shape();
         let target = self.size_for(shape);
@@ -1856,12 +1918,14 @@ fn field<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Elemen
 mod tests {
     use super::*;
     use bloop::config::{Accent, NotchPosition, NotchWidth, ReduceMotion};
+    use bloop::launch::Launch;
     use bloop::motion::Feel;
     use bloop::onboarding::{Choice, Step};
     use bloop::update::{Release, Version};
 
     fn ready() -> Island {
-        let (mut app, _) = Island::new();
+        let (mut app, _) = Island::new(Launch::Manual);
+        app.window = Some(window::Id::unique());
         app.loading = false;
         app.storage_disabled = true;
         app
@@ -2026,7 +2090,7 @@ mod tests {
         assert_eq!(app.presence.state(), State::Open);
         app.input = "hello".into();
         let _task = app.update(Message::Send);
-        let _ = app.update(Message::Focus(false));
+        let _ = app.update(Message::Focus(app.window.unwrap(), false));
         assert_eq!(app.presence.state(), State::Peek);
         let id = app.request_id;
         let _ = app.update(Message::Finished(id, Ok(())));
@@ -2040,14 +2104,14 @@ mod tests {
         app.input = "hello".into();
         let _task = app.update(Message::Send);
         app.cancel();
-        let _ = app.update(Message::Focus(false));
+        let _ = app.update(Message::Focus(app.window.unwrap(), false));
         assert_eq!(app.presence.state(), State::Sliver);
     }
 
     #[test]
     fn hover_perks_mascot() {
         let mut app = ready();
-        let _ = app.update(Message::Cursor(true));
+        let _ = app.update(Message::Cursor(app.window.unwrap(), true));
         let _ = app.update(Message::Deadline(
             Instant::now() + Duration::from_millis(200),
         ));
@@ -2088,7 +2152,7 @@ mod tests {
 
     #[test]
     fn send_is_disabled_until_load_finishes() {
-        let (mut app, _) = Island::new();
+        let (mut app, _) = Island::new(Launch::Manual);
         app.input = "hello".into();
         let _ = app.update(Message::Send);
         assert!(app.turns.is_empty());
@@ -2235,9 +2299,9 @@ mod tests {
         assert_eq!(app.hub, Some(HubPage::Grid));
         let _ = app.update(Message::OpenHub(HubPage::Look));
         assert_eq!(app.hub, Some(HubPage::Look));
-        let _ = app.update(Message::Escape);
+        let _ = app.update(Message::Escape(app.window.unwrap()));
         assert_eq!(app.hub, Some(HubPage::Grid));
-        let _ = app.update(Message::Escape);
+        let _ = app.update(Message::Escape(app.window.unwrap()));
         assert_eq!(app.hub, None);
     }
 
@@ -2511,5 +2575,84 @@ mod tests {
         assert_eq!(app.onboarding.as_ref().unwrap().step(), Step::Welcome);
         assert!(!app.config.onboarded);
         assert!(app.is_open());
+    }
+
+    fn loaded_onboarded() -> Message {
+        Message::Loaded(Ok((
+            Config {
+                onboarded: true,
+                ..Config::default()
+            },
+            vec![],
+        )))
+    }
+
+    #[test]
+    fn background_start_opens_only_the_notch() {
+        let mut app = Island::new(Launch::Background).0;
+        let _ = app.update(loaded_onboarded());
+        assert!(app.window.is_some());
+        assert!(app.app_window.is_none());
+    }
+
+    #[test]
+    fn manual_start_opens_notch_and_window() {
+        let mut app = Island::new(Launch::Manual).0;
+        let _ = app.update(loaded_onboarded());
+        assert!(app.window.is_some());
+        assert!(app.app_window.is_some());
+    }
+
+    #[test]
+    fn open_window_twice_keeps_one_window() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let first = app.app_window;
+        let _ = app.update(Message::OpenWindow);
+        assert_eq!(app.app_window, first);
+    }
+
+    #[test]
+    fn closing_app_window_keeps_running() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::CloseRequested(id));
+        assert!(app.app_window.is_none());
+        assert!(!app.quitting);
+    }
+
+    #[test]
+    fn app_window_cursor_does_not_touch_the_notch() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let id = app.app_window.unwrap();
+        let before = app.presence.shape();
+        let _ = app.update(Message::Cursor(id, true));
+        assert_eq!(app.presence.shape(), before);
+    }
+
+    #[test]
+    fn escape_in_app_window_leaves_the_notch_alone() {
+        let mut app = ready();
+        let notch = app.window.unwrap();
+        let _ = app.update(Message::Cursor(notch, true));
+        let _ = app.update(Message::Deadline(
+            Instant::now() + Duration::from_millis(200),
+        ));
+        let _ = app.update(Message::OpenClick);
+        assert!(app.is_open());
+        let _ = app.update(Message::OpenWindow);
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::Escape(id));
+        assert!(app.is_open());
+    }
+
+    #[test]
+    fn closing_the_notch_still_quits() {
+        let mut app = ready();
+        let notch = app.window.unwrap();
+        let _ = app.update(Message::CloseRequested(notch));
+        assert!(app.quitting);
     }
 }
