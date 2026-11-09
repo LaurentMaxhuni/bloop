@@ -18,10 +18,19 @@ At rest bloop is a thin sliver at the top center of the screen. Rest the mouse o
 it to pop out the pill (it shrinks back when you move away), click the pill or press
 **Ctrl+Alt+B** to open the panel, and click anywhere else to close it. bloop also
 peeks out on its own for a few seconds when it has something to say, and hides
-completely while a fullscreen app, presentation, or the lock screen is up. Open **Settings** to select your
-provider, base URL, model, and global shortcut. A conflicting shortcut produces a
-visible warning; choose another combination. Right-click the tray icon for settings
-and quit. Escape stops an active reply, closes settings, or collapses the notch.
+completely while a fullscreen app, presentation, or the lock screen is up. Escape
+stops an active reply or collapses the notch.
+
+bloop also has a normal app window (900 × 620, resizable) for setup and settings. The
+first time you run it, the window walks you through setup and the notch appears when
+you finish; if you close it midway, setup returns next launch. After that, starting
+bloop from the Start menu or the exe opens the notch and the window. Pages: Home,
+Appearance, Model, Shortcut & startup, and About, where you choose the provider, base
+URL, model, and global shortcut (a conflicting shortcut produces a visible warning;
+choose another). The notch's settings icon and the tray's **Settings** also open the
+window. Closing the window leaves bloop running; use the tray's **Quit**. Starting
+bloop again while it is running just brings the window forward. Login autostart and
+self-updates start bloop with `--background`, which opens the notch only.
 
 Start your model server separately. No model is downloaded or started by bloop.
 
@@ -40,6 +49,9 @@ are outside this milestone.
 
 - Auto-hiding notch: a 120 × 5 px sliver at rest, a pill on hover (150 ms) or
   peek (4 s), the full panel on click/shortcut; hidden during fullscreen apps.
+- App window: a decorated 900 × 620 dashboard (Home, Appearance, Model, Shortcut &
+  startup, About) that also hosts first-run setup. It opens on manual launches,
+  second launches, the notch settings icon and tray Settings; closing it never quits.
 - Always-on-top notch flush with the top of the primary work area, clipped to its
   real silhouette (concave shoulders, rounded bottom) with a native window region.
 - Black-and-white shadcn/ui "neutral" styling in light and dark themes.
@@ -139,5 +151,5 @@ Bump `version` in `Cargo.toml`, commit, then (with the GitHub CLI signed in once
 
 This builds the installer, writes its SHA-256 next to it and creates the GitHub release
 `v<version>` with both files. Running copies of bloop find it within six hours (or straight
-away with Customize › Model & shortcut › Check now), download it, check the hash and offer
+away with the app window's **About › Check now**), download it, check the hash and offer
 "Update ready — click to restart".

@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod launch;
 pub mod model;
 pub mod motion;
 pub mod onboarding;

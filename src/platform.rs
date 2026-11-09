@@ -448,27 +448,38 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
 
-/// Holds the app-wide mutex the installer checks (`AppMutex=bloop-app`).
+/// Holds the app-wide mutex the installer checks (`AppMutex=bloop-app`) and the
+/// auto-reset event a second launch signals to ask this copy to open its window.
 pub struct Instance {
     #[cfg(windows)]
     handle: windows::Win32::Foundation::HANDLE,
+    #[cfg(windows)]
+    open_event: Option<windows::Win32::Foundation::HANDLE>,
 }
 
 impl Drop for Instance {
     fn drop(&mut self) {
         #[cfg(windows)]
-        // SAFETY: the handle came from CreateMutexW and is closed exactly once here.
+        // SAFETY: both handles are ours (CreateMutexW / CreateEventW) and closed exactly once here.
         unsafe {
             let _ = windows::Win32::Foundation::CloseHandle(self.handle);
+            if let Some(event) = self.open_event {
+                let _ = windows::Win32::Foundation::CloseHandle(event);
+            }
         }
     }
 }
+
+#[cfg(windows)]
+const MUTEX_NAME: &str = r"Local\bloop-app";
+#[cfg(windows)]
+const OPEN_EVENT_NAME: &str = r"Local\bloop-open";
 
 /// `None` when another bloop is already running in this session.
 pub fn single_instance() -> Option<Instance> {
     #[cfg(windows)]
     {
-        instance_named(r"Local\bloop-app")
+        instance_named(MUTEX_NAME, OPEN_EVENT_NAME)
     }
     #[cfg(not(windows))]
     {
@@ -476,12 +487,173 @@ pub fn single_instance() -> Option<Instance> {
     }
 }
 
+/// Asks the running bloop to open its app window (best effort).
+pub fn signal_running_copy() {
+    #[cfg(windows)]
+    {
+        use windows::Win32::{
+            System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent},
+            UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow},
+        };
+        let name = wide(OPEN_EVENT_NAME);
+        // SAFETY: the name is NUL-terminated UTF-16 that outlives the call.
+        let event = unsafe {
+            OpenEventW(
+                EVENT_MODIFY_STATE,
+                false,
+                windows::core::PCWSTR(name.as_ptr()),
+            )
+        };
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => {
+                tracing::warn!("could not open the running copy's event: {error}");
+                return;
+            }
+        };
+        // SAFETY: lets the running copy raise its window over whatever this launch had focus.
+        if let Err(error) = unsafe { AllowSetForegroundWindow(ASFW_ANY) } {
+            tracing::warn!("AllowSetForegroundWindow failed: {error}");
+        }
+        // SAFETY: event is a live handle opened above.
+        if let Err(error) = unsafe { SetEvent(event) } {
+            tracing::warn!("could not signal the running copy: {error}");
+        }
+        // SAFETY: we own this handle and do not use it again.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(event);
+        }
+    }
+}
+
+/// Yields `()` each time a second launch asks this copy to open its window.
+pub fn open_requests() -> impl iced::futures::Stream<Item = ()> {
+    iced::stream::channel(4, async |mut output| {
+        #[cfg(windows)]
+        {
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            std::thread::spawn(move || wait_for_open_requests(sender));
+            while receiver.recv().await.is_some() {
+                if output.send(()).await.is_err() {
+                    break;
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = &mut output;
+        }
+        iced::futures::future::pending::<()>().await;
+    })
+}
+
 #[cfg(windows)]
-fn instance_named(name: &str) -> Option<Instance> {
+fn wait_for_open_requests(sender: tokio::sync::mpsc::UnboundedSender<()>) {
+    use windows::Win32::{
+        Foundation::{CloseHandle, WAIT_OBJECT_0},
+        System::Threading::{
+            INFINITE, OpenEventW, SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
+        },
+    };
+    let name = wide(OPEN_EVENT_NAME);
+    // SAFETY: the name is NUL-terminated UTF-16 that outlives the call.
+    let event = unsafe {
+        OpenEventW(
+            SYNCHRONIZATION_SYNCHRONIZE,
+            false,
+            windows::core::PCWSTR(name.as_ptr()),
+        )
+    };
+    let event = match event {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!("could not listen for open requests: {error}");
+            return;
+        }
+    };
+    // SAFETY: event is a live handle owned by this thread until closed below.
+    while unsafe { WaitForSingleObject(event, INFINITE) } == WAIT_OBJECT_0 {
+        tracing::debug!("open request received");
+        if sender.send(()).is_err() {
+            break;
+        }
+    }
+    // SAFETY: we own this handle and do not use it again.
+    unsafe {
+        let _ = CloseHandle(event);
+    }
+}
+
+/// Sets the window's big and small icons from the exe's embedded resource (id 1).
+pub fn apply_app_icon(window: &dyn iced::window::Window) {
+    #[cfg(windows)]
+    {
+        use iced::window::raw_window_handle::RawWindowHandle;
+        use windows::Win32::{
+            Foundation::{HINSTANCE, HWND, LPARAM, WPARAM},
+            System::LibraryLoader::GetModuleHandleW,
+            UI::WindowsAndMessaging::{
+                GetSystemMetrics, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR, LR_SHARED,
+                LoadImageW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SendMessageW,
+                WM_SETICON,
+            },
+        };
+        let Ok(handle) = window.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+            return;
+        };
+        let hwnd = HWND(handle.hwnd.get() as *mut _);
+        // SAFETY: a null module name returns this exe's handle.
+        let Ok(module) = (unsafe { GetModuleHandleW(None) }) else {
+            return;
+        };
+        let instance = HINSTANCE(module.0);
+        for (kind, width, height) in [
+            (ICON_BIG, SM_CXICON, SM_CYICON),
+            (ICON_SMALL, SM_CXSMICON, SM_CYSMICON),
+        ] {
+            // SAFETY: plain metric queries.
+            let (width, height) = unsafe { (GetSystemMetrics(width), GetSystemMetrics(height)) };
+            // SAFETY: resource id 1 is passed as MAKEINTRESOURCE (an integer in the pointer).
+            // LR_SHARED: the system owns and caches the handle, so reopening the window
+            // reuses it instead of leaking a new one each time.
+            let icon = unsafe {
+                LoadImageW(
+                    Some(instance),
+                    windows::core::PCWSTR(std::ptr::without_provenance::<u16>(1)),
+                    IMAGE_ICON,
+                    width,
+                    height,
+                    LR_DEFAULTCOLOR | LR_SHARED,
+                )
+            };
+            if let Ok(icon) = icon {
+                // SAFETY: hwnd belongs to the live window; the icon handle stays valid for the process.
+                unsafe {
+                    SendMessageW(
+                        hwnd,
+                        WM_SETICON,
+                        Some(WPARAM(kind as usize)),
+                        Some(LPARAM(icon.0 as isize)),
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+    }
+}
+
+#[cfg(windows)]
+fn instance_named(name: &str, event_name: &str) -> Option<Instance> {
     use windows::{
         Win32::{
             Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError},
-            System::Threading::CreateMutexW,
+            System::Threading::{CreateEventW, CreateMutexW},
         },
         core::PCWSTR,
     };
@@ -496,7 +668,12 @@ fn instance_named(name: &str) -> Option<Instance> {
         }
         return None;
     }
-    Some(Instance { handle })
+    let event_name = wide(event_name);
+    // SAFETY: auto-reset, initially unsignalled; the name is NUL-terminated and outlives the call.
+    let open_event = unsafe { CreateEventW(None, false, false, PCWSTR(event_name.as_ptr())) }
+        .inspect_err(|error| tracing::warn!("could not create the open event: {error}"))
+        .ok();
+    Some(Instance { handle, open_event })
 }
 
 #[cfg(windows)]
@@ -526,6 +703,33 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
         let _ = enable;
         Err("Start with Windows is only available on Windows.".into())
     }
+}
+
+/// The Run-key command: autostart launches quietly, without opening the app window.
+fn run_command(exe: &std::path::Path) -> String {
+    format!("\"{}\" --background", exe.display())
+}
+
+/// Whether an existing Run value must be rewritten (absent means autostart is off: leave it).
+fn needs_migration(current: Option<&str>, expected: &str) -> bool {
+    current.is_some_and(|value| value != expected)
+}
+
+/// Rewrites a Run value left by an older build (no `--background`) so sign-in starts quietly.
+pub fn migrate_autostart() {
+    #[cfg(windows)]
+    if let Err(error) = migrate_run_value(RUN_KEY) {
+        tracing::warn!("could not migrate the autostart entry: {error}");
+    }
+}
+
+#[cfg(windows)]
+fn migrate_run_value(key: &str) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if needs_migration(run_value(key).as_deref(), &run_command(&exe)) {
+        set_run_value(key, true)?;
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -568,7 +772,7 @@ fn set_run_value(key: &str, enable: bool) -> Result<(), String> {
     let (key, name) = (wide(key), wide(RUN_VALUE));
     let status = if enable {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let data = wide(&format!("\"{}\"", exe.display()));
+        let data = wide(&run_command(&exe));
         // SAFETY: strings are NUL-terminated; data pointer and byte length cover the same Vec.
         unsafe {
             RegSetKeyValueW(
@@ -701,11 +905,12 @@ mod tests {
     #[test]
     fn second_instance_is_refused() {
         let name = r"Local\bloop-test-instance";
-        let first = super::instance_named(name);
+        let event = r"Local\bloop-test-open";
+        let first = super::instance_named(name, event);
         assert!(first.is_some());
-        assert!(super::instance_named(name).is_none());
+        assert!(super::instance_named(name, event).is_none());
         drop(first);
-        assert!(super::instance_named(name).is_some());
+        assert!(super::instance_named(name, event).is_some());
     }
 
     #[cfg(windows)]
@@ -714,12 +919,58 @@ mod tests {
         let key = r"Software\bloop-test\Run";
         super::set_run_value(key, true).unwrap();
         let value = super::run_value(key).expect("value written");
-        assert!(value.starts_with('"') && value.ends_with('"'));
+        assert!(value.starts_with('"') && value.ends_with(" --background"));
         let exe = std::env::current_exe().unwrap();
         assert!(value.contains(exe.file_name().unwrap().to_str().unwrap()));
         super::set_run_value(key, false).unwrap();
         assert!(super::run_value(key).is_none());
         super::set_run_value(key, false).unwrap();
         super::delete_tree(r"Software\bloop-test");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migration_rewrites_old_value_and_never_creates_one() {
+        use windows::{
+            Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW},
+            core::PCWSTR,
+        };
+        let key = r"Software\bloop-test-migrate\Run";
+        super::migrate_run_value(key).unwrap();
+        assert!(super::run_value(key).is_none());
+        let exe = std::env::current_exe().unwrap();
+        let old = super::wide(&format!("\"{}\"", exe.display()));
+        let (k, n) = (super::wide(key), super::wide(super::RUN_VALUE));
+        // SAFETY: strings are NUL-terminated; data pointer and byte length cover the same Vec.
+        unsafe {
+            RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                PCWSTR(k.as_ptr()),
+                PCWSTR(n.as_ptr()),
+                REG_SZ.0,
+                Some(old.as_ptr().cast()),
+                (old.len() * 2) as u32,
+            )
+        }
+        .ok()
+        .unwrap();
+        super::migrate_run_value(key).unwrap();
+        let value = super::run_value(key).unwrap();
+        assert!(value.ends_with(" --background"));
+        super::delete_tree(r"Software\bloop-test-migrate");
+    }
+
+    #[test]
+    fn needs_migration_only_for_a_stale_existing_value() {
+        let expected = r#""C:\b.exe" --background"#;
+        assert!(!super::needs_migration(None, expected));
+        assert!(!super::needs_migration(Some(expected), expected));
+        assert!(super::needs_migration(Some(r#""C:\b.exe""#), expected));
+    }
+
+    #[test]
+    fn run_command_has_background_flag() {
+        let cmd = super::run_command(std::path::Path::new(r"C:\Apps\bloop\bloop.exe"));
+        assert_eq!(cmd, r#""C:\Apps\bloop\bloop.exe" --background"#);
     }
 }

@@ -1,7 +1,8 @@
-mod hub;
+mod app_window;
+mod dashboard;
 mod onboarding;
 
-pub use hub::HubPage;
+pub use dashboard::AppPage;
 
 use crate::{
     icons::{self, Icon},
@@ -15,6 +16,7 @@ use bloop::{
         Accent, Config, HOVER_DELAYS_MS, NotchPosition, NotchWidth, Provider, ReduceMotion,
         ThemeChoice,
     },
+    launch::{Launch, Startup, startup},
     model::{self, MAX_PROMPT, MAX_TURNS, Turn},
     motion::{Feel, SizeSpring},
     onboarding::{self as setup, Choice, Detection, Onboarding},
@@ -46,6 +48,28 @@ const UPDATE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// Collapsed and untouched for this long, the mascot dozes off.
 const NAP_AFTER: Duration = Duration::from_secs(45);
 
+/// The notch window: borderless, transparent, always on top and out of the taskbar.
+pub fn notch_settings() -> window::Settings {
+    let mut settings = window::Settings {
+        size: SLIVER,
+        position: window::Position::SpecificWith(|size: Size, monitor: Size| {
+            platform::primary_position(size)
+                .unwrap_or(iced::Point::new((monitor.width - size.width) / 2.0, 0.0))
+        }),
+        decorations: false,
+        transparent: true,
+        resizable: false,
+        level: window::Level::AlwaysOnTop,
+        exit_on_close_request: false,
+        ..Default::default()
+    };
+    #[cfg(windows)]
+    {
+        settings.platform_specific.skip_taskbar = true;
+    }
+    settings
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     Window(Option<window::Id>),
@@ -56,10 +80,16 @@ pub enum Message {
     Toggle,
     /// Click on the compact pill.
     OpenClick,
-    /// Cursor entered (true) or left (false) the window.
-    Cursor(bool),
-    /// Window gained (true) or lost (false) focus.
-    Focus(bool),
+    /// Cursor entered (true) or left (false) a window.
+    Cursor(window::Id, bool),
+    /// A window gained (true) or lost (false) focus.
+    Focus(window::Id, bool),
+    /// Show the app window, opening it if needed.
+    OpenWindow,
+    /// The user asked to close a window (title-bar X, Alt+F4).
+    CloseRequested(window::Id),
+    /// A window finished closing.
+    WindowClosed(window::Id),
     /// A presence deadline (hover/leave/peek) may have passed.
     Deadline(Instant),
     FullscreenPoll,
@@ -75,7 +105,6 @@ pub enum Message {
     Chunk(u64, StreamEvent),
     Finished(u64, Result<(), String>),
     Cancel,
-    Settings,
     Provider(Provider),
     Endpoint(String),
     Model(String),
@@ -87,7 +116,7 @@ pub enum Message {
     KeepChat,
     Quit,
     QuitWithoutSaving,
-    Escape,
+    Escape(window::Id),
     OnboardNext,
     OnboardBack,
     OnboardSkip,
@@ -101,7 +130,8 @@ pub enum Message {
     ShowSetup,
     /// The icon font finished loading (true) or failed (false: keep word labels).
     FontLoaded(bool),
-    OpenHub(HubPage),
+    /// Show a dashboard page in the app window.
+    ShowPage(AppPage),
     SetTheme(ThemeChoice),
     SetAccent(Accent),
     SetFeel(Feel),
@@ -143,8 +173,8 @@ pub struct Island {
     storage_warning: String,
     loading: bool,
     presence: Presence,
-    /// The customization hub page, when the hub is open.
-    hub: Option<HubPage>,
+    /// The dashboard page showing in the app window.
+    page: AppPage,
     confirming_clear: bool,
     /// Drawn notch size; the OS window stays at `canvas_size` and never animates.
     spring: SizeSpring,
@@ -158,6 +188,8 @@ pub struct Island {
     system_reduce: bool,
     /// Header buttons show icons once the icon font has loaded.
     icons_ready: bool,
+    /// The icon font was requested; Iced can only load fonts once a window exists.
+    icon_font_requested: bool,
     /// How many times the window was (re)placed; lets tests see display-change handling.
     placements: u32,
     update_state: UpdateState,
@@ -169,7 +201,12 @@ pub struct Island {
     update_peek_pending: bool,
     /// Starts the downloaded installer; replaced in tests.
     installer_launcher: fn(&std::path::Path) -> Result<(), String>,
+    /// The notch window.
     window: Option<window::Id>,
+    /// The decorated app window, while it is open.
+    app_window: Option<window::Id>,
+    /// How this process was started; decides which windows open once the config loads.
+    launch: Launch,
     controller: Option<platform::Controller>,
     request_id: u64,
     request: Option<iced::task::Handle>,
@@ -197,7 +234,7 @@ pub struct Island {
 }
 
 impl Island {
-    pub fn new() -> (Self, Task<Message>) {
+    pub fn new(launch: Launch) -> (Self, Task<Message>) {
         let path = storage::data_path();
         let load_path = path.clone();
         let state = Self {
@@ -210,7 +247,7 @@ impl Island {
             storage_warning: String::new(),
             loading: true,
             presence: Presence::new(),
-            hub: None,
+            page: AppPage::Home,
             confirming_clear: false,
             spring: SizeSpring::new(SLIVER.width, SLIVER.height),
             last_frame: None,
@@ -218,6 +255,7 @@ impl Island {
             frame_log: Vec::new(),
             system_reduce: platform::reduce_motion_system(),
             icons_ready: false,
+            icon_font_requested: false,
             placements: 0,
             update_state: UpdateState::Idle,
             up_to_date: false,
@@ -225,6 +263,8 @@ impl Island {
             update_peek_pending: false,
             installer_launcher: platform::launch_installer,
             window: None,
+            app_window: None,
+            launch,
             controller: None,
             request_id: 0,
             request: None,
@@ -248,20 +288,15 @@ impl Island {
         };
         (
             state,
-            Task::batch([
-                window::oldest().map(Message::Window),
-                iced::font::load(icons::FONT_BYTES)
-                    .map(|result| Message::FontLoaded(result.is_ok())),
-                Task::perform(
-                    async move {
-                        let path = load_path?;
-                        tokio::task::spawn_blocking(move || storage::load(&path))
-                            .await
-                            .map_err(|e| e.to_string())?
-                    },
-                    Message::Loaded,
-                ),
-            ]),
+            Task::batch([Task::perform(
+                async move {
+                    let path = load_path?;
+                    tokio::task::spawn_blocking(move || storage::load(&path))
+                        .await
+                        .map_err(|e| e.to_string())?
+                },
+                Message::Loaded,
+            )]),
         )
     }
 
@@ -272,7 +307,12 @@ impl Island {
             ThemeChoice::System => self.system_light,
         }
     }
-    pub fn theme(&self) -> Theme {
+    pub fn title(&self, _id: window::Id) -> String {
+        "bloop".into()
+    }
+
+    /// Both windows share one theme.
+    pub fn theme(&self, _id: window::Id) -> Theme {
         let light = self.light();
         let t = self.tokens();
         Theme::custom(
@@ -313,7 +353,7 @@ impl Island {
         if !self.is_open() && self.now.saturating_duration_since(self.last_activity) >= NAP_AFTER {
             return Mood::Sleepy;
         }
-        if self.is_open() && self.hub.is_none() && !self.input.is_empty() {
+        if self.is_open() && !self.input.is_empty() {
             return Mood::Typing;
         }
         Mood::Idle
@@ -358,33 +398,22 @@ impl Island {
     pub fn subscription(&self) -> Subscription<Message> {
         let mut events = vec![
             Subscription::run(platform::events).map(Message::Platform),
-            iced::keyboard::listen().filter_map(|event| {
-                if matches!(
-                    event,
-                    iced::keyboard::Event::KeyPressed {
-                        key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
-                        ..
-                    }
-                ) {
-                    Some(Message::Escape)
-                } else {
-                    None
-                }
-            }),
-            window::events().filter_map(|(_, event)| {
-                if matches!(event, window::Event::CloseRequested) {
-                    Some(Message::Quit)
-                } else {
-                    None
-                }
-            }),
-            iced::event::listen_with(|event, _, _| match event {
+            Subscription::run(platform::open_requests).map(|()| Message::OpenWindow),
+            window::close_requests().map(Message::CloseRequested),
+            window::close_events().map(Message::WindowClosed),
+            iced::event::listen_with(|event, status, id| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                    ..
+                }) if status == iced::event::Status::Ignored => Some(Message::Escape(id)),
                 iced::Event::Mouse(iced::mouse::Event::CursorEntered) => {
-                    Some(Message::Cursor(true))
+                    Some(Message::Cursor(id, true))
                 }
-                iced::Event::Mouse(iced::mouse::Event::CursorLeft) => Some(Message::Cursor(false)),
-                iced::Event::Window(window::Event::Focused) => Some(Message::Focus(true)),
-                iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(false)),
+                iced::Event::Mouse(iced::mouse::Event::CursorLeft) => {
+                    Some(Message::Cursor(id, false))
+                }
+                iced::Event::Window(window::Event::Focused) => Some(Message::Focus(id, true)),
+                iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(id, false)),
                 _ => None,
             }),
         ];
@@ -423,7 +452,7 @@ impl Island {
                 | Message::Saved(_)
                 | Message::Deadline(_)
                 | Message::FullscreenPoll
-                | Message::Focus(_)
+                | Message::Focus(..)
         ) {
             self.last_activity = Instant::now();
             self.now = self.last_activity;
@@ -476,10 +505,13 @@ impl Island {
                     self.update_peek_pending = true;
                 }
                 let layout = self.relayout(false);
-                if !self.config.onboarded {
-                    return Task::batch([layout, self.start_setup()]);
-                }
-                return layout;
+                // First-run setup lives in the app window; the notch appears when it ends.
+                let (notch, windows) = match startup(self.launch, self.config.onboarded) {
+                    Startup::NotchOnly => (self.open_notch(), Task::none()),
+                    Startup::Dashboard => (self.open_notch(), self.open_app_window()),
+                    Startup::Onboarding => (Task::none(), self.start_setup()),
+                };
+                return Task::batch([layout, notch, windows]);
             }
             Message::Saved(result) => {
                 self.saving = false;
@@ -508,12 +540,14 @@ impl Island {
                     controller.shortcut(self.config.shortcut.clone());
                     self.controller = Some(controller);
                 }
-                platform::Event::Toggle => return self.present(Event::Shortcut),
-                platform::Event::Settings => return self.update(Message::Settings),
+                platform::Event::Toggle => return self.update(Message::Toggle),
+                platform::Event::Settings => return self.update(Message::OpenWindow),
                 platform::Event::Quit => return self.update(Message::Quit),
                 platform::Event::Warning(error) => self.desktop_warning = error,
                 platform::Event::ShortcutApplied => self.desktop_warning.clear(),
             },
+            // No notch yet (first-run setup): the shortcut brings the setup window forward.
+            Message::Toggle if self.window.is_none() => return self.open_app_window(),
             Message::Toggle => return self.present(Event::Shortcut),
             Message::OpenClick => {
                 let ready_peek = self
@@ -524,10 +558,37 @@ impl Island {
                 }
                 return self.present(Event::Click);
             }
-            Message::Cursor(true) => return self.present(Event::CursorEntered),
-            Message::Cursor(false) => return self.present(Event::CursorLeft),
-            Message::Focus(true) => {}
-            Message::Focus(false) => return self.present(Event::FocusLost),
+            // Only the notch drives presence; the app window's pointer, focus and keys are its own.
+            Message::Cursor(id, _) | Message::Focus(id, _) | Message::Escape(id)
+                if self.window != Some(id) => {}
+            Message::Cursor(_, true) => return self.present(Event::CursorEntered),
+            Message::Cursor(_, false) => return self.present(Event::CursorLeft),
+            Message::Focus(_, true) => {}
+            Message::Focus(_, false) => return self.present(Event::FocusLost),
+            Message::OpenWindow => return self.open_app_window(),
+            Message::CloseRequested(id) => {
+                if self.app_window == Some(id) {
+                    self.app_window = None;
+                    let close = window::close(id);
+                    if self.onboarding.take().is_some() {
+                        // Setup stays pending (`onboarded` is still false); the notch takes over.
+                        let dismiss = self.present(Event::Dismiss);
+                        return Task::batch([close, dismiss, self.open_notch()]);
+                    }
+                    return close;
+                }
+                if self.window == Some(id) {
+                    return self.update(Message::Quit);
+                }
+            }
+            Message::WindowClosed(id) => {
+                if self.app_window == Some(id) {
+                    self.app_window = None;
+                }
+                if self.window == Some(id) {
+                    self.window = None;
+                }
+            }
             Message::Deadline(now) => return self.present_at(Event::Tick, now),
             Message::FullscreenPoll => {
                 return self.present(Event::Fullscreen(platform::fullscreen_active()));
@@ -561,7 +622,7 @@ impl Island {
                 }
                 self.last_frame = None;
                 self.write_frame_log();
-                if self.is_open() && self.hub_closed() {
+                if self.is_open() {
                     return Task::batch([region, widget::operation::focus("prompt")]);
                 }
                 return region;
@@ -653,18 +714,6 @@ impl Island {
                 let update = self.peek_update_if_pending();
                 return Task::batch([self.persist(), update]);
             }
-            Message::Settings => {
-                self.hub = match self.hub {
-                    Some(_) => None,
-                    None => Some(HubPage::Grid),
-                };
-                self.draft_config = self.config.clone();
-                self.key_draft.clear();
-                self.key_status = secrets::key_source();
-                if !self.is_open() {
-                    return self.present(Event::Shortcut);
-                }
-            }
             Message::Provider(provider) => {
                 self.draft_config.provider = provider;
                 self.draft_config.endpoint = provider.default_endpoint().into();
@@ -696,7 +745,6 @@ impl Island {
                 }
                 self.config = self.draft_config.clone();
                 self.react(Mood::Happy, 1.2);
-                self.hub = None;
                 self.status.clear();
                 if let Some(controller) = &self.controller {
                     controller.shortcut(self.config.shortcut.clone());
@@ -883,14 +931,7 @@ impl Island {
                 }
                 return self.apply_live(|c| c.auto_update = on);
             }
-            Message::OpenHub(page) => {
-                if self.hub.is_none() {
-                    self.draft_config = self.config.clone();
-                    self.key_draft.clear();
-                    self.key_status = secrets::key_source();
-                }
-                self.hub = Some(page);
-            }
+            Message::ShowPage(page) => self.page = page,
             Message::SetTheme(theme) => return self.apply_live(|c| c.theme = theme),
             Message::SetAccent(accent) => return self.apply_live(|c| c.accent = accent),
             Message::SetFeel(feel) => return self.apply_live(|c| c.motion = feel),
@@ -915,18 +956,15 @@ impl Island {
                 return Task::batch([save, self.relayout(true)]);
             }
             Message::ShowSetup => {
-                self.hub = None;
                 self.config.onboarded = false;
                 let save = self.persist();
                 return Task::batch([save, self.start_setup()]);
             }
-            Message::Escape => {
+            Message::Escape(_) => {
                 if self.request.is_some() {
                     return self.update(Message::Cancel);
                 }
-                if let Some(page) = self.hub {
-                    self.hub = (page != HubPage::Grid).then_some(HubPage::Grid);
-                } else if self.is_open() {
+                if self.is_open() {
                     return self.present(Event::Dismiss);
                 }
             }
@@ -934,20 +972,16 @@ impl Island {
         Task::none()
     }
 
-    /// Opens the panel on step one of setup and starts looking for a model server.
+    /// Shows step one of setup in the app window and starts looking for a model server.
     fn start_setup(&mut self) -> Task<Message> {
+        let window = self.open_app_window();
         self.onboarding = Some(Onboarding::new());
         self.draft_config = self.config.clone();
         self.autostart = platform::autostart();
         self.autostart_error.clear();
         self.key_draft.clear();
         self.key_status = secrets::key_source();
-        let open = if self.is_open() {
-            Task::none()
-        } else {
-            self.present(Event::Shortcut)
-        };
-        Task::batch([open, self.update(Message::Detect)])
+        Task::batch([window, self.update(Message::Detect)])
     }
 
     /// Ends setup. A valid draft is adopted; an invalid one is dropped so finishing never blocks.
@@ -976,11 +1010,13 @@ impl Island {
         self.config.onboarded = true;
         self.draft_config = self.config.clone();
         self.status.clear();
+        self.page = AppPage::Home;
         self.react(Mood::Happy, 1.2);
         let save = self.persist();
+        let notch = self.open_notch();
         let close = self.present(Event::Dismiss);
         let peek = self.present(Event::Peek("I'm up here!".into()));
-        Task::batch([save, close, peek])
+        Task::batch([save, notch, close, peek])
     }
 
     /// Where replies come from, shown under the prompt.
@@ -1198,10 +1234,6 @@ impl Island {
         }
     }
 
-    fn hub_closed(&self) -> bool {
-        self.hub.is_none()
-    }
-
     /// Sizes and places the fixed window, then cuts its click-through region.
     /// Applies an appearance change to the saved and the draft config and saves it now.
     fn updates_dir(&self) -> Option<PathBuf> {
@@ -1232,7 +1264,7 @@ impl Island {
         }
     }
 
-    /// One line for the hub's Updates section.
+    /// One line for the dashboard's update status.
     pub fn update_status(&self) -> String {
         match &self.update_state {
             UpdateState::Idle if self.up_to_date => "Up to date".into(),
@@ -1491,7 +1523,14 @@ impl Island {
         }
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self, id: window::Id) -> Element<'_, Message> {
+        if self.app_window == Some(id) {
+            return self.app_view();
+        }
+        self.notch_view()
+    }
+
+    fn notch_view(&self) -> Element<'_, Message> {
         let t = self.tokens();
         let shape = self.presence.shape();
         let target = self.size_for(shape);
@@ -1543,7 +1582,7 @@ impl Island {
         .into()
     }
 
-    /// The open panel: header, separator and chat, setup or hub.
+    /// The open panel: header, separator and chat or setup.
     fn panel_content(&self) -> Element<'_, Message> {
         let t = self.tokens();
         let status = self.presence.message().unwrap_or(self.status_line());
@@ -1557,36 +1596,25 @@ impl Island {
         ]
         .spacing(10)
         .align_y(Alignment::Center);
-        let header = if self.onboarding.is_some() {
-            header
+        let (theme_icon, theme_word, theme_tip) = if self.light() {
+            (Icon::Moon, "Dark", "Dark mode")
         } else {
-            let (theme_icon, theme_word, theme_tip) = if self.light() {
-                (Icon::Moon, "Dark", "Dark mode")
-            } else {
-                (Icon::Sun, "Light", "Light mode")
-            };
-            let (hub_icon, hub_word, hub_tip) = if self.hub.is_some() {
-                (Icon::ArrowLeft, "Back", "Back")
-            } else {
-                (Icon::SlidersHorizontal, "Settings", "Customize")
-            };
-            header
-                .push(self.icon_button(theme_icon, theme_word, theme_tip, Message::Theme))
-                .push(self.icon_button(hub_icon, hub_word, hub_tip, Message::Settings))
-        }
-        .push(self.icon_button(Icon::ChevronUp, "Hide", "Hide", Message::Toggle));
+            (Icon::Sun, "Light", "Light mode")
+        };
+        let header = header
+            .push(self.icon_button(theme_icon, theme_word, theme_tip, Message::Theme))
+            .push(self.icon_button(
+                Icon::SlidersHorizontal,
+                "Settings",
+                "Settings",
+                Message::OpenWindow,
+            ))
+            .push(self.icon_button(Icon::ChevronUp, "Hide", "Hide", Message::Toggle));
         let separator = container(Space::new())
             .width(Length::Fill)
             .height(1)
             .style(style::separator(t));
-        let body = if self.onboarding.is_some() {
-            self.onboarding_view()
-        } else if let Some(page) = self.hub {
-            self.hub_view(page)
-        } else {
-            self.chat_view()
-        };
-        column![header, separator, body]
+        column![header, separator, self.chat_view()]
             .spacing(14)
             .padding(Padding {
                 top: 10.0,
@@ -1856,12 +1884,14 @@ fn field<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Elemen
 mod tests {
     use super::*;
     use bloop::config::{Accent, NotchPosition, NotchWidth, ReduceMotion};
+    use bloop::launch::Launch;
     use bloop::motion::Feel;
     use bloop::onboarding::{Choice, Step};
     use bloop::update::{Release, Version};
 
     fn ready() -> Island {
-        let (mut app, _) = Island::new();
+        let (mut app, _) = Island::new(Launch::Manual);
+        app.window = Some(window::Id::unique());
         app.loading = false;
         app.storage_disabled = true;
         app
@@ -2026,7 +2056,7 @@ mod tests {
         assert_eq!(app.presence.state(), State::Open);
         app.input = "hello".into();
         let _task = app.update(Message::Send);
-        let _ = app.update(Message::Focus(false));
+        let _ = app.update(Message::Focus(app.window.unwrap(), false));
         assert_eq!(app.presence.state(), State::Peek);
         let id = app.request_id;
         let _ = app.update(Message::Finished(id, Ok(())));
@@ -2040,14 +2070,14 @@ mod tests {
         app.input = "hello".into();
         let _task = app.update(Message::Send);
         app.cancel();
-        let _ = app.update(Message::Focus(false));
+        let _ = app.update(Message::Focus(app.window.unwrap(), false));
         assert_eq!(app.presence.state(), State::Sliver);
     }
 
     #[test]
     fn hover_perks_mascot() {
         let mut app = ready();
-        let _ = app.update(Message::Cursor(true));
+        let _ = app.update(Message::Cursor(app.window.unwrap(), true));
         let _ = app.update(Message::Deadline(
             Instant::now() + Duration::from_millis(200),
         ));
@@ -2088,7 +2118,7 @@ mod tests {
 
     #[test]
     fn send_is_disabled_until_load_finishes() {
-        let (mut app, _) = Island::new();
+        let (mut app, _) = Island::new(Launch::Manual);
         app.input = "hello".into();
         let _ = app.update(Message::Send);
         assert!(app.turns.is_empty());
@@ -2115,15 +2145,87 @@ mod tests {
 
     fn first_launch() -> Island {
         let mut app = ready();
+        // A real first launch has no notch yet; setup runs in the app window.
+        app.window = None;
         let _ = app.update(Message::Loaded(Ok((Config::default(), Vec::new()))));
         app
     }
 
     #[test]
-    fn first_launch_shows_onboarding() {
+    fn first_launch_shows_onboarding_in_the_window() {
         let app = first_launch();
         assert!(app.onboarding.is_some());
-        assert!(app.is_open());
+        assert!(app.app_window.is_some());
+        assert!(app.window.is_none());
+    }
+
+    #[test]
+    fn finishing_opens_notch_and_home() {
+        let mut app = first_launch();
+        let _ = app.update(Message::ShowPage(AppPage::About));
+        let _ = app.update(Message::OnboardSkip);
+        assert!(app.config.onboarded);
+        assert!(app.window.is_some());
+        assert!(app.app_window.is_some());
+        assert_eq!(app.page, AppPage::Home);
+        assert_eq!(app.presence.message(), Some("I'm up here!"));
+    }
+
+    #[test]
+    fn closing_mid_setup_opens_notch_and_keeps_setup_pending() {
+        let mut app = first_launch();
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::CloseRequested(id));
+        assert!(!app.config.onboarded);
+        assert!(app.onboarding.is_none());
+        assert!(app.window.is_some());
+        assert!(app.app_window.is_none());
+    }
+
+    #[test]
+    fn open_request_during_setup_keeps_the_step() {
+        let mut app = first_launch();
+        let _ = app.update(Message::OnboardNext);
+        let step = app.onboarding.as_ref().unwrap().step();
+        let window = app.app_window;
+        let _ = app.update(Message::OpenWindow);
+        assert_eq!(app.onboarding.as_ref().unwrap().step(), step);
+        assert_eq!(app.app_window, window);
+    }
+
+    #[test]
+    fn shortcut_during_setup_does_not_open_a_phantom_notch() {
+        let mut app = first_launch();
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::Toggle);
+        assert!(!app.is_open());
+        let _ = app.update(Message::Platform(platform::Event::Toggle));
+        assert!(!app.is_open());
+        assert_eq!(app.app_window, Some(id));
+        let _ = app.update(Message::Toggle);
+        let _ = app.update(Message::Toggle);
+        let _ = app.update(Message::CloseRequested(id));
+        assert!(!app.is_open());
+        assert!(app.window.is_some());
+    }
+
+    #[test]
+    fn window_closed_clears_only_the_matching_app_window() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::WindowClosed(window::Id::unique()));
+        assert_eq!(app.app_window, Some(id));
+        let _ = app.update(Message::WindowClosed(id));
+        assert!(app.app_window.is_none());
+    }
+
+    #[test]
+    fn background_first_launch_still_onboards() {
+        let mut app = Island::new(Launch::Background).0;
+        let _ = app.update(Message::Loaded(Ok((Config::default(), vec![]))));
+        assert!(app.onboarding.is_some());
+        assert!(app.app_window.is_some());
     }
 
     #[test]
@@ -2208,7 +2310,7 @@ mod tests {
     #[test]
     fn cli_provider_clears_endpoint_and_allows_blank_model() {
         let mut app = ready();
-        let _ = app.update(Message::Settings);
+        let _ = app.update(Message::OpenWindow);
         let _ = app.update(Message::Provider(Provider::ClaudeCode));
         assert_eq!(app.draft_config.endpoint, "");
         let _ = app.update(Message::Model(String::new()));
@@ -2216,6 +2318,25 @@ mod tests {
         assert_eq!(app.status, "");
         assert_eq!(app.config.provider, Provider::ClaudeCode);
         assert!(app.config.model.is_empty());
+    }
+
+    #[test]
+    fn icon_font_is_requested_once_the_first_window_opens() {
+        let (mut app, _) = Island::new(Launch::Background);
+        assert!(
+            !app.icon_font_requested,
+            "no window yet, so no renderer to load into"
+        );
+        let _ = app.update(Message::Loaded(Ok((
+            Config {
+                onboarded: true,
+                ..Config::default()
+            },
+            Vec::new(),
+        ))));
+        assert!(app.icon_font_requested);
+        let _ = app.update(Message::OpenWindow);
+        assert!(app.icon_font_requested);
     }
 
     #[test]
@@ -2229,16 +2350,62 @@ mod tests {
     }
 
     #[test]
-    fn hub_navigation() {
+    fn dashboard_navigation() {
         let mut app = ready();
-        let _ = app.update(Message::Settings);
-        assert_eq!(app.hub, Some(HubPage::Grid));
-        let _ = app.update(Message::OpenHub(HubPage::Look));
-        assert_eq!(app.hub, Some(HubPage::Look));
-        let _ = app.update(Message::Escape);
-        assert_eq!(app.hub, Some(HubPage::Grid));
-        let _ = app.update(Message::Escape);
-        assert_eq!(app.hub, None);
+        let _ = app.update(Message::OpenWindow);
+        assert_eq!(app.page, AppPage::Home);
+        let _ = app.update(Message::ShowPage(AppPage::Appearance));
+        assert_eq!(app.page, AppPage::Appearance);
+        // Escape in the notch no longer walks back through settings pages.
+        let _ = app.update(Message::Escape(app.window.unwrap()));
+        assert_eq!(app.page, AppPage::Appearance);
+    }
+
+    #[test]
+    fn notch_settings_icon_opens_dashboard_home() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        assert!(app.app_window.is_some());
+        assert_eq!(app.page, AppPage::Home);
+    }
+
+    #[test]
+    fn reopening_keeps_unsaved_model_draft() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let _ = app.update(Message::ShowPage(AppPage::Model));
+        let _ = app.update(Message::Model("draft-model".into()));
+        let _ = app.update(Message::OpenWindow);
+        assert_eq!(app.draft_config.model, "draft-model");
+        assert_eq!(app.page, AppPage::Model);
+    }
+
+    #[test]
+    fn opening_a_closed_window_resets_the_draft_and_page() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let _ = app.update(Message::ShowPage(AppPage::Model));
+        let _ = app.update(Message::Model("draft-model".into()));
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::CloseRequested(id));
+        let _ = app.update(Message::OpenWindow);
+        assert_eq!(app.draft_config.model, app.config.model);
+        assert_eq!(app.page, AppPage::Home);
+    }
+
+    #[test]
+    fn appearance_changes_apply_live() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let _ = app.update(Message::SetNotchWidth(NotchWidth::L));
+        assert_eq!(app.config.notch_width, NotchWidth::L);
+    }
+
+    #[test]
+    fn dashboard_pages_have_titles_and_subset_icons() {
+        assert_eq!(AppPage::Shortcut.title(), "Shortcut & startup");
+        assert_eq!(AppPage::Home.icon(), Some(Icon::Sparkles));
+        assert_eq!(AppPage::About.icon(), None);
     }
 
     #[test]
@@ -2293,18 +2460,6 @@ mod tests {
         );
         let _ = app.present_at(Event::Tick, start + Duration::from_millis(310));
         assert_eq!(app.presence.state(), State::Hover);
-    }
-
-    #[test]
-    fn tile_summaries() {
-        let mut app = ready();
-        app.config.accent = Accent::Indigo;
-        app.config.theme = ThemeChoice::Dark;
-        assert_eq!(app.tile_summary(HubPage::Look), "Dark · Indigo");
-        assert_eq!(app.tile_summary(HubPage::Motion), "Smooth");
-        assert_eq!(app.tile_summary(HubPage::Notch), "M · Centre");
-        app.config.provider = Provider::ClaudeCode;
-        assert_eq!(app.tile_summary(HubPage::Model), "Claude Code");
     }
 
     fn sample_release() -> Release {
@@ -2510,6 +2665,112 @@ mod tests {
         let _ = app.update(Message::ShowSetup);
         assert_eq!(app.onboarding.as_ref().unwrap().step(), Step::Welcome);
         assert!(!app.config.onboarded);
+        assert!(app.app_window.is_some());
+        assert!(app.window.is_some());
+    }
+
+    fn loaded_onboarded() -> Message {
+        Message::Loaded(Ok((
+            Config {
+                onboarded: true,
+                ..Config::default()
+            },
+            vec![],
+        )))
+    }
+
+    #[test]
+    fn background_start_opens_only_the_notch() {
+        let mut app = Island::new(Launch::Background).0;
+        let _ = app.update(loaded_onboarded());
+        assert!(app.window.is_some());
+        assert!(app.app_window.is_none());
+    }
+
+    #[test]
+    fn manual_start_opens_notch_and_window() {
+        let mut app = Island::new(Launch::Manual).0;
+        let _ = app.update(loaded_onboarded());
+        assert!(app.window.is_some());
+        assert!(app.app_window.is_some());
+    }
+
+    #[test]
+    fn open_window_twice_keeps_one_window() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let first = app.app_window;
+        let _ = app.update(Message::OpenWindow);
+        assert_eq!(app.app_window, first);
+    }
+
+    #[test]
+    fn closing_app_window_keeps_running() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::CloseRequested(id));
+        assert!(app.app_window.is_none());
+        assert!(!app.quitting);
+    }
+
+    /// Cursor enters window `id`, then the hover delay passes.
+    fn hover_in(app: &mut Island, id: window::Id) {
+        let _ = app.update(Message::Cursor(id, true));
+        let _ = app.update(Message::Deadline(
+            Instant::now() + Duration::from_millis(200),
+        ));
+    }
+
+    #[test]
+    fn app_window_cursor_does_not_touch_the_notch() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let id = app.app_window.unwrap();
+        hover_in(&mut app, id);
+        assert_eq!(app.presence.state(), State::Sliver);
+        // The same hover over the notch does pop the pill.
+        let notch = app.window.unwrap();
+        hover_in(&mut app, notch);
+        assert_eq!(app.presence.state(), State::Hover);
+    }
+
+    #[test]
+    fn app_window_focus_loss_leaves_the_notch_open() {
+        let mut app = ready();
+        let notch = app.window.unwrap();
+        let _ = app.update(Message::Toggle);
         assert!(app.is_open());
+        let _ = app.update(Message::OpenWindow);
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::Focus(id, false));
+        assert!(app.is_open());
+        // The notch losing focus still dismisses it.
+        let _ = app.update(Message::Focus(notch, false));
+        assert!(!app.is_open());
+    }
+
+    #[test]
+    fn escape_in_app_window_leaves_the_notch_alone() {
+        let mut app = ready();
+        let notch = app.window.unwrap();
+        let _ = app.update(Message::Cursor(notch, true));
+        let _ = app.update(Message::Deadline(
+            Instant::now() + Duration::from_millis(200),
+        ));
+        let _ = app.update(Message::OpenClick);
+        assert!(app.is_open());
+        let _ = app.update(Message::OpenWindow);
+        let id = app.app_window.unwrap();
+        let _ = app.update(Message::Escape(id));
+        assert!(app.is_open());
+    }
+
+    #[test]
+    fn closing_the_notch_still_quits() {
+        let mut app = ready();
+        let notch = app.window.unwrap();
+        let _ = app.update(Message::CloseRequested(notch));
+        assert!(app.quitting);
     }
 }

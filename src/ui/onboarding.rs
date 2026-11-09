@@ -1,4 +1,4 @@
-//! The first-launch setup screens, drawn inside the open notch panel.
+//! The first-launch setup screens, drawn in the app window.
 
 use super::{Island, Message, field};
 use crate::{
@@ -14,6 +14,9 @@ use iced::{
     widget::{Space, button, canvas, column, container, pick_list, row, scrollable, text, toggler},
 };
 
+/// Widest the setup column grows in the window, in logical pixels.
+const SETUP_WIDTH: f32 = 560.0;
+
 impl Island {
     pub(super) fn onboarding_view(&self) -> Element<'_, Message> {
         let Some(onboarding) = &self.onboarding else {
@@ -26,14 +29,26 @@ impl Island {
             Step::MakeItYours => self.make_it_yours(),
             Step::AllSet => self.all_set(),
         };
-        column![
+        // The welcome screen carries its own large mascot.
+        let mascot: Element<'_, Message> = if onboarding.is_first() {
+            Space::new().into()
+        } else {
+            container(self.mascot(48.0)).center_x(Length::Fill).into()
+        };
+        let column = column![
+            mascot,
             scrollable(body)
                 .height(Length::Fill)
                 .style(style::scroll(self.tokens())),
             self.step_bar(onboarding),
         ]
         .spacing(14)
-        .into()
+        .max_width(SETUP_WIDTH);
+        container(column)
+            .center_x(Length::Fill)
+            .padding(24)
+            .height(Length::Fill)
+            .into()
     }
 
     /// "Start with Windows" switch, shared with Settings.
