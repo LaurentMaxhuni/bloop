@@ -55,7 +55,7 @@ Header and hub icons come from a 4.5 KB subset of the Lucide icon font (ISC,
 `assets/LUCIDE-LICENSE.txt`); word labels show if it fails to load.
 
 Self-update (2026-11-07): `update.rs` asks the public GitHub Releases API for
-`LaurentMaxhuni/bloop` 30 s after start and every 6 h (switchable in the hub), downloads
+`LaurentMaxhuni/bloop` 30 s after start and every 6 h (switchable in the app window), downloads
 `bloop-setup-X.Y.Z.exe` into `<data dir>/updates` while hashing it, and keeps it only if its
 SHA-256 matches the release's `.sha256` asset. Redirects may only go to GitHub's HTTPS hosts.
 Installing saves state, starts the installer with `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART
@@ -72,3 +72,13 @@ Performance targets are provisional. Windows overlay is the supported milestone;
 Linux tray, compositor placement, and shortcuts require separate verification.
 The first measured GPU baseline exceeds the provisional 50 MB target. A future
 software compositor must preserve alpha correctly before replacing DirectX.
+
+App window (2026-11-09): bloop is now an `iced::daemon` with two windows: the notch (always
+present) and a decorated app window (900 × 620, min 720 × 520) created on demand and closed
+for real, so it costs nothing while hidden. It replaces the in-notch hub and hosts onboarding.
+Window ids route cursor, focus and drawing to the right window; closing the app window never
+quits, Quit lives in the tray. `launch.rs` decides what to open: first run shows only the
+window (finishing or closing it brings up the notch; unfinished setup resumes next launch);
+a manual launch opens notch and window; `--background` (the HKCU Run value and the update
+relaunch) opens the notch only. A second launch signals the named event `Local\bloop-open`
+and exits; the running copy opens or focuses the window. `bloop-app` stays the installer mutex.

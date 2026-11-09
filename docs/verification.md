@@ -164,3 +164,34 @@ End to end on Windows 11 with real releases on `LaurentMaxhuni/bloop`:
 Not checked: the 6-hour repeat, "Check now" and the auto-update switch by hand (unit tests
 only), a download interrupted by quitting, an installer blocked by antivirus at launch, and
 renaming the repository. The ready message wraps to two lines in the pill.
+
+## App window (2026-11-09)
+
+Automated, run on the `feat/app-window` branch: `cargo fmt --check` clean; `cargo clippy
+--all-targets -- -D warnings` clean; `cargo test` passes with 58 library, 89 app, 7 CLI-process
+(3 ignored), 10 HTTP-transport and 9 update (1 ignored) tests; `cargo build --release` succeeds
+(one dead-code warning, `Message::PeekTest` never constructed, present in the release build only).
+
+Verified by reading `installer/bloop.iss` and `src/platform.rs`/`src/launch.rs` (installer not
+built, build.ps1 not run):
+
+| Check | Result |
+| --- | --- |
+| Installer autostart Run value is `"{app}\bloop.exe" --background` | Pass (source) |
+| Installer `/RELAUNCH=1` entry runs `bloop.exe --background` | Pass (source) |
+| In-app autostart value is `"<exe>" --background`; `--background` parses to the notch-only launch | Pass (unit tests) |
+
+Pending human check: a copy of bloop installed on this machine was running and holding the
+single-instance lock, so the new build was not launched.
+
+| Check | Result |
+| --- | --- |
+| Fresh `BLOOP_DATA_DIR` shows onboarding in the app window, no notch; finishing opens notch and Home | Pending human check |
+| Closing the window mid-setup opens the notch; setup returns next launch | Pending human check |
+| Manual launch after setup shows notch and Home | Pending human check |
+| `--background` shows the notch only | Pending human check |
+| Second launch with the window closed, open, and minimized shows and focuses it | Pending human check |
+| Tray Settings and the notch settings icon open the window | Pending human check |
+| Closing the window leaves bloop running; tray Quit exits | Pending human check |
+| Installer built with `installer\build.ps1` writes the Run value with `--background` | Pending human check |
+| Self-update relaunch starts bloop with `--background` end to end | Pending human check |
