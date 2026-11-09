@@ -14,7 +14,9 @@
 all settings moved out of the notch into a dashboard (Home, Appearance, Model, Shortcut &
 startup, About). Task 2's "hub tiles" become a mock of that window, Task 4's switches live on
 its Appearance page, and the mascot also thinks/talks/cheers/naps in the hero chat. Icons are
-inline Lucide SVG (`site/icons.js`).
+inline Lucide SVG (a `<symbol>` sprite in `index.html`, so they show without JS). The social
+card is `site/og.html` screenshotted at 1200×630 (real fonts and mascot code) instead of a
+System.Drawing script.
 
 ## Global Constraints
 

@@ -19,8 +19,8 @@ macOS/Linux downloads, localisation.
 ## Structure
 
 `site/index.html`, `site/styles.css`, `site/app.js`, `site/spring.js`, `site/mascot.js` (SVG mascot),
-`site/icons.js` (the handful of Lucide icons used, inlined as SVG paths, ISC licence noted),
-`site/favicon.svg`, `site/og.png` (1200×630 social card). No framework, no bundler, no
+the handful of Lucide icons used as an inline SVG sprite in `index.html` (ISC licence noted),
+`site/favicon.svg`, `site/og.png` (1200×630 social card, rendered from `site/og.html`). No framework, no bundler, no
 external scripts; fonts are the system stack (`"Segoe UI Variable Text", "Segoe UI",
 system-ui, sans-serif`) like the app. Colours are the app's shadcn/ui "neutral" tokens from
 `src/style.rs`, light and dark.
