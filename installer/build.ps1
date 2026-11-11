@@ -1,5 +1,7 @@
 # Builds bloop in release mode and packages dist\bloop-setup-<version>.exe.
-#   powershell -ExecutionPolicy Bypass -File installer\build.ps1
+#   powershell -ExecutionPolicy Bypass -File installer\build.ps1 [-SkipCargo]
+# -SkipCargo packages the existing target\release\bloop.exe, e.g. one CI has just signed.
+param([switch]$SkipCargo)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 
@@ -21,8 +23,11 @@ if (-not $iscc) {
 
 Push-Location $root
 try {
-    cargo build --release
-    if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)." }
+    if (-not $SkipCargo) {
+        cargo build --release --locked
+        if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)." }
+    }
+    if (-not (Test-Path 'target\release\bloop.exe')) { throw 'target\release\bloop.exe is missing.' }
     & $iscc /Qp "/DAppVersion=$version" (Join-Path $PSScriptRoot 'bloop.iss')
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)." }
 } finally {

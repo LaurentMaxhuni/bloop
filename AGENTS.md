@@ -50,7 +50,8 @@ One Cargo package: a library (`src/lib.rs`, no GUI code) and the `bloop` binary 
 | `src/presence.rs`, `src/motion.rs`, `src/mascot.rs` | Notch state machine, springs, the mascot |
 | `examples/fake_cli.rs`, `examples/stream_fixture.rs` | Test doubles: a fake CLI and a labelled streaming server |
 | `site/` | Landing page (static HTML/CSS/JS, GitHub Pages) |
-| `installer/` | Inno Setup installer and release scripts |
+| `installer/` | Inno Setup installer and release scripts (`release.ps1` pushes the tag; CI builds) |
+| `.github/workflows/release.yml` | CI checks and installer build on PRs; tagged releases built, signed (SignPath, once set up) and published |
 
 ## Commands
 ```powershell
@@ -72,4 +73,5 @@ cargo test --test cli -- --ignored   # runs the real Claude Code and Codex CLIs;
 - `README.md`: for people using and building bloop.
 - `docs/architecture.md`: decisions and why, dated.
 - `docs/verification.md`: what was checked, how, and what wasn't.
+- `docs/code-signing.md` and `site/code-signing.html`: how releases are signed and the public signing and privacy policy. If bloop gains a new network connection, add it to that page's privacy section.
 - `site/index.html` and `site/llms.txt`: public facts (providers, platforms, privacy). Keep the FAQ text and its `FAQPage` JSON-LD identical, and update `softwareVersion` and the sitemap's `lastmod` on release.
