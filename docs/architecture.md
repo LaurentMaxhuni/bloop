@@ -37,6 +37,14 @@ Remote endpoints are explicit configuration; plaintext HTTP restricted to loopba
 API keys come from BLOOP_API_KEY or Windows Credential Manager (`bloop/api-key`,
 `secrets.rs`) and are never written to SQLite or logs.
 
+ChatGPT plan usage uses a native OAuth client in `chatgpt.rs` with browser sign-in, a
+temporary loopback callback, PKCE and signed ID token verification. The installation ID,
+account registration and rotating session are stored together in a Windows DPAPI-protected
+SQLite record. Model discovery and refresh happen during user actions. The ChatGPT provider
+uses OpenAI's Responses API with `store: false`, streams into the existing chat transport,
+and requires a completed event. The GUI receives account status and model names.
+[OpenAI Docs](https://developers.openai.com/siwc/token-sharing-open-source)
+
 CLI providers (2026-11-07): Claude Code and Codex run as one subprocess per message
 (`cli.rs`) in chat-only mode. bloop never enables their tools: Claude gets `--tools ""`
 and no MCP or settings; Codex runs read-only without the user's config, plugins, apps or
@@ -44,6 +52,22 @@ memories, and any tool event from either aborts the reply. They run in an empty
 `<data dir>/cli` folder, read the prompt from stdin, and live in a Windows job object so
 cancelling or quitting kills the whole process tree. Win32 calls for this stay in
 `cli.rs` and `secrets.rs`.
+
+Codex streaming (2026-11-11): `codex exec --json` only emits whole messages, so Codex now
+runs as `codex app-server` (JSON-RPC over stdio), which streams `item/agentMessage/delta`.
+The app server cannot skip the user's config, so bloop disables every tool feature on the
+command line, reads the effective config over the protocol and disables each MCP server by
+name in `thread/start`, uses a read-only ephemeral thread, picks Codex's default model via
+`model/list` when none is set, drops `commentary`-phase messages, and still refuses any tool
+item or server request. A CLI reply holds three pipe operations on tokio's blocking pool at
+once, so the runtime allows `cli::BLOCKING_THREADS` (4) blocking threads.
+
+Rich replies (2026-11-11): replies render with iced's `markdown` widget (`highlighter` feature:
+syntect, pure Rust, about +2.9 MiB release size). `math.rs` rewrites inline TeX to Unicode
+and display TeX (`$$…$$`, `\[…\]`) to ```` ```math ```` fences; `ui/rich.rs` lays those out
+natively (fractions, scripts, roots, big operators, matrices) in Cambria Math, adds a Copy
+button to code blocks, and opens only http(s)/mailto links. Each turn keeps a parsed
+`Reply` that is extended incrementally while it streams.
 
 Notch motion (2026-11-07): the OS window is created once at the open panel's size and is
 never resized while animating; only the drawn notch changes size, driven by critically

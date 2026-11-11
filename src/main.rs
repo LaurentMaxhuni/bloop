@@ -50,13 +50,15 @@ fn run(launch: bloop::launch::Launch) -> iced::Result {
 }
 
 /// Two workers cover one stream and UI tasks without scaling threads to CPU count.
+/// Blocking threads are started on demand and exit when idle; a CLI reply needs
+/// [`bloop::cli::BLOCKING_THREADS`] of them at once (see there).
 struct Executor(tokio::runtime::Runtime);
 
 impl iced::Executor for Executor {
     fn new() -> Result<Self, std::io::Error> {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
-            .max_blocking_threads(2)
+            .max_blocking_threads(bloop::cli::BLOCKING_THREADS)
             .enable_all()
             .build()
             .map(Self)

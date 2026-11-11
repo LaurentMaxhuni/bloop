@@ -1,87 +1,94 @@
 # bloop
 
-Landing page: <https://laurentmaxhuni.github.io/bloop/> (source in `site/`, published by
-`.github/workflows/pages.yml`; preview locally with `python -m http.server -d site`).
+A free, open-source AI chat notch for Windows. bloop rests as a thin sliver at the top of
+your screen, pops open when you want it, and chats with a model you choose: Ollama,
+llama.cpp, Unsloth Studio, any OpenAI-compatible server, your ChatGPT plan, or the Claude Code
+and Codex CLIs.
+Native Rust (Iced), with no embedded browser and no bundled model.
 
-A native, local-first AI chat notch for Windows. Rust + Iced, without a browser
-runtime or bundled inference engine. First runnable milestone, not yet an autonomous
-desktop agent.
+**Website:** <https://laurentmaxhuni.github.io/bloop/> ·
+**Download:** [latest release](https://github.com/LaurentMaxhuni/bloop/releases/latest) ·
+**Licence:** [MIT](LICENSE)
 
-## Run
+bloop is chat-only. It can't run commands, read files or control your computer.
 
-Requires Windows 10/11, a DirectX 12 graphics driver, Rust stable, and the Visual
-Studio C++ Build Tools with Windows SDK. Verified with Rust 1.97.1 on Windows.
+## Install
+
+Download `bloop-setup-<version>.exe` from the latest release and run it. It installs for your
+user only (no admin prompt) into `%LOCALAPPDATA%\Programs\bloop`, adds a Start Menu entry, and
+can start bloop when you sign in. The installer isn't code-signed yet, so Windows SmartScreen
+says "unknown publisher": choose **More info → Run anyway**. Uninstall from Windows
+Settings › Apps; it asks before deleting your chats and settings.
+
+Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to talk to (see
+[Models](#models)). bloop doesn't download or start a model for you.
+
+## Use
+
+- **Sliver → pill → panel.** At rest bloop is a 120 × 5 px sliver at the top centre of the
+  screen. Rest the mouse on it to pop out the pill, then click the pill or press
+  **Ctrl+Alt+B** (configurable) to open the chat. Click anywhere else to close it. Escape stops
+  a reply or collapses the notch. bloop hides while a fullscreen app, presentation or the lock
+  screen is up, and peeks out for a few seconds when it has something to say.
+- **Replies stream in** as they're written, formatted as Markdown: syntax-highlighted code
+  blocks with a **Copy** button, and LaTeX math (`$…$`, `\(…\)`, `$$…$$`, `\[…\]`) drawn as
+  formulas: fractions, roots, sums and integrals with limits, matrices. Links open in your
+  browser (web and mail links only).
+- **App window.** Setup and settings live in a normal 900 × 620 window with Home, Appearance,
+  Model, Shortcut & startup and About pages. First launch walks you through setup; after that,
+  the notch's settings icon or the tray's **Settings** bring it back. Closing it leaves bloop
+  running; quit from the tray.
+- **Updates.** bloop checks GitHub Releases 30 s after start and every 6 h (switchable), checks
+  the download's SHA-256 and offers "Update ready — click to restart".
+
+## Models
+
+| Provider | Endpoint | Model |
+| --- | --- | --- |
+| Ollama | `http://127.0.0.1:11434` | Installed model name; default `qwen3:4b` |
+| llama.cpp server | `http://127.0.0.1:8080/v1` | Server model name or alias |
+| Unsloth Studio | `http://127.0.0.1:8888` | A model you've loaded |
+| OpenAI-compatible service (LM Studio, vLLM, …) | Your base URL ending in `/v1` | A chat model it serves |
+| Claude Code CLI | — (uses the installed `claude`) | Optional, e.g. `sonnet`; blank = CLI default |
+| Codex CLI | — (uses the installed `codex`) | Optional; blank = Codex's default model |
+| ChatGPT | OpenAI Responses API | Automatic or a model available to your ChatGPT account |
+
+- **OpenAI-compatible providers** use streaming `chat/completions` (Ollama uses its own NDJSON
+  API). Remote endpoints must be HTTPS; plain HTTP is allowed only on loopback. API keys come
+  from `BLOOP_API_KEY` or Windows Credential Manager (`bloop/api-key`), never the database.
+- **CLI providers** use the account you're already signed in with (run `claude` or `codex` once
+  in a terminal to sign in). Each message starts the CLI in an empty folder in chat-only mode:
+  Claude Code gets no tools, MCP servers or settings; Codex runs as its app server with every
+  tool feature off, your MCP servers disabled and a read-only sandbox. Any tool use stops the
+  reply. Both stream text as it's written.
+- **ChatGPT** uses your eligible ChatGPT plan. In **Settings → Model**, select **ChatGPT**,
+  choose **Continue with ChatGPT**, and approve plan usage in your browser. Pick a model or
+  leave it on **Automatic**, then choose **Save changes**. Bloop supports one connected ChatGPT
+  account at a time. [OpenAI Docs](https://developers.openai.com/siwc/token-sharing-open-source)
+
+With a local model bloop works fully offline. ChatGPT, Claude Code and Codex need the internet.
+
+## Privacy
+
+- Settings and the last 50 turns live in `%LOCALAPPDATA%\bloop\bloop.sqlite3` (plain text;
+  protect it with your Windows account). `BLOOP_DATA_DIR` moves it, e.g. for testing.
+- No analytics or telemetry. If you select ChatGPT, Bloop sends your prompt and recent chat
+  context to OpenAI and protects the account session with Windows DPAPI. Other chat content
+  goes to the model you configured. You can turn off the GitHub update check in Settings.
+- Prompts are limited to 8 KiB and replies to 128 KiB. Context keeps up to 12 recent complete
+  turns within 32 KiB; interrupted replies stay visible but aren't sent back to the model.
+
+## Build from source
+
+Needs Windows 10/11, Rust stable (1.92+), and the Visual Studio C++ Build Tools with the
+Windows SDK.
 
 ```powershell
 cargo build --release
 .\target\release\bloop.exe
 ```
 
-At rest bloop is a thin sliver at the top center of the screen. Rest the mouse on
-it to pop out the pill (it shrinks back when you move away), click the pill or press
-**Ctrl+Alt+B** to open the panel, and click anywhere else to close it. bloop also
-peeks out on its own for a few seconds when it has something to say, and hides
-completely while a fullscreen app, presentation, or the lock screen is up. Escape
-stops an active reply or collapses the notch.
-
-bloop also has a normal app window (900 × 620, resizable) for setup and settings. The
-first time you run it, the window walks you through setup and the notch appears when
-you finish; if you close it midway, setup returns next launch. After that, starting
-bloop from the Start menu or the exe opens the notch and the window. Pages: Home,
-Appearance, Model, Shortcut & startup, and About, where you choose the provider, base
-URL, model, and global shortcut (a conflicting shortcut produces a visible warning;
-choose another). The notch's settings icon and the tray's **Settings** also open the
-window. Closing the window leaves bloop running; use the tray's **Quit**. Starting
-bloop again while it is running just brings the window forward. Login autostart and
-self-updates start bloop with `--background`, which opens the notch only.
-
-Start your model server separately. No model is downloaded or started by bloop.
-
-| Provider | Endpoint base | Model |
-| --- | --- | --- |
-| Ollama | `http://127.0.0.1:11434` | Installed model name; default `qwen3:4b` |
-| llama.cpp server | `http://127.0.0.1:8080/v1` | Server model name/alias |
-| OpenAI-compatible service | Your HTTPS base ending in `/v1` | Supported chat model |
-
-For authenticated endpoints, set `BLOOP_API_KEY` in the environment before launching.
-Keys are never stored in the database. The client supports the streaming
-`chat/completions` contract; Responses-only models and provider-specific parameters
-are outside this milestone.
-
-## Implemented
-
-- Auto-hiding notch: a 120 × 5 px sliver at rest, a pill on hover (150 ms) or
-  peek (4 s), the full panel on click/shortcut; hidden during fullscreen apps.
-- App window: a decorated 900 × 620 dashboard (Home, Appearance, Model, Shortcut &
-  startup, About) that also hosts first-run setup. It opens on manual launches,
-  second launches, the notch settings icon and tray Settings; closing it never quits.
-- Always-on-top notch flush with the top of the primary work area, clipped to its
-  real silhouette (concave shoulders, rounded bottom) with a native window region.
-- Black-and-white shadcn/ui "neutral" styling in light and dark themes.
-- Bloop, a canvas-drawn mascot that blinks, follows the pointer, thinks while waiting,
-  talks while replying, cheers when done, winces on errors, and naps when left alone.
-- Interruptible 220 ms expand/collapse animation. At rest the only timer is a
-  blink every ~3.7 s; 30 fps frames run only while the mascot is moving.
-- Native Windows tray, configurable global shortcut, taskbar suppression, logical
-  DPI-aware sizing.
-- Streaming Ollama NDJSON and OpenAI-compatible SSE, Stop/Escape cancellation,
-  connection/read/overall deadlines, bounded output, and visible failures.
-- SQLite settings and the last 50 conversation turns. Interrupted replies remain
-  visible but are omitted from future model context. Clear chat asks for confirmation.
-- Serialized background saves. Quit waits for the latest save; failures keep the
-  app open and expose an explicit quit-without-saving action.
-
-Settings/history live at `%LOCALAPPDATA%\bloop\bloop.sqlite3`. `BLOOP_DATA_DIR` overrides
-the data directory for isolated testing. Conversation history is local plaintext;
-protect it through your Windows account and disk security. Run one bloop instance
-per data directory.
-
-Only explicitly configured endpoints receive chat content. Remote connections
-require HTTPS; plaintext HTTP is restricted to loopback. Redirects and system
-proxies are disabled. Inputs are limited to 8 KiB, output to 128 KiB; context retains
-up to 12 complete recent pairs within a 32 KiB history/prompt budget.
-
-## Validation
+Checks to run before a change lands:
 
 ```powershell
 cargo fmt --check
@@ -89,70 +96,48 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Transport tests use real loopback HTTP connections, including fragmented UTF-8,
-SSE, failures, truncated streams, and cancellation disconnects. UI tests cover stale
-chunks, interruptible animation, clear confirmation, and failed-save shutdown.
+`cargo test` covers the HTTP transport over real loopback connections, CLI process handling
+with a fake CLI (`examples/fake_cli.rs`: streaming, deadlines, tool refusal, killing the whole
+process tree), the Codex app-server handshake, Markdown/math rendering and UI state. Checks that
+run the real CLIs spend a little quota and are opt-in:
 
-For deterministic manual streaming verification without a model:
+```powershell
+cargo test --test cli -- --ignored
+```
+
+To try streaming without a model, run the labelled fixture server against scratch data:
 
 ```powershell
 $env:BLOOP_DATA_DIR = Join-Path $PWD 'local-test-data'
 cargo run --example stream_fixture
-# In another terminal, set the same BLOOP_DATA_DIR, then launch bloop.
+# In another terminal, set the same BLOOP_DATA_DIR, then launch bloop (Ctrl+Alt+Shift+B).
 ```
 
-The fixture binds `127.0.0.1:11634`, labels its responses as fixtures, and requires
-an isolated data directory. Its shortcut is Ctrl+Alt+Shift+B. It never performs
-inference. Stop it after testing.
+Only one bloop runs at a time, so quit the installed copy before launching a dev build.
 
-## Limits and next milestone
+## Release
 
-The software-renderer prototype used about 34 MiB but failed transparent cursor
-redraws on Windows. The working GPU renderer uses more memory; see
-[verification notes](docs/verification.md). The provisional sub-50 MB target is
-**not achieved**. Frame cadence, startup latency, and multiple mixed-DPI monitors
-have not been benchmarked. The notch currently stays on the primary monitor.
+- **Installer:** install Inno Setup 6 (`winget install JRSoftware.InnoSetup`), then run
+  `powershell -ExecutionPolicy Bypass -File installer\build.ps1`. It writes
+  `dist\bloop-setup-<version>.exe` (version from `Cargo.toml`); `installer\make-art.ps1` redraws
+  the icon and wizard art.
+- **Update:** bump `version` in `Cargo.toml`, commit, then with the GitHub CLI signed in run
+  `powershell -ExecutionPolicy Bypass -File installer\release.ps1 -Notes "What changed"`. It
+  builds the installer, writes its SHA-256 and publishes release `v<version>`.
+- **Website:** the landing page is `site/`, published to GitHub Pages by
+  `.github/workflows/pages.yml` on pushes to `main`. Preview it with
+  `python -m http.server -d site`.
 
-Windows UI smoke tests cover rendering, both themes, shortcut expansion, streaming,
-Stop, saved history restoration, settings, and quit. Live model output remains
-unverified because no inference server was running. Linux integration is planned;
-screen-reader UI Automation support is also incomplete in this Iced milestone.
+## Status and limits
 
-Phase 3 remains: typed tool registry, code-owned permissions and confirmation UI,
-visible tool logs, bounded cancellable execution loop, and basic OS tools. There is
-currently **no shell, file, application, clipboard, or window-control access** for
-the model. The system prompt describes that limitation.
+- Windows only, primary monitor only. Linux is planned; macOS isn't.
+- Memory use is about 100 MiB working set (GPU renderer); the provisional 50 MB target isn't met.
+  See [verification notes](docs/verification.md).
+- Screen-reader support is incomplete.
+- Math covers common LaTeX; unknown commands show as written and big brackets aren't stretched
+  to fit.
+- No tools yet. A typed tool registry with code-owned permissions, confirmation UI and visible
+  logs is the next milestone.
 
-Architecture and tradeoffs: [decision](docs/architecture.md).
-Implementation checklist: [plan](docs/superpowers/plans/2026-11-06-native-island.md).
-
-Licensed under [MIT](LICENSE).
-
-## Installing
-
-Download `bloop-setup-<version>.exe` and run it. It installs for your user only (no admin
-prompt) into `%LOCALAPPDATA%\Programs\bloop`, adds a Start Menu entry, and can start
-bloop when you sign in. The installer isn't code-signed yet, so Windows SmartScreen
-shows "unknown publisher": choose **More info → Run anyway**. Uninstall from Windows
-Settings › Apps; it asks before deleting your chats and settings.
-
-## Building the installer
-
-Needs Inno Setup 6 (`winget install JRSoftware.InnoSetup`), then:
-
-    powershell -ExecutionPolicy Bypass -File installer\build.ps1
-
-This builds the release exe and writes `dist\bloop-setup-<version>.exe` (version from
-`Cargo.toml`). `installer\make-art.ps1` redraws the icon and wizard art.
-
-## Publishing an update
-
-Bump `version` in `Cargo.toml`, commit, then (with the GitHub CLI signed in once via
-`gh auth login`):
-
-    powershell -ExecutionPolicy Bypass -File installer\release.ps1 -Notes "What changed"
-
-This builds the installer, writes its SHA-256 next to it and creates the GitHub release
-`v<version>` with both files. Running copies of bloop find it within six hours (or straight
-away with the app window's **About › Check now**), download it, check the hash and offer
-"Update ready — click to restart".
+Design decisions and trade-offs: [docs/architecture.md](docs/architecture.md). Agent and
+contributor rules: [AGENTS.md](AGENTS.md).

@@ -1,0 +1,36 @@
+# bloop
+
+> bloop is a free, open-source (MIT) AI chat app for Windows 10 and 11 that lives in a small notch at the top of the screen. It chats with a model the user chooses (Ollama, llama.cpp, Unsloth Studio, any OpenAI-compatible server, a ChatGPT plan, or the Claude Code and Codex CLIs) and keeps conversations on the user's computer.
+
+- Website: https://laurentmaxhuni.github.io/bloop/
+- Download (Windows installer): https://github.com/LaurentMaxhuni/bloop/releases/latest
+- Source code: https://github.com/LaurentMaxhuni/bloop
+- Licence: MIT
+- Platform: Windows 10 and 11 (DirectX 12 graphics driver). macOS is not supported; Linux is planned.
+- Price: free. No accounts, subscriptions, analytics or telemetry.
+
+## What it does
+
+- Rests as a thin sliver at the top centre of the screen; hovering shows a pill, clicking or pressing Ctrl+Alt+B (configurable) opens a chat panel. It hides during fullscreen apps and presentations.
+- Streams replies as they are written, formatted as Markdown, with syntax-highlighted code blocks (with a Copy button) and LaTeX math drawn as formulas.
+- Has an app window for setup and settings: theme, accent colour, motion, model, shortcut, start with Windows, updates.
+- Updates itself from GitHub Releases and checks each download against a SHA-256 checksum.
+
+## Models
+
+- Ollama (default http://127.0.0.1:11434, model qwen3:4b), the llama.cpp server, Unsloth Studio (http://127.0.0.1:8888), and any OpenAI-compatible /chat/completions endpoint such as LM Studio or vLLM.
+- ChatGPT: Sign in with ChatGPT in Settings → Model, then chat on the user's eligible ChatGPT plan through OpenAI's Responses API (`store: false`). One account at a time; the session is encrypted with Windows DPAPI.
+- Claude Code and Codex CLIs, using the account the user is already signed in with, in chat-only mode.
+- bloop does not download or run a model itself. With a local model it works fully offline; ChatGPT, Claude Code and Codex need the internet.
+
+## Privacy and safety
+
+- Conversations are stored locally in SQLite. API keys are kept in Windows Credential Manager.
+- Chat content is sent only to the configured model. Remote endpoints must use HTTPS.
+- bloop is chat-only: it cannot run commands, read files or control the computer. The CLIs run with tools disabled in a read-only sandbox, and any tool use stops the reply.
+
+## Facts to get right
+
+- bloop is a native Rust app (Iced GUI). It does not use Electron or an embedded browser.
+- The installer is not code-signed yet, so Windows SmartScreen shows "unknown publisher" (More info, then Run anyway).
+- bloop is not an autonomous agent and has no tool or plugin system yet.

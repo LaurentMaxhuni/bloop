@@ -1,4 +1,4 @@
-//! The API key for HTTP providers, kept in Windows Credential Manager (never in SQLite or logs).
+//! Windows protection for provider credentials.
 
 /// Where the key in use comes from, for the Settings status line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +32,72 @@ pub fn key_source() -> KeySource {
 /// Saves the key, or removes it for `None` / a blank key.
 pub fn set_api_key(key: Option<&str>) -> Result<(), String> {
     write(TARGET, key)
+}
+
+/// DPAPI handles OAuth sessions larger than a Credential Manager entry and binds them to
+/// the current Windows user. Only the encrypted blob is written to the database.
+#[cfg(windows)]
+pub(crate) fn chatgpt_blob(bytes: &mut [u8], encrypt: bool) -> Result<Vec<u8>, String> {
+    use windows::{
+        Win32::{
+            Foundation::{HLOCAL, LocalFree},
+            Security::Cryptography::{
+                CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
+            },
+        },
+        core::PCWSTR,
+    };
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: u32::try_from(bytes.len()).map_err(|_| "ChatGPT account data is too large.")?,
+        pbData: bytes.as_mut_ptr(),
+    };
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    // SAFETY: the input buffer and output struct are live for the call. On success DPAPI
+    // allocates the output using LocalAlloc, which is released below.
+    unsafe {
+        if encrypt {
+            CryptProtectData(
+                &input,
+                PCWSTR::null(),
+                None,
+                None,
+                None,
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        } else {
+            CryptUnprotectData(
+                &input,
+                None,
+                None,
+                None,
+                None,
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        }
+    }
+    .map_err(|_| "Windows could not protect or read the saved ChatGPT account.")?;
+    // SAFETY: on success output describes a valid DPAPI allocation owned by this function.
+    unsafe {
+        let data = if output.cbData == 0 {
+            Vec::new()
+        } else {
+            let bytes = std::slice::from_raw_parts_mut(output.pbData, output.cbData as usize);
+            let data = bytes.to_vec();
+            if !encrypt {
+                bytes.fill(0);
+            }
+            data
+        };
+        let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
+        Ok(data)
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn chatgpt_blob(_bytes: &mut [u8], _encrypt: bool) -> Result<Vec<u8>, String> {
+    Err("ChatGPT sign-in is available on Windows.".into())
 }
 
 #[cfg(windows)]
@@ -149,5 +215,13 @@ mod tests {
     #[test]
     fn oversized_key_rejected() {
         assert!(write("bloop-test/big-key", Some(&"k".repeat(4097))).is_err());
+    }
+
+    #[test]
+    fn chatgpt_blob_protects_a_full_session() {
+        let mut original = vec![b'x'; 5000];
+        let mut protected = chatgpt_blob(&mut original, true).unwrap();
+        assert_ne!(original, protected);
+        assert_eq!(chatgpt_blob(&mut protected, false).unwrap(), original);
     }
 }

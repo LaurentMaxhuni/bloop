@@ -7,6 +7,7 @@ pub enum Provider {
     Unsloth,
     ClaudeCode,
     Codex,
+    ChatGpt,
 }
 
 /// How bloop talks to a provider.
@@ -16,23 +17,26 @@ pub enum Wire {
     Ollama,
     /// OpenAI-compatible SSE `/chat/completions`.
     OpenAi,
+    Responses,
     /// A local CLI run once per message (chat only).
     Cli,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 5] = [
+    pub const ALL: [Provider; 6] = [
         Self::Ollama,
         Self::OpenAi,
         Self::Unsloth,
         Self::ClaudeCode,
         Self::Codex,
+        Self::ChatGpt,
     ];
 
     pub fn wire(self) -> Wire {
         match self {
             Self::Ollama => Wire::Ollama,
             Self::OpenAi | Self::Unsloth => Wire::OpenAi,
+            Self::ChatGpt => Wire::Responses,
             Self::ClaudeCode | Self::Codex => Wire::Cli,
         }
     }
@@ -47,7 +51,7 @@ impl Provider {
             Self::Ollama => "http://127.0.0.1:11434",
             Self::OpenAi => "http://127.0.0.1:8080/v1",
             Self::Unsloth => "http://127.0.0.1:8888/v1",
-            Self::ClaudeCode | Self::Codex => "",
+            Self::ClaudeCode | Self::Codex | Self::ChatGpt => "",
         }
     }
 }
@@ -60,6 +64,7 @@ impl std::fmt::Display for Provider {
             Self::Unsloth => "Unsloth Studio",
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
+            Self::ChatGpt => "ChatGPT",
         })
     }
 }
@@ -336,6 +341,10 @@ impl Config {
             {
                 return Err("Model may contain only letters, digits and . _ : / -".into());
             }
+        } else if self.provider == Provider::ChatGpt {
+            if self.model.len() > 200 {
+                return Err("Model must contain at most 200 bytes.".into());
+            }
         } else {
             validate_endpoint(&self.endpoint)?;
             if self.model.trim().is_empty() || self.model.len() > 200 {
@@ -493,6 +502,6 @@ mod tests {
             Provider::Unsloth.default_endpoint(),
             "http://127.0.0.1:8888/v1"
         );
-        assert_eq!(Provider::ALL.len(), 5);
+        assert_eq!(Provider::ALL.len(), 6);
     }
 }

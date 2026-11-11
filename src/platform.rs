@@ -365,6 +365,38 @@ pub fn shape(window: &dyn iced::window::Window, outline: &[(f32, f32)]) {
     }
 }
 
+/// Opens a link from a reply in the default browser. Only web and mail links: a reply
+/// must not be able to launch files, programs or other URI handlers.
+pub fn open_url(url: &str) -> Result<(), String> {
+    let lower = url.trim().to_ascii_lowercase();
+    if !["https://", "http://", "mailto:"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
+        || url.chars().any(char::is_control)
+    {
+        return Err(format!("bloop only opens web links: {url}"));
+    }
+    #[cfg(windows)]
+    {
+        use windows::{
+            Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+            core::{HSTRING, w},
+        };
+        let target = HSTRING::from(url.trim());
+        // SAFETY: every string is a live, NUL-terminated wide string for the whole call.
+        let result = unsafe { ShellExecuteW(None, w!("open"), &target, None, None, SW_SHOWNORMAL) };
+        // ShellExecute reports success as a value greater than 32.
+        if result.0 as usize <= 32 {
+            return Err("Couldn't open the link.".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Opening links isn't supported on this platform yet.".into())
+    }
+}
+
 /// True while a fullscreen app, presentation, or the lock screen should hide the notch.
 /// Errors count as "not fullscreen" so the notch is never stranded.
 pub fn fullscreen_active() -> bool {

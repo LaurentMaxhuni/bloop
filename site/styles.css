@@ -401,3 +401,10 @@ h3 { font-size: 17px; letter-spacing: -0.015em; line-height: 1.3; }
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* FAQ: plain question headings and short answers, always visible. */
+.faq { margin: 40px 0 0; display: grid; gap: 12px 40px; grid-template-columns: repeat(2, 1fr); }
+.qa { padding: 18px 0; border-top: 1px solid var(--border); }
+.qa h3 { margin: 0 0 6px; font-size: 16px; line-height: 1.4; }
+.qa p { margin: 0; color: var(--muted-strong); font-size: 15px; line-height: 1.6; }
+@media (max-width: 760px) { .faq { grid-template-columns: 1fr; } }

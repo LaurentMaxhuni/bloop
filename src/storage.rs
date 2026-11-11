@@ -34,6 +34,9 @@ fn connect(path: &Path) -> Result<Connection, String> {
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS state (
         id INTEGER PRIMARY KEY CHECK(id = 1), settings TEXT NOT NULL, history TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS chatgpt_account (
+        id INTEGER PRIMARY KEY CHECK(id = 1), data BLOB NOT NULL
     );",
         )
         .map_err(|e| e.to_string())?;
@@ -48,6 +51,32 @@ fn validate_turns(turns: &[Turn]) -> Result<(), String> {
     {
         return Err("Stored conversation exceeds supported limits.".into());
     }
+    Ok(())
+}
+
+pub(crate) fn load_chatgpt() -> Result<Option<Vec<u8>>, String> {
+    let path = data_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let connection = connect(&path)?;
+    connection
+        .query_row("SELECT data FROM chatgpt_account WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn save_chatgpt(protected: &[u8]) -> Result<(), String> {
+    let connection = connect(&data_path()?)?;
+    connection
+        .execute(
+            "INSERT INTO chatgpt_account(id, data) VALUES(1, ?1)
+             ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+            [protected],
+        )
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

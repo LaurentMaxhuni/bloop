@@ -3,24 +3,165 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>bloop — your AI, tucked into the top of your screen</title>
-<meta name="description" content="bloop is a tiny AI chat notch for Windows. It rests as a thin sliver at the top of your screen and opens into a chat with your own model: Ollama, llama.cpp, Unsloth Studio, Claude Code or Codex.">
+<title>bloop — a free, local AI chat notch for Windows</title>
+<meta name="description" content="bloop is a free, open-source AI chat notch for Windows 10 and 11. Chat with Ollama, llama.cpp, ChatGPT, Claude Code or Codex from the top of your screen.">
+<link rel="canonical" href="https://laurentmaxhuni.github.io/bloop/">
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+<link rel="alternate" type="text/markdown" href="llms.txt" title="bloop for AI assistants">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
-<meta property="og:title" content="bloop — your AI, tucked into the top of your screen">
-<meta property="og:description" content="A tiny AI chat notch for Windows that talks to your own model.">
+<meta property="og:site_name" content="bloop">
+<meta property="og:locale" content="en_US">
+<meta property="og:title" content="bloop — a free, local AI chat notch for Windows">
+<meta property="og:description" content="A tiny AI chat notch for Windows that talks to your own model: Ollama, llama.cpp, Unsloth Studio, ChatGPT, Claude Code or Codex.">
 <meta property="og:url" content="https://laurentmaxhuni.github.io/bloop/">
 <meta property="og:image" content="https://laurentmaxhuni.github.io/bloop/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The bloop mascot in a black notch at the top of a screen, next to the words: your AI, tucked into the top of your screen.">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="bloop — a free, local AI chat notch for Windows">
+<meta name="twitter:description" content="A tiny AI chat notch for Windows that talks to your own model.">
+<meta name="twitter:image" content="https://laurentmaxhuni.github.io/bloop/og.png">
+<meta name="twitter:image:alt" content="The bloop mascot in a black notch at the top of a screen.">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://laurentmaxhuni.github.io/bloop/#website",
+      "url": "https://laurentmaxhuni.github.io/bloop/",
+      "name": "bloop",
+      "inLanguage": "en"
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://laurentmaxhuni.github.io/bloop/#app",
+      "name": "bloop",
+      "description": "A free, open-source AI chat notch for Windows. It rests as a thin sliver at the top of the screen and opens into a chat with a model you choose: Ollama, llama.cpp, Unsloth Studio, any OpenAI-compatible server, a ChatGPT plan, the Claude Code CLI or the Codex CLI. Replies stream in with Markdown, syntax-highlighted code and math formulas. Chats are stored locally, with no accounts or telemetry.",
+      "url": "https://laurentmaxhuni.github.io/bloop/",
+      "applicationCategory": "UtilitiesApplication",
+      "applicationSubCategory": "AI chat assistant",
+      "operatingSystem": "Windows 10, Windows 11",
+      "softwareVersion": "0.3.1",
+      "downloadUrl": "https://github.com/LaurentMaxhuni/bloop/releases/latest",
+      "installUrl": "https://github.com/LaurentMaxhuni/bloop/releases/latest",
+      "releaseNotes": "https://github.com/LaurentMaxhuni/bloop/releases",
+      "softwareRequirements": "A DirectX 12 graphics driver; a model server (such as Ollama) or the Claude Code or Codex CLI",
+      "image": "https://laurentmaxhuni.github.io/bloop/og.png",
+      "license": "https://opensource.org/licenses/MIT",
+      "isAccessibleForFree": true,
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "featureList": [
+        "Auto-hiding notch at the top of the screen with a global shortcut (Ctrl+Alt+B)",
+        "Works with Ollama, llama.cpp, Unsloth Studio, OpenAI-compatible servers, ChatGPT (Sign in with ChatGPT), Claude Code and Codex",
+        "Streaming replies with Markdown, syntax-highlighted code blocks and math formulas",
+        "Conversations stored locally in SQLite; no accounts, analytics or telemetry",
+        "Native Rust app with no embedded browser",
+        "Self-updates from GitHub Releases, verified with SHA-256"
+      ],
+      "sameAs": ["https://github.com/LaurentMaxhuni/bloop"],
+      "author": { "@type": "Organization", "name": "bloop contributors", "url": "https://github.com/LaurentMaxhuni/bloop" }
+    },
+    {
+      "@type": "SoftwareSourceCode",
+      "name": "bloop source code",
+      "codeRepository": "https://github.com/LaurentMaxhuni/bloop",
+      "programmingLanguage": "Rust",
+      "license": "https://opensource.org/licenses/MIT",
+      "targetProduct": { "@id": "https://laurentmaxhuni.github.io/bloop/#app" }
+    }
+  ]
+}
+</script>
 <script>
   // Apply the remembered theme before first paint, so the page never flashes.
   try { const t = localStorage.getItem('bloop-theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch {}
   try { const a = localStorage.getItem('bloop-accent'); if (a) document.documentElement.dataset.accent = a; } catch {}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "What is bloop?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "bloop is a free, open-source AI chat app for Windows that lives in a small notch at the top of your screen. It rests as a thin sliver, pops open when you hover or press Ctrl+Alt+B, and chats with a model you choose."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is bloop free?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. bloop is free and open source under the MIT licence. It has no accounts, subscriptions or paid tiers."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Which AI models does bloop work with?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Ollama, the llama.cpp server, Unsloth Studio, any server with an OpenAI-compatible /chat/completions endpoint (such as LM Studio or vLLM), your ChatGPT plan through Sign in with ChatGPT, and the Claude Code and Codex command-line tools you are already signed in to. bloop does not include a model."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does bloop work offline?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes, with a local model such as Ollama, llama.cpp or Unsloth Studio running on your computer. ChatGPT, Claude Code and Codex need an internet connection, because they run in the cloud."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can bloop show code and math?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Replies stream in as they are written and are formatted as Markdown: code blocks are syntax-highlighted with a Copy button, and LaTeX formulas such as fractions, roots, sums and matrices are drawn as real math."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Where are my chats stored?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "On your computer, in a SQLite file in your own data folder. bloop has no accounts, analytics or telemetry, and API keys are kept in Windows Credential Manager. Your messages only go to the model you configured."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can bloop run commands or change files on my computer?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. bloop is chat-only. The Claude Code and Codex CLIs run with their tools switched off and in a read-only sandbox, and bloop stops a reply if either tries to use a tool."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does bloop work on macOS or Linux?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Not yet. bloop runs on Windows 10 and 11 with a DirectX 12 graphics driver. Linux support is planned."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Why does Windows say \"unknown publisher\" when I install bloop?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The installer is not code-signed yet, so Windows SmartScreen warns about it. Choose More info, then Run anyway. Updates are checked against a SHA-256 checksum before they install."
+      }
+    }
+  ]
+}
 </script>
 <link rel="stylesheet" href="styles.css">
 <script type="module" src="app.js"></script>
@@ -110,6 +251,7 @@
       <a href="#models">Models</a>
       <a href="#window">App window</a>
       <a href="#private">Privacy</a>
+      <a href="#faq">FAQ</a>
     </nav>
     <div class="bar-actions">
       <a class="icon-btn" href="https://github.com/LaurentMaxhuni/bloop" aria-label="bloop on GitHub" title="GitHub"><svg class="i"><use href="#i-github"/></svg></a>
@@ -128,7 +270,7 @@
       </div>
       <p class="hint" id="hint"><svg class="i"><use href="#i-arrow-up"/></svg><span data-hint-text>The notch up top is real. Rest your mouse on it.</span></p>
       <h1>Your AI, tucked into the top of your screen.</h1>
-      <p class="lede">bloop is a tiny chat notch for Windows. It rests as a thin sliver at the top of your screen, pops open when you need it, and talks to <em>your</em> model: Ollama, llama.cpp, Unsloth Studio, Claude Code or Codex.</p>
+      <p class="lede">bloop is a tiny chat notch for Windows. It rests as a thin sliver at the top of your screen, pops open when you need it, and talks to <em>your</em> model: Ollama, llama.cpp, Unsloth Studio, ChatGPT, Claude Code or Codex.</p>
       <div class="cta">
         <a class="btn btn-primary btn-lg" data-download href="https://github.com/LaurentMaxhuni/bloop/releases/latest">
           <svg class="i"><use href="#i-download"/></svg>
@@ -160,7 +302,7 @@
             <span class="mini-notch" data-mini="pill"></span>
           </div>
           <h3><span class="num">2</span>Click to chat</h3>
-          <p>The pill opens into a panel. Replies stream in as they're written, and Bloop thinks, talks and cheers along.</p>
+          <p>The pill opens into a panel. Replies stream in as they're written, with highlighted code and real math formulas, while Bloop thinks, talks and cheers along.</p>
         </li>
         <li class="step">
           <div class="screen" aria-hidden="true">
@@ -196,6 +338,11 @@
           <p>Chat with the models you fine-tune, on <code>127.0.0.1:8888</code>.</p>
         </li>
         <li class="model">
+          <span class="model-icon"><svg class="i"><use href="#i-key"/></svg></span>
+          <h3>ChatGPT</h3>
+          <p>Sign in with ChatGPT and chat on your plan. The session is encrypted for your Windows account.</p>
+        </li>
+        <li class="model">
           <span class="model-icon"><svg class="i"><use href="#i-terminal"/></svg></span>
           <h3>Claude Code</h3>
           <p>Uses the CLI you're already signed in to, in chat-only mode.</p>
@@ -203,7 +350,7 @@
         <li class="model">
           <span class="model-icon"><svg class="i"><use href="#i-terminal"/></svg></span>
           <h3>Codex</h3>
-          <p>Same for the Codex CLI: one message in, one reply out.</p>
+          <p>Same for the Codex CLI, streamed as it's written.</p>
         </li>
         <li class="model model-more">
           <span class="model-icon"><svg class="i"><use href="#i-globe"/></svg></span>
@@ -335,6 +482,51 @@
         <li><span class="model-icon"><svg class="i"><use href="#i-eye-off"/></svg></span><h3>No tracking</h3><p>No accounts, analytics or telemetry, in the app or on this page.</p></li>
         <li><span class="model-icon"><svg class="i"><use href="#i-shield-check"/></svg></span><h3>Checked updates</h3><p>Updates come from GitHub Releases and are verified against a SHA-256 checksum before they install.</p></li>
       </ul>
+    </div>
+  </section>
+
+  <section class="section" id="faq" aria-labelledby="faq-title">
+    <div class="wrap">
+      <p class="eyebrow">Questions</p>
+      <h2 id="faq-title">Frequently asked questions</h2>
+      <div class="faq">
+        <div class="qa">
+          <h3>What is bloop?</h3>
+          <p>bloop is a free, open-source AI chat app for Windows that lives in a small notch at the top of your screen. It rests as a thin sliver, pops open when you hover or press Ctrl+Alt+B, and chats with a model you choose.</p>
+        </div>
+        <div class="qa">
+          <h3>Is bloop free?</h3>
+          <p>Yes. bloop is free and open source under the MIT licence. It has no accounts, subscriptions or paid tiers.</p>
+        </div>
+        <div class="qa">
+          <h3>Which AI models does bloop work with?</h3>
+          <p>Ollama, the llama.cpp server, Unsloth Studio, any server with an OpenAI-compatible /chat/completions endpoint (such as LM Studio or vLLM), your ChatGPT plan through Sign in with ChatGPT, and the Claude Code and Codex command-line tools you are already signed in to. bloop does not include a model.</p>
+        </div>
+        <div class="qa">
+          <h3>Does bloop work offline?</h3>
+          <p>Yes, with a local model such as Ollama, llama.cpp or Unsloth Studio running on your computer. ChatGPT, Claude Code and Codex need an internet connection, because they run in the cloud.</p>
+        </div>
+        <div class="qa">
+          <h3>Can bloop show code and math?</h3>
+          <p>Yes. Replies stream in as they are written and are formatted as Markdown: code blocks are syntax-highlighted with a Copy button, and LaTeX formulas such as fractions, roots, sums and matrices are drawn as real math.</p>
+        </div>
+        <div class="qa">
+          <h3>Where are my chats stored?</h3>
+          <p>On your computer, in a SQLite file in your own data folder. bloop has no accounts, analytics or telemetry, and API keys are kept in Windows Credential Manager. Your messages only go to the model you configured.</p>
+        </div>
+        <div class="qa">
+          <h3>Can bloop run commands or change files on my computer?</h3>
+          <p>No. bloop is chat-only. The Claude Code and Codex CLIs run with their tools switched off and in a read-only sandbox, and bloop stops a reply if either tries to use a tool.</p>
+        </div>
+        <div class="qa">
+          <h3>Does bloop work on macOS or Linux?</h3>
+          <p>Not yet. bloop runs on Windows 10 and 11 with a DirectX 12 graphics driver. Linux support is planned.</p>
+        </div>
+        <div class="qa">
+          <h3>Why does Windows say &quot;unknown publisher&quot; when I install bloop?</h3>
+          <p>The installer is not code-signed yet, so Windows SmartScreen warns about it. Choose More info, then Run anyway. Updates are checked against a SHA-256 checksum before they install.</p>
+        </div>
+      </div>
     </div>
   </section>
 

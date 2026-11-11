@@ -45,67 +45,91 @@ impl Kind {
     }
 }
 
-/// Chat-only command line. Claude gets every tool switched off; Codex has no such switch,
-/// so it runs read-only without the user's config, plugins, apps or memories, and
-/// [`LineDecoder`] refuses any tool event it still emits.
+/// Codex features switched off for chat: every tool, integration and background helper
+/// that the app server would otherwise load from the user's config.
+const CODEX_OFF: [&str; 12] = [
+    "plugins",
+    "apps",
+    "memories",
+    "shell_tool",
+    "browser_use",
+    "computer_use",
+    "image_generation",
+    "in_app_browser",
+    "skill_search",
+    "tool_suggest",
+    "hooks",
+    "goals",
+];
+
+/// Chat-only command line. Claude gets every tool switched off. Codex runs as its app
+/// server, the only Codex mode that streams text as it is written; it can't skip the user's
+/// config, so every tool feature is disabled here, MCP servers are disabled per thread (see
+/// [`LineDecoder::codex_session`]), the sandbox is read-only, and [`LineDecoder`] still
+/// refuses any tool event that gets through. Codex's model goes in its `thread/start`.
 pub fn args(kind: Kind, model: &str, dir: &Path) -> Vec<String> {
-    let mut args: Vec<String> = match kind {
-        Kind::Claude => [
-            "-p",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--tools",
-            "",
-            "--no-session-persistence",
-            "--strict-mcp-config",
-            "--setting-sources",
-            "",
-        ]
-        .map(String::from)
-        .to_vec(),
-        Kind::Codex => [
-            "exec",
-            "--json",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "--ignore-user-config",
-            "--disable",
-            "plugins",
-            "--disable",
-            "apps",
-            "--disable",
-            "memories",
-            "--sandbox",
-            "read-only",
-            "--color",
-            "never",
-            "-C",
-        ]
-        .map(String::from)
-        .to_vec(),
-    };
     if kind == Kind::Codex {
-        args.push(dir.display().to_string());
+        let _ = (model, dir);
+        let mut args = vec!["app-server".to_owned()];
+        for feature in CODEX_OFF {
+            args.push("--disable".into());
+            args.push(feature.into());
+        }
+        return args;
     }
+    let mut args: Vec<String> = [
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--tools",
+        "",
+        "--no-session-persistence",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "",
+    ]
+    .map(String::from)
+    .to_vec();
     let model = model.trim();
     if !model.is_empty() {
-        args.push(
-            if kind == Kind::Claude {
-                "--model"
-            } else {
-                "-m"
-            }
-            .into(),
-        );
+        args.push("--model".into());
         args.push(model.into());
     }
-    if kind == Kind::Codex {
-        // Read the prompt from stdin.
-        args.push("-".into());
-    }
     args
+}
+
+/// Blocking threads a runtime needs to run a CLI reply. On Windows, tokio performs child
+/// pipe I/O on its blocking pool, and a reply keeps three such operations open at once
+/// (stdin write, stdout read, stderr read); with fewer threads the stdin write starves and
+/// the CLI never receives its prompt. One more is left for other blocking work.
+pub const BLOCKING_THREADS: usize = 4;
+
+/// JSON-RPC ids bloop uses with the Codex app server.
+mod rpc {
+    pub const INITIALIZE: u64 = 1;
+    pub const CONFIG: u64 = 2;
+    pub const MODELS: u64 = 3;
+    pub const THREAD: u64 = 4;
+    pub const TURN: u64 = 5;
+}
+
+/// The Codex app-server handshake: initialize, read the effective config (to switch off the
+/// user's MCP servers by name) and the default model, start an ephemeral read-only thread,
+/// then start one turn carrying the flattened conversation.
+struct Session {
+    prompt: String,
+    model: String,
+    cwd: String,
+    mcp: Option<Vec<String>>,
+    thread_sent: bool,
+    /// Agent messages marked as commentary (progress narration), left out of the reply.
+    commentary: Vec<String>,
+}
+
+fn rpc_line(value: Value) -> String {
+    format!("{value}\n")
 }
 
 /// The conversation as one prompt. Each turn is wrapped in a tag carrying a random
@@ -163,7 +187,7 @@ fn refuse() -> Error {
 fn short(message: &str) -> String {
     let message = message.trim();
     match message.char_indices().nth(300) {
-        Some((cut, _)) => format!("{}…", &message[..cut]),
+        Some((cut, _)) => format!("{}â€¦", &message[..cut]),
         None => message.to_owned(),
     }
 }
@@ -176,6 +200,9 @@ pub struct LineDecoder {
     done: bool,
     /// Codex item ids that already streamed deltas, so their completed text isn't repeated.
     streamed: Vec<String>,
+    session: Option<Session>,
+    /// Lines to write to the CLI's stdin (Codex app-server requests).
+    outbox: Vec<String>,
 }
 
 impl LineDecoder {
@@ -186,7 +213,143 @@ impl LineDecoder {
             size: 0,
             done: false,
             streamed: Vec::new(),
+            session: None,
+            outbox: Vec::new(),
         }
+    }
+
+    /// A Codex decoder that also drives the app-server handshake; its first requests are
+    /// ready in [`LineDecoder::take_outbox`]. An empty `model` means Codex's default model.
+    pub fn codex_session(prompt: &str, model: &str, cwd: &Path) -> Self {
+        let mut decoder = Self::new(Kind::Codex);
+        let model = model.trim().to_owned();
+        decoder.outbox.push(rpc_line(serde_json::json!({
+            "id": rpc::INITIALIZE,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "bloop", "version": env!("CARGO_PKG_VERSION")}},
+        })));
+        decoder
+            .outbox
+            .push(rpc_line(serde_json::json!({"method": "initialized"})));
+        let cwd = cwd.display().to_string();
+        decoder.outbox.push(rpc_line(serde_json::json!({
+            "id": rpc::CONFIG,
+            "method": "config/read",
+            "params": {"cwd": cwd},
+        })));
+        if model.is_empty() {
+            decoder.outbox.push(rpc_line(serde_json::json!({
+                "id": rpc::MODELS,
+                "method": "model/list",
+                "params": {},
+            })));
+        }
+        decoder.session = Some(Session {
+            prompt: prompt.to_owned(),
+            model,
+            cwd,
+            mcp: None,
+            thread_sent: false,
+            commentary: Vec::new(),
+        });
+        decoder
+    }
+
+    /// Requests waiting to be written to the CLI's stdin.
+    pub fn take_outbox(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.outbox)
+    }
+
+    /// Handles a JSON-RPC response or server request from the Codex app server.
+    /// Returns false when the line is neither.
+    fn codex_rpc(&mut self, value: &Value) -> Result<bool, Error> {
+        let Some(id) = value.get("id") else {
+            return Ok(false);
+        };
+        if value.get("method").is_some() {
+            // The server asking bloop something: an approval, user input, a tool call or a
+            // credential. All of them mean a tool is in play.
+            return Err(refuse());
+        }
+        if let Some(error) = value.get("error") {
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Codex rejected a request.");
+            return Err(Error::Protocol(short(&readable(message))));
+        }
+        let Some(session) = self.session.as_mut() else {
+            return Ok(true);
+        };
+        let result = value.get("result").unwrap_or(&Value::Null);
+        match id.as_u64() {
+            Some(rpc::CONFIG) => {
+                session.mcp = Some(
+                    result
+                        .pointer("/config/mcp_servers")
+                        .and_then(Value::as_object)
+                        .map(|servers| servers.keys().cloned().collect())
+                        .unwrap_or_default(),
+                );
+            }
+            Some(rpc::MODELS) => {
+                let models = result.get("data").and_then(Value::as_array);
+                let pick = models.and_then(|models| {
+                    models
+                        .iter()
+                        .find(|m| m.get("isDefault").and_then(Value::as_bool) == Some(true))
+                        .or_else(|| models.first())
+                });
+                session.model = pick
+                    .and_then(|m| m.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                if session.model.is_empty() {
+                    return Err(Error::Protocol("Codex offered no models.".into()));
+                }
+            }
+            Some(rpc::THREAD) => {
+                let Some(thread) = result.pointer("/thread/id").and_then(Value::as_str) else {
+                    return Err(Error::Protocol("Codex didn't start a conversation.".into()));
+                };
+                let request = serde_json::json!({
+                    "id": rpc::TURN,
+                    "method": "turn/start",
+                    "params": {
+                        "threadId": thread,
+                        "input": [{"type": "text", "text": session.prompt}],
+                    },
+                });
+                self.outbox.push(rpc_line(request));
+            }
+            _ => {}
+        }
+        if let Some(session) = self.session.as_mut()
+            && !session.thread_sent
+            && !session.model.is_empty()
+            && let Some(mcp) = &session.mcp
+        {
+            session.thread_sent = true;
+            let servers: serde_json::Map<String, Value> = mcp
+                .iter()
+                .map(|name| (name.clone(), serde_json::json!({"enabled": false})))
+                .collect();
+            let request = serde_json::json!({
+                "id": rpc::THREAD,
+                "method": "thread/start",
+                "params": {
+                    "cwd": session.cwd,
+                    "model": session.model,
+                    "sandbox": "read-only",
+                    "approvalPolicy": "never",
+                    "ephemeral": true,
+                    "config": {"mcp_servers": servers},
+                },
+            });
+            self.outbox.push(rpc_line(request));
+        }
+        Ok(true)
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<StreamEvent>, Error> {
@@ -312,9 +475,12 @@ impl LineDecoder {
     }
 
     fn codex(&mut self, value: &Value, events: &mut Vec<StreamEvent>) -> Result<(), Error> {
+        if self.codex_rpc(value)? {
+            return Ok(());
+        }
         let str_at = |pointer: &str| value.pointer(pointer).and_then(Value::as_str);
-        // Two observed shapes: `{"type":"item.completed","item":…}` and
-        // `{"method":"item/completed","params":{"item":…}}`.
+        // Two observed shapes: `{"type":"item.completed","item":â€¦}` and
+        // `{"method":"item/completed","params":{"item":â€¦}}`.
         let (event, item) = match (str_at("/type"), str_at("/method")) {
             (Some(kind), _) => (kind.replace('.', "/"), value.get("item")),
             (None, Some(method)) => (method.to_owned(), value.pointer("/params/item")),
@@ -338,18 +504,37 @@ impl LineDecoder {
                     | "reasoning"
                     | "todo_list"
                     | "todoList"
+                    | "plan"
+                    | "contextCompaction"
                     | "error"
             );
+        let item_id = item
+            .and_then(|i| i.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         match event.as_str() {
             "item/started" | "item/updated" | "item/completed" if tool => return Err(refuse()),
+            "item/started"
+                if item_type == "agentMessage"
+                    && item.and_then(|i| i.get("phase")).and_then(Value::as_str)
+                        == Some("commentary") =>
+            {
+                if let Some(session) = self.session.as_mut() {
+                    session.commentary.push(item_id.to_owned());
+                }
+            }
             "item/agentMessage/delta" => {
                 let id = str_at("/params/itemId").unwrap_or_default().to_owned();
+                if self.is_commentary(&id) {
+                    return Ok(());
+                }
                 let text = str_at("/params/delta").unwrap_or_default().to_owned();
                 if !self.streamed.contains(&id) {
                     self.streamed.push(id);
                 }
                 self.delta(&text, events)?;
             }
+            "item/completed" if self.is_commentary(item_id) => {}
             "item/completed"
                 if matches!(
                     item_type,
@@ -367,19 +552,53 @@ impl LineDecoder {
                     self.delta(&text, events)?;
                 }
             }
-            "turn/completed" => self.complete(events)?,
+            "turn/completed" => match str_at("/params/turn/status") {
+                Some("failed") => {
+                    let message =
+                        str_at("/params/turn/error/message").unwrap_or("Codex reported an error.");
+                    return Err(Error::Protocol(short(&readable(message))));
+                }
+                Some("interrupted") => {
+                    return Err(Error::Protocol(
+                        "Codex stopped before finishing its reply.".into(),
+                    ));
+                }
+                _ => self.complete(events)?,
+            },
+            // A transient error Codex is about to retry by itself.
+            "error"
+                if value.pointer("/params/willRetry").and_then(Value::as_bool) == Some(true) => {}
             "turn/failed" | "error" => {
                 let message = str_at("/error/message")
                     .or_else(|| str_at("/message"))
                     .or_else(|| str_at("/params/error/message"))
                     .unwrap_or("Codex reported an error.");
-                return Err(Error::Protocol(short(message)));
+                return Err(Error::Protocol(short(&readable(message))));
             }
             // `item.type == "error"` items are warnings (e.g. malformed agent roles); ignore.
             _ => {}
         }
         Ok(())
     }
+
+    fn is_commentary(&self, id: &str) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|s| s.commentary.iter().any(|c| c == id))
+    }
+}
+
+/// Codex error messages are sometimes the provider's raw JSON body; pull out its message.
+fn readable(message: &str) -> String {
+    serde_json::from_str::<Value>(message)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .or_else(|| v.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| message.to_owned())
 }
 
 /// How long a CLI may stay silent, and run in total, before bloop gives up.
@@ -441,44 +660,55 @@ pub async fn chat<F: Future<Output = bool> + Send>(
     let dir = work_dir()?;
     let args = args(kind, model, &dir);
     let env: [(&str, &OsStr); 0] = [];
-    stream_in(
+    let request = Request {
         kind,
-        &program,
-        &args,
-        &flatten(messages),
-        &env,
-        Limits::default(),
-        Some(&dir),
-        emit,
-    )
-    .await
+        program: &program,
+        args: &args,
+        prompt: &flatten(messages),
+        model,
+        dir: Some(&dir),
+    };
+    stream_in(request, &env, Limits::default(), emit).await
 }
 
-/// Spawns `program`, writes `prompt` to its stdin and decodes its stdout. Extra `env`
-/// variables are for tests. Dropping the returned future kills the whole process tree.
+/// One CLI run: what to start and what to ask it.
+pub struct Request<'a> {
+    pub kind: Kind,
+    pub program: &'a Path,
+    pub args: &'a [String],
+    pub prompt: &'a str,
+    /// Codex only (Claude takes its model in `args`); empty means the CLI's default.
+    pub model: &'a str,
+    /// Working directory; `None` keeps bloop's own.
+    pub dir: Option<&'a Path>,
+}
+
+/// Spawns the CLI, sends the prompt on its stdin (Claude: the text then EOF; Codex: the
+/// app-server handshake) and decodes its stdout. Extra `env` variables are for tests.
+/// Dropping the returned future kills the whole process tree.
 pub async fn stream_with<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
-    kind: Kind,
-    program: &Path,
-    args: &[String],
-    prompt: &str,
+    request: Request<'_>,
     env: &[(&str, E)],
     limits: Limits,
     emit: impl FnMut(StreamEvent) -> F + Send,
 ) -> Result<(), Error> {
-    stream_in(kind, program, args, prompt, env, limits, None, emit).await
+    stream_in(request, env, limits, emit).await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn stream_in<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
-    kind: Kind,
-    program: &Path,
-    args: &[String],
-    prompt: &str,
+    request: Request<'_>,
     env: &[(&str, E)],
     limits: Limits,
-    dir: Option<&Path>,
     mut emit: impl FnMut(StreamEvent) -> F + Send,
 ) -> Result<(), Error> {
+    let Request {
+        kind,
+        program,
+        args,
+        prompt,
+        model,
+        dir,
+    } = request;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     // Run the program directly, `.cmd` shims included: the standard library escapes
     // batch-file arguments safely, which a hand-built `cmd /C` line would not.
@@ -503,12 +733,39 @@ async fn stream_in<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
     // Owns the process tree: closing it (on drop, including cancel) kills every process in it.
     let job = job::Job::adopt(&child);
 
+    let mut decoder = match kind {
+        Kind::Claude => LineDecoder::new(kind),
+        Kind::Codex => {
+            let cwd = match dir {
+                Some(dir) => dir.to_path_buf(),
+                None => std::env::current_dir().unwrap_or_default(),
+            };
+            LineDecoder::codex_session(prompt, model, &cwd)
+        }
+    };
     let mut stdin = child.stdin.take().expect("stdin piped");
-    let prompt = prompt.to_owned();
+    // Stdin stays open while `input` lives: Codex gets more requests as replies arrive.
+    let (input, mut queued) = tokio::sync::mpsc::unbounded_channel::<String>();
     let writer = tokio::spawn(async move {
-        let _ = stdin.write_all(prompt.as_bytes()).await;
+        while let Some(chunk) = queued.recv().await {
+            if stdin.write_all(chunk.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
+                return;
+            }
+        }
         let _ = stdin.shutdown().await;
     });
+    let mut input = Some(input);
+    if kind == Kind::Claude {
+        let _ = input.take().map(|tx| tx.send(prompt.to_owned()));
+    }
+    let send = |input: &Option<tokio::sync::mpsc::UnboundedSender<String>>, lines: Vec<String>| {
+        if let Some(tx) = input {
+            for line in lines {
+                let _ = tx.send(line);
+            }
+        }
+    };
+    send(&input, decoder.take_outbox());
     let mut stderr = child.stderr.take().expect("stderr piped");
     let errors = tokio::spawn(async move {
         // Keep only the tail; CLIs can be chatty on stderr.
@@ -527,7 +784,6 @@ async fn stream_in<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
     });
 
     let mut stdout = child.stdout.take().expect("stdout piped");
-    let mut decoder = LineDecoder::new(kind);
     let deadline = tokio::time::Instant::now() + limits.total;
     let mut buf = vec![0u8; 16 * 1024];
     let outcome: Result<(), Error> = async {
@@ -547,6 +803,7 @@ async fn stream_in<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
             } else {
                 decoder.push(&buf[..n])?
             };
+            send(&input, decoder.take_outbox());
             for event in events {
                 let done = matches!(event, StreamEvent::Done);
                 if !emit(event).await || done {
@@ -819,7 +1076,7 @@ mod tests {
         }
         // Known harmless items still pass.
         let ok = concat!(
-            r#"{"type":"item.completed","item":{"id":"r","type":"reasoning","text":"…"}}"#,
+            r#"{"type":"item.completed","item":{"id":"r","type":"reasoning","text":"â€¦"}}"#,
             "
 ",
             r#"{"type":"item.started","item":{"id":"t","type":"todo_list","items":[]}}"#,
@@ -850,6 +1107,108 @@ mod tests {
         let events = decode(Kind::Codex, input).unwrap();
         assert_eq!(text(&events), "hello");
         assert_eq!(events.last(), Some(&StreamEvent::Done));
+    }
+
+    fn requests(decoder: &mut LineDecoder) -> Vec<Value> {
+        decoder
+            .take_outbox()
+            .iter()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn codex_session_handshake_disables_mcp_and_starts_one_turn() {
+        let mut decoder = LineDecoder::codex_session("the prompt", "", Path::new(r"C:\w"));
+        let first = requests(&mut decoder);
+        let methods: Vec<_> = first
+            .iter()
+            .map(|r| r["method"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            methods,
+            ["initialize", "initialized", "config/read", "model/list"]
+        );
+        // The config arrives first; the thread waits for the default model too.
+        let config =
+            r#"{"id":2,"result":{"config":{"mcp_servers":{"playwright":{},"docker":{}}}}}"#;
+        decoder.push(format!("{config}\n").as_bytes()).unwrap();
+        assert!(requests(&mut decoder).is_empty());
+        let models = r#"{"id":3,"result":{"data":[{"id":"small","isDefault":false},{"id":"big","isDefault":true}]}}"#;
+        decoder.push(format!("{models}\n").as_bytes()).unwrap();
+        let thread = requests(&mut decoder);
+        assert_eq!(thread.len(), 1);
+        let params = &thread[0]["params"];
+        assert_eq!(thread[0]["method"], "thread/start");
+        assert_eq!(params["model"], "big");
+        assert_eq!(params["sandbox"], "read-only");
+        assert_eq!(params["ephemeral"], true);
+        assert_eq!(params["cwd"], r"C:\w");
+        assert_eq!(
+            params["config"]["mcp_servers"],
+            serde_json::json!({"playwright": {"enabled": false}, "docker": {"enabled": false}})
+        );
+        let started = r#"{"id":4,"result":{"thread":{"id":"t1"}}}"#;
+        decoder.push(format!("{started}\n").as_bytes()).unwrap();
+        let turn = requests(&mut decoder);
+        assert_eq!(turn[0]["method"], "turn/start");
+        assert_eq!(turn[0]["params"]["threadId"], "t1");
+        assert_eq!(turn[0]["params"]["input"][0]["text"], "the prompt");
+    }
+
+    #[test]
+    fn codex_session_with_a_model_skips_the_model_list() {
+        let mut decoder = LineDecoder::codex_session("p", "gpt-x", Path::new("."));
+        assert_eq!(requests(&mut decoder).len(), 3);
+        decoder
+            .push(b"{\"id\":2,\"result\":{\"config\":{}}}\n")
+            .unwrap();
+        let thread = requests(&mut decoder);
+        assert_eq!(thread[0]["params"]["model"], "gpt-x");
+        assert_eq!(
+            thread[0]["params"]["config"]["mcp_servers"],
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn codex_app_server_fixture_streams_final_answer_only() {
+        let mut decoder = LineDecoder::codex_session("p", "m", Path::new("."));
+        let mut events = decoder
+            .push(include_bytes!("../tests/fixtures/codex-app-ok.jsonl"))
+            .unwrap();
+        events.extend(decoder.finish().unwrap());
+        let deltas = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Delta(_)))
+            .count();
+        assert!(deltas > 1, "reply should arrive in pieces");
+        assert_eq!(text(&events), "The sea unfolds.\n\n\\[\nA = \\pi r^2\n\\]");
+        assert_eq!(events.last(), Some(&StreamEvent::Done));
+    }
+
+    #[test]
+    fn codex_server_requests_are_refused() {
+        let mut decoder = LineDecoder::codex_session("p", "m", Path::new("."));
+        let line = r#"{"id":0,"method":"item/commandExecution/requestApproval","params":{}}"#;
+        let error = decoder
+            .push(format!("{line}\n").as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Tool execution is unavailable"), "{error}");
+    }
+
+    #[test]
+    fn codex_failed_turn_reports_the_provider_message() {
+        let mut decoder = LineDecoder::codex_session("p", "m", Path::new("."));
+        let retry = r#"{"method":"error","params":{"error":{"message":"busy"},"willRetry":true}}"#;
+        decoder.push(format!("{retry}\n").as_bytes()).unwrap();
+        let failed = r#"{"method":"turn/completed","params":{"turn":{"status":"failed","error":{"message":"{\"type\":\"error\",\"error\":{\"message\":\"The 'x' model is not supported.\"}}"}}}}"#;
+        let error = decoder
+            .push(format!("{failed}\n").as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "The 'x' model is not supported.");
     }
 
     #[test]
@@ -985,29 +1344,15 @@ sure, I'll run it
                 "sonnet",
             ]
         );
-        assert_eq!(
-            args(Kind::Codex, "", dir),
-            [
-                "exec",
-                "--json",
-                "--ephemeral",
-                "--skip-git-repo-check",
-                "--ignore-user-config",
-                "--disable",
-                "plugins",
-                "--disable",
-                "apps",
-                "--disable",
-                "memories",
-                "--sandbox",
-                "read-only",
-                "--color",
-                "never",
-                "-C",
-                r"C:\bloop\cli",
-                "-",
-            ]
-        );
+        let codex = args(Kind::Codex, "gpt-x", dir);
+        assert_eq!(codex[0], "app-server");
+        assert_eq!(codex.len(), 1 + 2 * CODEX_OFF.len());
+        for feature in ["plugins", "apps", "memories", "shell_tool", "hooks"] {
+            assert!(
+                codex.windows(2).any(|w| w == ["--disable", feature]),
+                "{feature} left on"
+            );
+        }
         assert_eq!(Kind::of(Provider::Codex), Some(Kind::Codex));
         assert_eq!(Kind::of(Provider::Unsloth), None);
     }
