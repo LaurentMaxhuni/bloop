@@ -1,0 +1,21 @@
+{"id":1,"result":{"userAgent":"bloop/0.153.4","codexHome":"C:\\Users\\x\\.codex","platformFamily":"windows","platformOs":"windows"}}
+{"id":2,"result":{"config":{"model":"m","mcp_servers":{"playwright":{"command":"npx"}}},"origins":{}}}
+{"id":4,"result":{"thread":{"id":"t1","ephemeral":true}}}
+{"method":"thread/started","params":{"thread":{"id":"t1"}}}
+{"id":5,"result":{"turn":{"id":"u1","items":[],"status":"inProgress","error":null}}}
+{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"u1","status":"inProgress"}}}
+{"method":"warning","params":{"threadId":"t1","message":"Skill descriptions were shortened to fit the skills context budget."}}
+{"method":"item/started","params":{"item":{"type":"userMessage","id":"q1","content":[{"type":"text","text":"p"}]}}}
+{"method":"item/completed","params":{"item":{"type":"userMessage","id":"q1","content":[{"type":"text","text":"p"}]}}}
+{"method":"item/started","params":{"item":{"type":"reasoning","id":"r1","summary":[],"content":[]}}}
+{"method":"item/completed","params":{"item":{"type":"reasoning","id":"r1","summary":[],"content":[]}}}
+{"method":"item/started","params":{"item":{"type":"agentMessage","id":"c1","text":"","phase":"commentary"}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"u1","itemId":"c1","delta":"I'm using a skill to keep this fresh."}}
+{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"c1","text":"I'm using a skill to keep this fresh.","phase":"commentary"}}}
+{"method":"item/started","params":{"item":{"type":"agentMessage","id":"a1","text":"","phase":"final_answer"}}}
+{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"u1","itemId":"a1","delta":"The"}}
+{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"u1","itemId":"a1","delta":" sea"}}
+{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"u1","itemId":"a1","delta":" unfolds.\n\n"}}
+{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"u1","itemId":"a1","delta":"\\[\nA = \\pi r^2\n\\]"}}
+{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"a1","text":"The sea unfolds.\n\n\\[\nA = \\pi r^2\n\\]","phase":"final_answer"}}}
+{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","items":[],"status":"completed","error":null}}}

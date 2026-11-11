@@ -195,3 +195,50 @@ single-instance lock, so the new build was not launched.
 | Closing the window leaves bloop running; tray Quit exits | Pending human check |
 | Installer built with `installer\build.ps1` writes the Run value with `--background` | Pending human check |
 | Self-update relaunch starts bloop with `--background` end to end | Pending human check |
+
+## Codex streaming, rich replies (2026-11-11)
+
+Automated: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean;
+`cargo test` passes 69 library, 97 app, 8 CLI-process (3 opt-in ignored), 10 HTTP-transport and
+9 update tests. New tests cover the Codex app-server handshake (MCP servers disabled by name,
+default model from `model/list`, one `turn/start`), commentary filtering, refused server
+requests, failed-turn messages, TeX parsing and Unicode conversion, `$5 and $10` and code staying
+literal, incremental Markdown parsing while streaming, and a prompt reaching the CLI on a runtime
+capped like the app's. That last test failed with the old cap of 2 blocking threads ("The CLI
+stopped responding") and passes with 4.
+
+Real CLIs (`cargo test --test cli -- --ignored`, Claude Code 2.1.310, Codex 0.153.4): all three
+pass. Codex replies now arrive in many pieces; a direct app-server probe showed the first delta
+about 4.5 s after start, where `codex exec --json` delivered the whole reply at about 13 s.
+
+Checked by hand on Windows 11 with a debug build and a scratch `BLOOP_DATA_DIR`:
+
+| Check | Result |
+| --- | --- |
+| Seeded reply: heading, bold, inline code, list, link, inline math as Unicode | Pass |
+| Display math: integral with limits, sum with limits above/below, stacked fraction, 2×2 matrix | Pass |
+| Rust code block: language label, Copy button, syntax colours | Pass |
+| "It costs $5 and $10" stays plain text | Pass |
+| Live Claude Code reply streams into the notch with display math and a Python block mid-stream | Pass (after the blocking-thread fix; before it, Claude reported no input on stdin) |
+
+Not checked: a Codex reply inside the running app (the attempt was abandoned when simulated
+keystrokes left the notch), clicking Copy and links, the light theme, non-Windows fonts.
+Release executable: 18.1 MiB (15.2 MiB for the installed 0.3.1), mostly syntect's syntaxes.
+
+Landing page: both JSON-LD blocks parse, the 9 FAQ answers match their `FAQPage` entries, the
+description is 144 characters, and the page has no horizontal scroll at 375 px.
+
+## Sign in with ChatGPT (2026-11-11, written by Codex, reviewed here)
+
+Automated: on the combined tree, `cargo fmt --check` and `cargo clippy --all-targets -- -D
+warnings` are clean and `cargo test` passes (75 library tests, including callback parsing with
+state and client checks, a loopback listener that ignores unrelated requests, ID-token
+issuer/audience/nonce/expiry binding, and a DPAPI round trip of a 5000-byte session).
+
+Reviewed: PKCE (S256), random state and nonce, a loopback-only callback that checks the Host
+header and rejects duplicate parameters, RS256 ID-token signature checks against the issuer's
+JWKS, revocation only on the issuer's origin, no redirects or proxies, bounded response bodies,
+DPAPI-encrypted session storage, and Responses requests with `store: false`.
+
+Not checked: a real sign-in, token refresh or ChatGPT reply. Those need a person to approve the
+sign-in in a browser with an eligible ChatGPT plan.

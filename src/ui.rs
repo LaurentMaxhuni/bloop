@@ -1,6 +1,7 @@
 mod app_window;
 mod dashboard;
 mod onboarding;
+mod rich;
 
 pub use dashboard::AppPage;
 
@@ -12,6 +13,7 @@ use crate::{
     style::{self, MEDIUM, Tokens, Variant},
 };
 use bloop::{
+    chatgpt::{self, AccountStatus},
     config::{
         Accent, Config, HOVER_DELAYS_MS, NotchPosition, NotchWidth, Provider, ReduceMotion,
         ThemeChoice,
@@ -20,7 +22,7 @@ use bloop::{
     model::{self, MAX_PROMPT, MAX_TURNS, Turn},
     motion::{Feel, SizeSpring},
     onboarding::{self as setup, Choice, Detection, Onboarding},
-    provider::{self, StreamEvent},
+    provider::{self, ChatGptModel, StreamEvent},
     secrets::{self, KeySource},
     storage,
     update::{self, Release, Version},
@@ -105,9 +107,21 @@ pub enum Message {
     Chunk(u64, StreamEvent),
     Finished(u64, Result<(), String>),
     Cancel,
+    /// Copy a reply's code block to the clipboard.
+    CopyCode(String),
+    /// A link in a reply was clicked.
+    OpenLink(String),
     Provider(Provider),
     Endpoint(String),
     Model(String),
+    ChatGptLoaded(Result<AccountStatus, String>),
+    ChatGptSignIn(bool),
+    ChatGptCancel,
+    ChatGptSignedIn(Result<AccountStatus, String>),
+    ChatGptSignOut,
+    ChatGptSignedOut(Result<(AccountStatus, bool), String>),
+    ChatGptRefreshModels,
+    ChatGptModels(Result<Vec<ChatGptModel>, String>),
     Shortcut(String),
     SaveSettings,
     Theme,
@@ -167,6 +181,10 @@ pub struct Island {
     config: Config,
     draft_config: Config,
     turns: Vec<Turn>,
+    /// Parsed assistant replies, one per turn (see `sync_replies`).
+    replies: Vec<rich::Reply>,
+    /// The code block last copied, so its button reads "Copied".
+    copied: Option<String>,
     input: String,
     status: String,
     desktop_warning: String,
@@ -229,6 +247,11 @@ pub struct Island {
     /// Key typed in Settings or setup, saved on Save / Finish; never stored in the config.
     key_draft: String,
     key_status: KeySource,
+    chatgpt: AccountStatus,
+    chatgpt_busy: bool,
+    chatgpt_cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    chatgpt_notice: String,
+    chatgpt_models: Vec<ChatGptModel>,
     /// Windows' app theme, used when the theme follows the system.
     system_light: bool,
 }
@@ -241,6 +264,8 @@ impl Island {
             config: Config::default(),
             draft_config: Config::default(),
             turns: Vec::new(),
+            replies: Vec::new(),
+            copied: None,
             input: String::new(),
             status: String::new(),
             desktop_warning: String::new(),
@@ -284,19 +309,27 @@ impl Island {
             autostart_error: String::new(),
             key_draft: String::new(),
             key_status: KeySource::None,
+            chatgpt: AccountStatus::default(),
+            chatgpt_busy: true,
+            chatgpt_cancel: None,
+            chatgpt_notice: String::new(),
+            chatgpt_models: Vec::new(),
             system_light: platform::light_theme_system(),
         };
         (
             state,
-            Task::batch([Task::perform(
-                async move {
-                    let path = load_path?;
-                    tokio::task::spawn_blocking(move || storage::load(&path))
-                        .await
-                        .map_err(|e| e.to_string())?
-                },
-                Message::Loaded,
-            )]),
+            Task::batch([
+                Task::perform(
+                    async move {
+                        let path = load_path?;
+                        tokio::task::spawn_blocking(move || storage::load(&path))
+                            .await
+                            .map_err(|e| e.to_string())?
+                    },
+                    Message::Loaded,
+                ),
+                Task::perform(chatgpt::status(), Message::ChatGptLoaded),
+            ]),
         )
     }
 
@@ -484,6 +517,7 @@ impl Island {
                         self.config = config.clone();
                         self.draft_config = config;
                         self.turns = turns;
+                        self.sync_replies();
                     }
                     Err(error) => {
                         self.storage_disabled = true;
@@ -649,6 +683,17 @@ impl Island {
                     self.react(Mood::Oops, 1.2);
                     return Task::none();
                 }
+                if self.config.provider == Provider::ChatGpt {
+                    if self.chatgpt_busy {
+                        self.status =
+                            "Finish connecting to ChatGPT before sending a message.".into();
+                        return Task::none();
+                    }
+                    if !self.chatgpt.plan_enabled {
+                        self.status = "Connect your ChatGPT plan under Settings → Model.".into();
+                        return Task::none();
+                    }
+                }
                 let prompt = self.input.trim().to_owned();
                 let messages = model::context(&self.turns, &prompt);
                 self.turns.push(Turn {
@@ -658,7 +703,11 @@ impl Island {
                 });
                 if self.turns.len() > MAX_TURNS {
                     self.turns.remove(0);
+                    if !self.replies.is_empty() {
+                        self.replies.remove(0);
+                    }
                 }
+                self.sync_replies();
                 self.input.clear();
                 self.status.clear();
                 self.request_id += 1;
@@ -683,6 +732,7 @@ impl Island {
                     if let Some(turn) = self.turns.last_mut() {
                         turn.assistant.push_str(&delta);
                     }
+                    self.sync_replies();
                     return self.scroll();
                 }
             }
@@ -707,6 +757,15 @@ impl Island {
                 return Task::batch([self.persist(), self.scroll(), presence, update]);
             }
             Message::Chunk(..) | Message::Finished(..) => {}
+            Message::CopyCode(code) => {
+                self.copied = Some(code.clone());
+                return iced::clipboard::write(code);
+            }
+            Message::OpenLink(url) => {
+                if let Err(error) = platform::open_url(&url) {
+                    self.status = error;
+                }
+            }
             Message::Cancel => {
                 self.cancel();
                 self.status = "Stopped. Partial reply kept out of model context.".into();
@@ -715,11 +774,113 @@ impl Island {
                 return Task::batch([self.persist(), update]);
             }
             Message::Provider(provider) => {
+                if provider == self.draft_config.provider {
+                    return Task::none();
+                }
+                if provider == Provider::ChatGpt || self.draft_config.provider == Provider::ChatGpt
+                {
+                    self.draft_config.model = if provider == self.config.provider {
+                        self.config.model.clone()
+                    } else {
+                        String::new()
+                    };
+                }
                 self.draft_config.provider = provider;
-                self.draft_config.endpoint = provider.default_endpoint().into();
+                self.draft_config.endpoint = if provider == self.config.provider {
+                    self.config.endpoint.clone()
+                } else {
+                    provider.default_endpoint().into()
+                };
             }
             Message::Endpoint(value) => self.draft_config.endpoint = value,
             Message::Model(value) => self.draft_config.model = value,
+            Message::ChatGptLoaded(result) => {
+                self.chatgpt_busy = false;
+                match result {
+                    Ok(status) => self.chatgpt = status,
+                    Err(error) => self.chatgpt_notice = error,
+                }
+            }
+            Message::ChatGptSignIn(new_account) if self.chatgpt_can_manage() => {
+                self.chatgpt_busy = true;
+                self.chatgpt_notice = "Finish signing in in your browser.".into();
+                let (cancel, receive_cancel) = tokio::sync::oneshot::channel();
+                self.chatgpt_cancel = Some(cancel);
+                return Task::perform(
+                    chatgpt::sign_in(platform::open_url, new_account, receive_cancel),
+                    Message::ChatGptSignedIn,
+                );
+            }
+            Message::ChatGptCancel => {
+                if let Some(cancel) = self.chatgpt_cancel.take() {
+                    let _ = cancel.send(());
+                }
+            }
+            Message::ChatGptSignedIn(result) => {
+                self.chatgpt_busy = false;
+                self.chatgpt_cancel = None;
+                match result {
+                    Ok(status) => {
+                        self.chatgpt = status;
+                        self.chatgpt_models.clear();
+                        self.chatgpt_notice.clear();
+                        if self.chatgpt.plan_enabled {
+                            return self.update(Message::ChatGptRefreshModels);
+                        }
+                    }
+                    Err(error) => self.chatgpt_notice = error,
+                }
+            }
+            Message::ChatGptSignOut if self.chatgpt_can_manage() => {
+                self.chatgpt_busy = true;
+                self.chatgpt_notice = "Signing out of ChatGPT…".into();
+                return Task::perform(chatgpt::sign_out(), Message::ChatGptSignedOut);
+            }
+            Message::ChatGptSignedOut(result) => {
+                self.chatgpt_busy = false;
+                match result {
+                    Ok((status, revoked)) => {
+                        self.chatgpt = status;
+                        self.chatgpt_models.clear();
+                        self.chatgpt_notice = if revoked {
+                            "Signed out of ChatGPT.".into()
+                        } else {
+                            "Signed out of Bloop. Open Manage usage to disconnect Bloop from ChatGPT.".into()
+                        };
+                    }
+                    Err(error) => self.chatgpt_notice = error,
+                }
+            }
+            Message::ChatGptRefreshModels
+                if self.chatgpt_can_manage() && self.chatgpt.plan_enabled =>
+            {
+                self.chatgpt_busy = true;
+                self.chatgpt_notice = "Loading available ChatGPT models…".into();
+                return Task::perform(
+                    async {
+                        provider::chatgpt_models()
+                            .await
+                            .map_err(|error| error.to_string())
+                    },
+                    Message::ChatGptModels,
+                );
+            }
+            Message::ChatGptModels(result) => {
+                self.chatgpt_busy = false;
+                match result {
+                    Ok(models) => {
+                        self.chatgpt_models = models;
+                        self.chatgpt_notice = if self.chatgpt_models.is_empty() {
+                            "No models are available for this ChatGPT account.".into()
+                        } else {
+                            String::new()
+                        };
+                    }
+                    Err(error) => self.chatgpt_notice = error,
+                }
+            }
+            Message::ChatGptSignIn(_) | Message::ChatGptSignOut | Message::ChatGptRefreshModels => {
+            }
             Message::Shortcut(value) => self.draft_config.shortcut = value,
             Message::SaveSettings => {
                 if self.loading {
@@ -777,6 +938,7 @@ impl Island {
                     }
                     self.confirming_clear = false;
                     self.turns.clear();
+                    self.sync_replies();
                     self.status.clear();
                     return self.persist();
                 }
@@ -831,7 +993,9 @@ impl Island {
                 if choices.is_empty() {
                     self.detection = Detection::NotFound;
                 } else {
-                    if let Some(index) = setup::preselect(&choices, &self.draft_config) {
+                    if self.draft_config.provider != Provider::ChatGpt
+                        && let Some(index) = setup::preselect(&choices, &self.draft_config)
+                    {
                         let pick = choices[index].clone();
                         self.apply_choice(&pick);
                     }
@@ -1022,7 +1186,9 @@ impl Island {
     /// Where replies come from, shown under the prompt.
     fn badge_text(&self) -> String {
         let model = self.config.model.trim();
-        let source = if self.config.provider.is_cli() {
+        let source = if self.config.provider == Provider::ChatGpt && self.chatgpt.plan_enabled {
+            "Using ChatGPT plan".into()
+        } else if self.config.provider.is_cli() || self.config.provider == Provider::ChatGpt {
             self.config.provider.to_string()
         } else if bloop::config::validate_endpoint(&self.config.endpoint)
             .is_ok_and(|u| u.scheme() == "http")
@@ -1036,6 +1202,10 @@ impl Island {
         } else {
             format!("{source} · {model}")
         }
+    }
+
+    fn chatgpt_can_manage(&self) -> bool {
+        !self.loading && !self.chatgpt_busy && self.request.is_none()
     }
 
     fn apply_choice(&mut self, choice: &Choice) {
@@ -1651,6 +1821,18 @@ impl Island {
             .into()
     }
 
+    /// Keeps one parsed reply per turn. A reply whose text grew since it was last parsed
+    /// is extended rather than parsed again, so streaming only parses the new text.
+    fn sync_replies(&mut self) {
+        self.replies.truncate(self.turns.len());
+        for (index, turn) in self.turns.iter().enumerate() {
+            match self.replies.get_mut(index) {
+                Some(reply) => reply.update(&turn.assistant),
+                None => self.replies.push(rich::Reply::new(&turn.assistant)),
+            }
+        }
+    }
+
     fn chat_view(&self) -> Element<'_, Message> {
         let t = self.tokens();
         let mut history = column![].spacing(16).width(Length::Fill);
@@ -1709,20 +1891,14 @@ impl Island {
                         .style(style::badge(t)),
                 );
             }
+            let reply: Element<'_, Message> = match self.replies.get(index) {
+                _ if turn.assistant.is_empty() => text("…").size(14).into(),
+                Some(reply) => reply.view(t, self.copied.as_deref()),
+                None => text(&turn.assistant).size(14).into(),
+            };
             history = history
                 .push(row![Space::new().width(Length::Fill), bubble])
-                .push(
-                    column![
-                        label,
-                        text(if turn.assistant.is_empty() {
-                            "…"
-                        } else {
-                            &turn.assistant
-                        })
-                        .size(14)
-                    ]
-                    .spacing(4),
-                );
+                .push(column![label, reply].spacing(4));
         }
         let mut body = column![
             scrollable(history)
@@ -1837,6 +2013,9 @@ impl Island {
             .menu_style(style::menu(t)),
         ),]
         .spacing(16);
+        if self.draft_config.provider == Provider::ChatGpt {
+            return fields.push(self.chatgpt_fields());
+        }
         if !self.draft_config.provider.is_cli() {
             fields = fields.push(field(
                 "Endpoint base URL",
@@ -1863,6 +2042,104 @@ impl Island {
             fields = fields.push(key);
         }
         fields
+    }
+
+    fn chatgpt_fields(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let enabled = self.chatgpt_can_manage();
+        let summary = if self.chatgpt.signed_in {
+            let account = self.chatgpt.account.as_deref().unwrap_or("ChatGPT account");
+            if self.chatgpt.plan_enabled {
+                format!("Using ChatGPT plan · {account}")
+            } else {
+                format!("Signed in as {account}. ChatGPT plan usage is off.")
+            }
+        } else {
+            "Use your ChatGPT plan in Bloop.".into()
+        };
+        let mut actions = row![].spacing(8);
+        if self.chatgpt_cancel.is_some() {
+            actions = actions.push(
+                self.button("Cancel", Variant::Outline)
+                    .on_press(Message::ChatGptCancel),
+            );
+        } else if self.chatgpt.signed_in {
+            let label = if self.chatgpt.plan_enabled {
+                "Reconnect"
+            } else {
+                "Enable ChatGPT plan usage"
+            };
+            actions = actions
+                .push(
+                    self.button(label, Variant::Outline)
+                        .on_press_maybe(enabled.then_some(Message::ChatGptSignIn(false))),
+                )
+                .push(
+                    self.button("Sign out", Variant::Outline)
+                        .on_press_maybe(enabled.then_some(Message::ChatGptSignOut)),
+                );
+        } else {
+            actions = actions.push(
+                self.button("Continue with ChatGPT", Variant::Primary)
+                    .on_press_maybe(
+                        (enabled && cfg!(windows)).then_some(Message::ChatGptSignIn(false)),
+                    ),
+            );
+            if self.chatgpt.registered {
+                actions = actions.push(
+                    self.button("Use another account", Variant::Outline)
+                        .on_press_maybe(enabled.then_some(Message::ChatGptSignIn(true))),
+                );
+            }
+        }
+        if self.chatgpt.registered {
+            actions = actions.push(
+                self.button("Manage usage", Variant::Ghost)
+                    .on_press(Message::OpenLink(chatgpt::USAGE_URL.into())),
+            );
+        }
+        let mut fields = column![
+            text(summary).size(14),
+            text("ChatGPT receives your prompt and recent chat context.")
+                .size(12)
+                .color(t.muted_foreground),
+            actions.wrap(),
+        ]
+        .spacing(10);
+        if !self.chatgpt_notice.is_empty() {
+            fields = fields.push(text(&self.chatgpt_notice).size(13));
+        }
+        if self.chatgpt.plan_enabled {
+            let slug = self.draft_config.model.trim();
+            let mut models = vec![ChatGptModel {
+                slug: String::new(),
+                display_name: "Automatic".into(),
+            }];
+            models.extend(self.chatgpt_models.iter().cloned());
+            if !models.iter().any(|model| model.slug == slug) {
+                models.push(ChatGptModel {
+                    slug: slug.into(),
+                    display_name: slug.into(),
+                });
+            }
+            let selected = models.iter().find(|model| model.slug == slug).cloned();
+            fields = fields.push(field(
+                "Model",
+                row![
+                    pick_list(models, selected, |model| Message::Model(model.slug))
+                        .padding([8, 12])
+                        .text_size(14)
+                        .width(Length::Fill)
+                        .style(style::select(t))
+                        .menu_style(style::menu(t)),
+                    self.button("Refresh models", Variant::Outline)
+                        .on_press_maybe(enabled.then_some(Message::ChatGptRefreshModels)),
+                ]
+                .align_y(Alignment::Center)
+                .spacing(8),
+            ));
+        }
+        fields.into()
     }
 }
 

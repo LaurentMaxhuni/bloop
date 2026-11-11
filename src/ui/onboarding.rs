@@ -6,7 +6,7 @@ use crate::{
     style::{self, MEDIUM, Tokens, Variant},
 };
 use bloop::{
-    config::ThemeChoice,
+    config::{Provider, ThemeChoice},
     onboarding::{Detection, Onboarding, Step},
 };
 use iced::{
@@ -164,7 +164,7 @@ impl Island {
         let t = self.tokens();
         let mut content = column![self.heading(
             "Your model",
-            "bloop needs a model server to talk to. You can change this later in Settings.",
+            "Choose a model for Bloop. You can change it later in Settings.",
         )]
         .spacing(16);
         content = match &self.detection {
@@ -228,6 +228,16 @@ impl Island {
                 )
                 .push(self.model_fields()),
         };
+        if !matches!(self.detection, Detection::NotFound) {
+            content = if self.draft_config.provider == Provider::ChatGpt {
+                content.push(self.model_fields())
+            } else {
+                content.push(
+                    self.button("Use ChatGPT", Variant::Outline)
+                        .on_press(Message::Provider(Provider::ChatGpt)),
+                )
+            };
+        }
         content.into()
     }
 

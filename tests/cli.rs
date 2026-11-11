@@ -87,10 +87,14 @@ async fn stdin_receives_prompt_and_reply_streams() {
     ];
     let mut text = String::new();
     cli::stream_with(
-        Kind::Claude,
-        &fake(),
-        &["-p".into()],
-        "hello prompt",
+        cli::Request {
+            kind: Kind::Claude,
+            program: &fake(),
+            args: &["-p".into()],
+            prompt: "hello prompt",
+            model: "",
+            dir: None,
+        },
         &env,
         Limits::default(),
         |event| {
@@ -109,6 +113,58 @@ async fn stdin_receives_prompt_and_reply_streams() {
     );
 }
 
+/// The app's runtime caps its blocking pool, which tokio uses for child pipes on Windows;
+/// the CLI must still get its prompt with stdout and stderr reads already parked there.
+fn stdin_arrives_with_blocking_threads(threads: usize) -> Result<String, String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(threads)
+        .enable_all()
+        .build()
+        .unwrap();
+    let scene = Scene::new(&format!("pool{threads}"));
+    let env = [
+        ("FAKE_STDIN", scene.file("stdin.txt")),
+        ("FAKE_FIXTURE", fixture("claude-ok.jsonl")),
+    ];
+    let limits = Limits {
+        idle: Duration::from_secs(4),
+        total: Duration::from_secs(8),
+    };
+    runtime.block_on(async {
+        let mut text = String::new();
+        cli::stream_with(
+            cli::Request {
+                kind: Kind::Claude,
+                program: &fake(),
+                args: &[],
+                prompt: "hello prompt",
+                model: "",
+                dir: None,
+            },
+            &env,
+            limits,
+            |event| {
+                if let StreamEvent::Delta(d) = event {
+                    text.push_str(&d);
+                }
+                std::future::ready(true)
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(text)
+    })
+}
+
+#[test]
+fn prompt_arrives_on_the_apps_runtime() {
+    assert_eq!(
+        stdin_arrives_with_blocking_threads(cli::BLOCKING_THREADS).as_deref(),
+        Ok("hi there")
+    );
+}
+
 async fn cancel_kills_tree(program: PathBuf, scene: &Scene) {
     let env = [
         ("FAKE_PID", scene.file("pid")),
@@ -120,10 +176,14 @@ async fn cancel_kills_tree(program: PathBuf, scene: &Scene) {
     let (seen, mut first) = tokio::sync::mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
         let _ = cli::stream_with(
-            Kind::Claude,
-            &program,
-            &[],
-            "x",
+            cli::Request {
+                kind: Kind::Claude,
+                program: &program,
+                args: &[],
+                prompt: "x",
+                model: "",
+                dir: None,
+            },
             &env,
             Limits::default(),
             move |event| {
@@ -163,9 +223,19 @@ async fn idle_deadline_fails() {
         idle: Duration::from_millis(400),
         total: Duration::from_secs(10),
     };
-    let error = cli::stream_with(Kind::Codex, &fake(), &[], "x", &env, limits, |_| {
-        std::future::ready(true)
-    })
+    let error = cli::stream_with(
+        cli::Request {
+            kind: Kind::Codex,
+            program: &fake(),
+            args: &[],
+            prompt: "x",
+            model: "",
+            dir: None,
+        },
+        &env,
+        limits,
+        |_| std::future::ready(true),
+    )
     .await
     .unwrap_err()
     .to_string();
@@ -182,10 +252,14 @@ async fn signed_out_cli_gets_a_hint() {
         ("FAKE_EXIT", PathBuf::from("1")),
     ];
     let error = cli::stream_with(
-        Kind::Claude,
-        &fake(),
-        &[],
-        "x",
+        cli::Request {
+            kind: Kind::Claude,
+            program: &fake(),
+            args: &[],
+            prompt: "x",
+            model: "",
+            dir: None,
+        },
         &env,
         Limits::default(),
         |_| std::future::ready(true),
@@ -226,10 +300,14 @@ async fn real_codex_cancel_kills_tree() {
     let env: [(&str, PathBuf); 0] = [];
     let task = tokio::spawn(async move {
         let _ = cli::stream_with(
-            Kind::Codex,
-            &program,
-            &args,
-            "Write the numbers 1 to 2000, one per line.",
+            cli::Request {
+                kind: Kind::Codex,
+                program: &program,
+                args: &args,
+                prompt: "Write the numbers 1 to 2000, one per line.",
+                model: "",
+                dir: None,
+            },
             &env,
             Limits::default(),
             |_| std::future::ready(true),
@@ -282,10 +360,14 @@ async fn refused_tool_kills_the_cli_at_once() {
         ("FAKE_AFTER_MS", "500".into()),
     ];
     let error = cli::stream_with(
-        Kind::Codex,
-        &fake(),
-        &[],
-        "x",
+        cli::Request {
+            kind: Kind::Codex,
+            program: &fake(),
+            args: &[],
+            prompt: "x",
+            model: "",
+            dir: None,
+        },
         &env,
         Limits::default(),
         |_| std::future::ready(true),
@@ -310,16 +392,22 @@ async fn real_codex_replies_through_the_allowlist() {
     std::fs::create_dir_all(&dir).unwrap();
     let env: [(&str, PathBuf); 0] = [];
     let mut text = String::new();
+    let mut pieces = 0;
     cli::stream_with(
-        Kind::Codex,
-        &program,
-        &cli::args(Kind::Codex, "", &dir),
-        "Think it through, then answer in one short sentence: why is the sky blue?",
+        cli::Request {
+            kind: Kind::Codex,
+            program: &program,
+            args: &cli::args(Kind::Codex, "", &dir),
+            prompt: "Think it through, then answer in two short sentences: why is the sky blue?",
+            model: "",
+            dir: Some(&dir),
+        },
         &env,
         Limits::default(),
         |event| {
             if let StreamEvent::Delta(d) = event {
                 text.push_str(&d);
+                pieces += 1;
             }
             std::future::ready(true)
         },
@@ -327,6 +415,7 @@ async fn real_codex_replies_through_the_allowlist() {
     .await
     .unwrap();
     assert!(!text.trim().is_empty());
+    assert!(pieces > 1, "the reply arrived in one piece: not streamed");
 }
 
 /// Real-CLI check (spends a little quota): `cargo test --test cli -- --ignored`.

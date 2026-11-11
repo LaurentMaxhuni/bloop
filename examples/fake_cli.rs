@@ -2,7 +2,8 @@
 //!
 //! Environment:
 //! - `FAKE_SLEEPER=1`: just sleep forever (used as a grandchild).
-//! - `FAKE_STDIN`: file that receives everything read from stdin.
+//! - `FAKE_STDIN`: read stdin to EOF before replying and save it to this file. Without it,
+//!   stdin is drained in the background (Codex's app server never sees EOF).
 //! - `FAKE_PID`: file that receives this process id.
 //! - `FAKE_CHILD_PID`: if set, start a sleeping copy of this program and write its pid there.
 //! - `FAKE_FIXTURE`: JSONL file replayed to stdout, one line at a time.
@@ -27,10 +28,13 @@ fn main() {
     if let Some(path) = env::var_os("FAKE_PID") {
         fs::write(path, std::process::id().to_string()).unwrap();
     }
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input).unwrap();
     if let Some(path) = env::var_os("FAKE_STDIN") {
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input).unwrap();
         fs::write(path, &input).unwrap();
+    } else {
+        // A Codex app-server client keeps stdin open; drain it without waiting for EOF.
+        std::thread::spawn(|| std::io::copy(&mut std::io::stdin(), &mut std::io::sink()));
     }
     if let Some(path) = env::var_os("FAKE_CHILD_PID") {
         // Deliberately left running: the test checks that cancelling kills it.
