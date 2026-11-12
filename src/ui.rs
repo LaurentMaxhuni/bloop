@@ -121,7 +121,12 @@ pub enum Message {
     Chunk(u64, StreamEvent),
     Finished(u64, Result<(), String>),
     Cancel,
-    /// Copy a reply's code block to the clipboard.
+    /// Send the last prompt again, replacing its reply.
+    Retry,
+    /// Put the last prompt back in the input; sending replaces that turn.
+    EditLast,
+    CancelEdit,
+    /// Copy a reply's code block (or a whole reply) to the clipboard.
     CopyCode(String),
     /// A link in a reply was clicked.
     OpenLink(String),
@@ -205,6 +210,8 @@ pub struct Island {
     /// The code block last copied, so its button reads "Copied".
     copied: Option<String>,
     input: String,
+    /// The input holds the last prompt for Edit & resend.
+    editing: bool,
     status: String,
     desktop_warning: String,
     storage_warning: String,
@@ -288,6 +295,7 @@ impl Island {
             after_reveal: None,
             copied: None,
             input: String::new(),
+            editing: false,
             status: String::new(),
             desktop_warning: String::new(),
             storage_warning: String::new(),
@@ -743,56 +751,32 @@ impl Island {
                 {
                     return Task::none();
                 }
-                if let Err(error) = self.config.validate() {
-                    self.status = error;
-                    self.react(Mood::Oops, 1.2);
+                let prompt = self.input.trim().to_owned();
+                return self.send_prompt(prompt, self.editing);
+            }
+            Message::Retry => {
+                if self.request.is_some() || self.loading || self.quitting {
                     return Task::none();
                 }
-                if self.config.provider == Provider::ChatGpt {
-                    if self.chatgpt_busy {
-                        self.status =
-                            "Finish connecting to ChatGPT before sending a message.".into();
-                        return Task::none();
-                    }
-                    if !self.chatgpt.plan_enabled {
-                        self.status = "Connect your ChatGPT plan under Settings → Model.".into();
-                        return Task::none();
-                    }
+                let Some(prompt) = self.turns.last().map(|t| t.user.clone()) else {
+                    return Task::none();
+                };
+                return self.send_prompt(prompt, true);
+            }
+            Message::EditLast => {
+                if self.request.is_some() || self.loading {
+                    return Task::none();
                 }
-                let prompt = self.input.trim().to_owned();
-                let messages = model::context(&self.turns, &prompt);
-                self.turns.push(Turn {
-                    user: prompt,
-                    assistant: String::new(),
-                    complete: false,
-                });
-                if self.turns.len() > MAX_TURNS {
-                    self.turns.remove(0);
-                    if !self.replies.is_empty() {
-                        self.replies.remove(0);
-                    }
+                if let Some(prompt) = self.turns.last().map(|t| t.user.clone()) {
+                    self.finish_reveal();
+                    self.input = prompt;
+                    self.editing = true;
+                    return widget::operation::focus("prompt");
                 }
-                self.finish_reveal();
-                self.reveal = (!self.reduce_motion()).then_some(0);
-                self.sync_replies();
+            }
+            Message::CancelEdit => {
+                self.editing = false;
                 self.input.clear();
-                self.status.clear();
-                self.request_id += 1;
-                let id = self.request_id;
-                let config = self.config.clone();
-                let stream = iced::stream::channel(16, async move |mut output| {
-                    let result = provider::chat(&config, &messages, |event| {
-                        let mut sender = output.clone();
-                        async move { sender.send(Message::Chunk(id, event)).await.is_ok() }
-                    })
-                    .await
-                    .map_err(|e| e.to_string());
-                    let _ = output.send(Message::Finished(id, result)).await;
-                });
-                let (task, handle) = Task::run(stream, |message| message).abortable();
-                self.request = Some(handle);
-                let busy = self.present(Event::Busy(true));
-                return Task::batch([task, self.scroll(), busy]);
             }
             Message::Chunk(id, event) if id == self.request_id && self.request.is_some() => {
                 if let StreamEvent::Delta(delta) = event {
@@ -1013,6 +997,7 @@ impl Island {
                         return Task::none();
                     }
                     self.confirming_clear = false;
+                    self.editing = false;
                     self.turns.clear();
                     self.finish_reveal();
                     self.status.clear();
@@ -1204,6 +1189,9 @@ impl Island {
                 if self.request.is_some() {
                     return self.update(Message::Cancel);
                 }
+                if self.editing {
+                    return self.update(Message::CancelEdit);
+                }
                 if self.is_open() {
                     return self.present(Event::Dismiss);
                 }
@@ -1278,6 +1266,64 @@ impl Island {
         } else {
             format!("{source} · {model}")
         }
+    }
+
+    /// Sends `prompt` as a new turn. With `replace_last`, the last turn is dropped first
+    /// (Retry, Edit & resend), so it is neither shown twice nor sent back as context.
+    fn send_prompt(&mut self, prompt: String, replace_last: bool) -> Task<Message> {
+        if let Err(error) = self.config.validate() {
+            self.status = error;
+            self.react(Mood::Oops, 1.2);
+            return Task::none();
+        }
+        if self.config.provider == Provider::ChatGpt {
+            if self.chatgpt_busy {
+                self.status = "Finish connecting to ChatGPT before sending a message.".into();
+                return Task::none();
+            }
+            if !self.chatgpt.plan_enabled {
+                self.status = "Connect your ChatGPT plan under Settings → Model.".into();
+                return Task::none();
+            }
+        }
+        self.finish_reveal();
+        if replace_last {
+            self.turns.pop();
+            self.replies.truncate(self.turns.len());
+        }
+        self.editing = false;
+        let messages = model::context(&self.turns, &prompt);
+        self.turns.push(Turn {
+            user: prompt,
+            assistant: String::new(),
+            complete: false,
+        });
+        if self.turns.len() > MAX_TURNS {
+            self.turns.remove(0);
+            if !self.replies.is_empty() {
+                self.replies.remove(0);
+            }
+        }
+        self.reveal = (!self.reduce_motion()).then_some(0);
+        self.sync_replies();
+        self.input.clear();
+        self.status.clear();
+        self.request_id += 1;
+        let id = self.request_id;
+        let config = self.config.clone();
+        let stream = iced::stream::channel(16, async move |mut output| {
+            let result = provider::chat(&config, &messages, |event| {
+                let mut sender = output.clone();
+                async move { sender.send(Message::Chunk(id, event)).await.is_ok() }
+            })
+            .await
+            .map_err(|e| e.to_string());
+            let _ = output.send(Message::Finished(id, result)).await;
+        });
+        let (task, handle) = Task::run(stream, |message| message).abortable();
+        self.request = Some(handle);
+        let busy = self.present(Event::Busy(true));
+        Task::batch([task, self.scroll(), busy])
     }
 
     fn chatgpt_can_manage(&self) -> bool {
@@ -2038,6 +2084,9 @@ impl Island {
             if let Some(reply) = reply {
                 entry = entry.push(reply);
             }
+            if let Some(actions) = self.reply_actions(index, turn) {
+                entry = entry.push(actions);
+            }
             history = history
                 .push(row![Space::new().width(Length::Fill), bubble])
                 .push(entry);
@@ -2089,6 +2138,19 @@ impl Island {
                 );
             }
         }
+        if self.editing {
+            body = body.push(
+                row![
+                    text("Editing your last message. Sending replaces it and its reply.")
+                        .size(12)
+                        .color(t.muted_foreground),
+                    Space::new().width(Length::Fill),
+                    self.small_button("Cancel", Message::CancelEdit),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
         let input = text_input("What's on your mind?", &self.input)
             .id("prompt")
             .padding([8, 6])
@@ -2136,6 +2198,39 @@ impl Island {
             .align_y(Alignment::Center),
         )
         .into()
+    }
+
+    /// Copy under every finished reply; Retry and Edit under the last one too.
+    /// Hidden while a reply streams or types out.
+    fn reply_actions(&self, index: usize, turn: &Turn) -> Option<Element<'_, Message>> {
+        let last = index + 1 == self.turns.len();
+        if last && (self.request.is_some() || self.reveal.is_some()) {
+            return None;
+        }
+        let mut actions = row![].spacing(2).align_y(Alignment::Center);
+        if !turn.assistant.is_empty() {
+            let copied = self.copied.as_deref() == Some(turn.assistant.as_str());
+            actions = actions.push(self.small_button(
+                if copied { "Copied" } else { "Copy" },
+                Message::CopyCode(turn.assistant.clone()),
+            ));
+        }
+        if last && !self.loading {
+            actions = actions
+                .push(self.small_button("Retry", Message::Retry))
+                .push(self.small_button("Edit", Message::EditLast));
+        }
+        Some(actions.into())
+    }
+
+    /// A quiet text button for actions under replies.
+    fn small_button<'a>(&self, label: &'a str, message: Message) -> Element<'a, Message> {
+        let t = self.tokens();
+        button(text(label).size(12).color(t.muted_foreground))
+            .padding([2, 8])
+            .style(style::btn(t, Variant::Ghost))
+            .on_press(message)
+            .into()
     }
 
     /// Provider, endpoint and model fields, shared by Settings and setup.
@@ -2329,6 +2424,60 @@ mod tests {
         assert_eq!(app.turns[0].assistant, "partial");
         assert!(!app.turns[0].complete);
         assert!(app.request.is_none());
+    }
+
+    /// Sends `prompt` and finishes its reply with `reply`.
+    fn exchange(app: &mut Island, prompt: &str, reply: &str) {
+        app.input = prompt.into();
+        let _task = app.update(Message::Send);
+        let id = app.request_id;
+        let _ = app.update(Message::Chunk(id, StreamEvent::Delta(reply.into())));
+        let _ = app.update(Message::Finished(id, Ok(())));
+        app.finish_reveal();
+    }
+
+    #[test]
+    fn retry_replaces_the_last_turn() {
+        let mut app = ready();
+        exchange(&mut app, "first", "one");
+        exchange(&mut app, "second", "bad");
+        let _task = app.update(Message::Retry);
+        assert_eq!(app.turns.len(), 2);
+        assert_eq!(app.turns[1].user, "second");
+        assert!(app.turns[1].assistant.is_empty());
+        assert!(app.request.is_some());
+        assert_eq!(app.replies.len(), app.turns.len());
+    }
+
+    #[test]
+    fn edit_and_resend_replaces_the_last_turn_and_cancel_keeps_it() {
+        let mut app = ready();
+        exchange(&mut app, "first", "one");
+        exchange(&mut app, "secnd", "huh?");
+        let _ = app.update(Message::EditLast);
+        assert!(app.editing);
+        assert_eq!(app.input, "secnd");
+        let _ = app.update(Message::CancelEdit);
+        assert!(!app.editing && app.input.is_empty());
+        assert_eq!(app.turns[1].assistant, "huh?");
+
+        let _ = app.update(Message::EditLast);
+        app.input = "second".into();
+        let _task = app.update(Message::Send);
+        assert!(!app.editing);
+        assert_eq!(app.turns.len(), 2);
+        assert_eq!(app.turns[1].user, "second");
+    }
+
+    #[test]
+    fn retry_and_edit_are_ignored_while_streaming() {
+        let mut app = ready();
+        app.input = "hello".into();
+        let _task = app.update(Message::Send);
+        let _ = app.update(Message::Retry);
+        let _ = app.update(Message::EditLast);
+        assert_eq!(app.turns.len(), 1);
+        assert!(!app.editing);
     }
 
     /// Feeds frames 1/60 s apart starting at `from`; returns the time after the last one.
