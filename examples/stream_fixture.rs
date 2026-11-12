@@ -57,10 +57,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Config::default()
     };
     let path = storage::data_path()?;
-    let history = storage::load(&path)
-        .map(|(_, history)| history)
-        .unwrap_or_default();
-    storage::save(&path, &config, &history)?;
+    // Saved chats stay as they are; only the settings point at this fixture.
+    storage::save(&path, &config, None)?;
     println!("Streaming fixture ready on 127.0.0.1:11634. Not a model.");
     for socket in listener.incoming() {
         let socket = socket?;

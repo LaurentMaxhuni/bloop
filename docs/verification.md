@@ -264,3 +264,47 @@ clearly at 22 px.
 Not checked on screen: the live run (thinking, then typing, then happy) and the Mad face. The
 run to see them ended early: the chat panel had closed before a scripted click, so the click
 landed on another window. Unit tests cover these states, but no one has looked at them yet.
+
+## Monitor placement (2026-11-12)
+
+Automated geometry covers left/centre/right, negative desktop coordinates, a nonzero
+work-area top, and 100%, 125%, 150%, and 200% scaling. Reviewed the pinned winit 0.30.13
+WM_DPICHANGED handler: its suggested-rectangle SetWindowPos completes inside the handler.
+The placement callback reapplies the intended physical rectangle after the first move.
+Required gates: cargo fmt, cargo clippy --all-targets -- -D warnings, cargo test.
+No bloop executable was launched. Actual monitor selection, focus ordering and cross-DPI
+movement remain unverified on screen; test both directions between differently scaled
+monitors, with the foreground window on each monitor and with a bloop window foreground.
+All three gates passed. cargo test required the normal Windows session: the sandbox could not access Credential Manager for two existing secrets tests. Real-CLI and live-GitHub tests remain ignored.
+
+## Independent clipboard shortcut (2026-11-12)
+
+Unit coverage checks distinct Toggle/Ask routing, disabling Ask without affecting Toggle,
+invalid syntax, duplicate bindings in either direction, idempotent registration and
+preserving the old binding after registration failure. Both shortcuts reuse validate_shortcut.
+No desktop hotkeys were registered in these tests; Windows registration and actual key
+presses remain unverified. UI integration is intentionally just an empty Event::Ask arm.
+Passed: cargo fmt, cargo clippy --all-targets -- -D warnings, and cargo test (normal Windows session; existing live tests ignored).
+
+## Connection diagnostics (2026-11-12)
+
+Loopback tests cover Ollama/OpenAI/Unsloth model-list success, missing and empty models,
+401/403, 404, refused port, a silent server timeout, a TLS certificate alert, malformed
+JSON, and invalid URLs. Requests are body-free GETs to api/tags or v1/models, with no chat.
+Model suggestions stop at five. Unit checks cover CLI path/missing reports and ChatGPT's
+signed-out/plan-disabled gates. Live ChatGPT authentication/model access and real CLI
+sign-in were not exercised. CLI hints follow the vendors' installation documentation:
+https://support.claude.com/en/articles/14554922-claude-code-user-faq
+https://github.com/openai/codex/blob/main/README.md
+Passed: cargo fmt, cargo clippy --all-targets -- -D warnings, and cargo test (normal Windows session). All eight loopback diagnostics passed; the silent-server check returned in about three seconds.
+
+## Markdown export helpers (2026-11-12)
+
+Unit tests cover transcript order, preserved Markdown/Unicode, interrupted and empty replies,
+empty titles, invalid filename characters, case-insensitive device names (including those
+with extensions and superscript digits), extension normalization and UTF-16 length bounds.
+The Windows Save-dialog API compiles with its added windows crate feature. Its buffers,
+cancellation/error branch and worker-thread ownership were reviewed against Microsoft's
+API documentation. The dialog was not opened; save/cancel/overwrite interactions and
+non-Windows compilation remain unverified. No bloop executable was launched.
+Passed: cargo fmt, cargo clippy --all-targets -- -D warnings, and cargo test (normal Windows session): 220 passed, four existing live-network/CLI tests ignored.

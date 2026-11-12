@@ -40,15 +40,13 @@ pub enum ChatAction {
 }
 
 /// Runs `job` on a blocking thread with the database path.
-fn blocking<T: Send + 'static>(
+async fn blocking<T: Send + 'static>(
     path: PathBuf,
     job: impl FnOnce(&std::path::Path) -> Result<T, String> + Send + 'static,
-) -> impl Future<Output = Result<T, String>> {
-    async move {
-        tokio::task::spawn_blocking(move || job(&path))
-            .await
-            .map_err(|e| e.to_string())?
-    }
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(move || job(&path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// "Just now", "5 min ago", "3 h ago", "Yesterday", "4 days ago", "6 weeks ago".
@@ -102,7 +100,8 @@ impl Island {
             }
             ChatAction::Open(id) => {
                 if self.request.is_some() {
-                    self.chats_notice = "Stop the reply in the notch before switching chats.".into();
+                    self.chats_notice =
+                        "Stop the reply in the notch before switching chats.".into();
                     return Task::none();
                 }
                 if id == self.chat.id {
@@ -324,9 +323,11 @@ impl Island {
         let current = chat.id == self.chat.id;
         let title: Element<'a, Message> = match &self.renaming {
             Some((id, draft)) if *id == chat.id => row![
-                self.input("Chat name", draft, |v| Message::Chat(ChatAction::RenameInput(v)))
-                    .id("rename")
-                    .on_submit(Message::Chat(ChatAction::RenameSave)),
+                self.input("Chat name", draft, |v| Message::Chat(
+                    ChatAction::RenameInput(v)
+                ))
+                .id("rename")
+                .on_submit(Message::Chat(ChatAction::RenameSave)),
                 self.button("Save", Variant::Primary)
                     .on_press(Message::Chat(ChatAction::RenameSave)),
                 self.button("Cancel", Variant::Ghost)

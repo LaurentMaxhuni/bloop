@@ -310,7 +310,9 @@ pub fn search(path: &Path, query: &str) -> Result<Vec<(Chat, String)>, String> {
         ))
         .map_err(|e| e.to_string())?;
     let rows = statement
-        .query_map([], |row| Ok((chat_from_row(row)?, row.get::<_, String>(5)?)))
+        .query_map([], |row| {
+            Ok((chat_from_row(row)?, row.get::<_, String>(5)?))
+        })
         .map_err(|e| e.to_string())?;
     let mut hits = Vec::new();
     for row in rows {
@@ -404,7 +406,8 @@ mod tests {
         {
             let connection = connect(&path).unwrap();
             let settings = serde_json::to_string(&Config::default()).unwrap();
-            let history = serde_json::to_string(&vec![turn("Old question\nmore", "answer")]).unwrap();
+            let history =
+                serde_json::to_string(&vec![turn("Old question\nmore", "answer")]).unwrap();
             connection
                 .execute(
                     "INSERT INTO state(id, settings, history) VALUES(1, ?1, ?2)",
@@ -429,8 +432,18 @@ mod tests {
         let config = Config::default();
         let older = chat(1, "Kettles", 100);
         let newer = chat(2, "Gardening", 200);
-        save(&path, &config, Some((&older, &[turn("how do kettles work", "heat")]))).unwrap();
-        save(&path, &config, Some((&newer, &[turn("roses", "prune in March")]))).unwrap();
+        save(
+            &path,
+            &config,
+            Some((&older, &[turn("how do kettles work", "heat")])),
+        )
+        .unwrap();
+        save(
+            &path,
+            &config,
+            Some((&newer, &[turn("roses", "prune in March")])),
+        )
+        .unwrap();
         save(&path, &config, Some((&chat(3, "empty", 300), &[]))).unwrap();
 
         let loaded = load(&path).unwrap();

@@ -457,28 +457,34 @@ fn chatgpt_error(status: Option<u16>, body: &Value, request_id: Option<&str>) ->
         }
         _ => "ChatGPT could not complete the request.",
     };
+    let http_status = status;
     let status = status
         .map(|status| format!(" (HTTP {status})"))
         .unwrap_or_default();
     let request = request_id
         .map(|id| format!(" Request ID: {id}."))
         .unwrap_or_default();
-    Error::Protocol(format!("{hint}{status}{request}"))
+    let message = format!("{hint}{status}{request}");
+    match http_status {
+        Some(status) => Error::Http { status, message },
+        None => Error::Protocol(message),
+    }
 }
 
 /// A failed HTTP status, explained for the provider that returned it.
 fn http_error(provider: Provider, status: u16, hint: &str) -> Error {
     if provider == Provider::Unsloth && status == 401 {
-        return Error::Protocol(
-            "Unsloth Studio rejected the key. Copy the key it printed when the model loaded into Settings."
-                .into(),
-        );
+        return Error::Http {
+            status,
+            message: "Unsloth Studio rejected the key. Copy the key it printed when the model loaded into Settings.".into(),
+        };
     }
-    Error::Protocol(
-        format!("Provider returned HTTP {status}. {hint}")
+    Error::Http {
+        status,
+        message: format!("Provider returned HTTP {status}. {hint}")
             .trim_end()
             .into(),
-    )
+    }
 }
 
 /// CLI providers are routed before reaching the HTTP code (Task 5 wires them up).
@@ -604,12 +610,14 @@ const MAX_FRAME: usize = 256 * 1024;
 pub enum Error {
     #[error("{0}")]
     Protocol(String),
+    #[error("{message}")]
+    Http { status: u16, message: String },
     #[error("Provider connection failed: {0}")]
-    Network(String),
+    Network(#[source] reqwest::Error),
 }
 
 impl From<reqwest::Error> for Error {
     fn from(error: reqwest::Error) -> Self {
-        Self::Network(error.without_url().to_string())
+        Self::Network(error.without_url())
     }
 }

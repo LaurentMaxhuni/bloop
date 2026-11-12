@@ -16,11 +16,11 @@ use crate::{
 };
 use bloop::{
     chatgpt::{self, AccountStatus},
-    diagnose,
     config::{
         Accent, Config, Destination, HOVER_DELAYS_MS, NotchPosition, NotchWidth, Provider,
         ReduceMotion, ThemeChoice,
     },
+    diagnose,
     launch::{Launch, Startup, startup},
     model::{self, Chat, MAX_PROMPT, MAX_TURNS, Turn},
     motion::{Feel, SizeSpring},
@@ -624,7 +624,7 @@ impl Island {
         match message {
             Message::Window(id) => {
                 self.window = id;
-                return self.place_window();
+                return self.place_window(platform::Target::Current);
             }
             Message::Tick(now) => {
                 self.now = now;
@@ -718,6 +718,7 @@ impl Island {
                     self.apply_shortcuts();
                 }
                 platform::Event::Toggle => return self.update(Message::Toggle),
+                platform::Event::Ask => return self.update(Message::AskClipboard),
                 platform::Event::Settings => return self.update(Message::OpenWindow),
                 platform::Event::Quit => return self.update(Message::Quit),
                 platform::Event::Warning(error) => self.desktop_warning = error,
@@ -1662,8 +1663,8 @@ impl Island {
                 tokio::task::spawn_blocking(move || {
                     storage::save(&path, &config, Some((&chat, &turns)))
                 })
-                    .await
-                    .map_err(|e| e.to_string())?
+                .await
+                .map_err(|e| e.to_string())?
             },
             Message::Saved,
         )
@@ -1677,6 +1678,11 @@ impl Island {
     /// window work: size animation, hide/show, and focus.
     fn present_at(&mut self, event: Event, now: Instant) -> Task<Message> {
         let (state_before, shape_before) = (self.presence.state(), self.presence.shape());
+        let target = if event == Event::Shortcut {
+            platform::Target::Active
+        } else {
+            platform::Target::Current
+        };
         self.presence.on(event, now);
         let (state, shape) = (self.presence.state(), self.presence.shape());
         let mut tasks = Vec::new();
@@ -1690,7 +1696,7 @@ impl Island {
         if shape != shape_before {
             if shape_before == Shape::Sliver {
                 // Coming out of the sliver: pick up resolution, scaling or taskbar changes.
-                tasks.push(self.place_window());
+                tasks.push(self.place_window(target));
             }
             self.retarget(shape, now);
             if self.reduce_motion() {
@@ -1903,7 +1909,7 @@ impl Island {
         if !animate {
             self.spring.snap();
         }
-        self.place_window()
+        self.place_window(platform::Target::Current)
     }
 
     /// Points the spring at `shape`. Starting from rest, the clock starts now, so the first
@@ -1919,19 +1925,16 @@ impl Island {
         }
     }
 
-    fn place_window(&mut self) -> Task<Message> {
+    fn place_window(&mut self, target: platform::Target) -> Task<Message> {
         self.placements += 1;
         let Some(id) = self.window else {
             return Task::none();
         };
         let canvas = self.canvas_size();
-        let position = platform::place(canvas, self.config.notch_position);
+        let position = self.config.notch_position;
         self.region = None;
         Task::batch([
-            window::resize(id, canvas),
-            position
-                .map(|point| window::move_to(id, point))
-                .unwrap_or_else(Task::none),
+            window::run(id, move |w| platform::place_on(w, canvas, position, target)).discard(),
             self.update_region(),
         ])
     }
@@ -3189,7 +3192,10 @@ mod tests {
         app.input = "q".repeat(3000);
         let _ = app.update(Message::Send);
         assert!(app.request.is_none());
-        assert!(app.attachment.is_some(), "kept so the user can shorten the question");
+        assert!(
+            app.attachment.is_some(),
+            "kept so the user can shorten the question"
+        );
     }
 
     #[test]
@@ -3203,7 +3209,10 @@ mod tests {
         assert_eq!(app.config.model, default_model);
         assert_eq!(app.config.profiles.len(), 1);
         assert_eq!(app.config.profiles[0].model, "other:1b");
-        assert_eq!(app.profile_edit, ProfileEdit::Existing(app.config.profiles[0].id));
+        assert_eq!(
+            app.profile_edit,
+            ProfileEdit::Existing(app.config.profiles[0].id)
+        );
         let _ = app.update(Message::EditProfile(0));
         assert_eq!(app.draft_config.model, default_model);
         let _ = app.update(Message::EditProfile(app.config.profiles[0].id));
@@ -3671,9 +3680,9 @@ mod tests {
         let mut app = ready();
         app.config.provider = Provider::ClaudeCode;
         app.config.model = String::new();
-        assert_eq!(app.badge_text(), "Claude Code");
+        assert_eq!(app.badge_text(), "Cloud · Claude Code");
         app.config.model = "sonnet".into();
-        assert_eq!(app.badge_text(), "Claude Code · sonnet");
+        assert_eq!(app.badge_text(), "Cloud · Claude Code · sonnet");
         app.config = Config::default();
         assert_eq!(app.badge_text(), "Local · qwen3:4b");
     }

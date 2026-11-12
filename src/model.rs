@@ -162,7 +162,10 @@ mod tests {
     #[test]
     fn attachments_are_fenced_and_capped() {
         let prompt = with_attachment("what is this?", "error: ```boom````");
-        assert!(prompt.starts_with("what is this?\n\n`````text\n"), "{prompt}");
+        assert!(
+            prompt.starts_with("what is this?\n\n`````text\n"),
+            "{prompt}"
+        );
         assert!(prompt.ends_with("\n`````"));
         assert!(with_attachment("  ", "x").starts_with("Explain this."));
         let (clipped, cut) = clip_attachment(&"é".repeat(MAX_ATTACHMENT));
@@ -178,7 +181,10 @@ mod tests {
             assistant: "ok".into(),
             complete: true,
         }];
-        assert_eq!(snippet(&turns, "kettle").as_deref(), Some("The Kettle boils"));
+        assert_eq!(
+            snippet(&turns, "kettle").as_deref(),
+            Some("The Kettle boils")
+        );
         assert_eq!(snippet(&turns, "teapot"), None);
     }
     #[test]

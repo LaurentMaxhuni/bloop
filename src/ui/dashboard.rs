@@ -16,8 +16,7 @@ use bloop::{
     update::Version,
 };
 use iced::{
-    Alignment, Element, Length,
-    Task,
+    Alignment, Element, Length, Task,
     widget::{Space, button, column, container, pick_list, row, scrollable, text, toggler},
 };
 

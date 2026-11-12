@@ -171,3 +171,41 @@ mouth, a bounce that fades) and Mad (slanted brows, frown, a brief tremble, an a
   can't read images, so a screen-region feature should go through local OCR first.
 - **Markdown export** writes a chat through the standard Windows Save dialog; nothing is
   written without the user picking a file.
+
+## Monitor placement (2026-11-12)
+
+The notch uses physical HWND placement on its owning Iced event-loop thread. Shortcut
+opening from the sliver targets the foreground application's monitor, ignoring our own
+process, then the cursor, then primary. Other placements retain the current monitor.
+The work-area origin stays physical; only canvas dimensions and edge inset are scaled.
+Two synchronous SetWindowPos calls preserve activation and Z order: the first lets
+winit 0.30.13 handle WM_DPICHANGED and its suggested rectangle, and the second restores
+our exact requested rectangle after that handler returns. There is no timer or polling.
+Initial window settings retain the existing primary_position logical-coordinate helper.
+See Microsoft's SetWindowPos documentation:
+https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setwindowpos
+
+## Connection diagnostics (2026-11-12)
+
+The library's diagnose::test_connection returns a Report and has a ten-second overall
+budget. HTTP providers reuse the existing bounded model-list GET (three seconds), without
+sending chat content. ChatGPT first reads account/plan status and lists models only when
+plan usage is enabled; at most one existing token-refresh request precedes that GET.
+The refresh remains cancellation-safe and may finish persisting rotated credentials after
+the diagnostic deadline. No new endpoint or background request is introduced.
+CLI discovery uses cli::find on a blocking worker and does not start any program or claim
+authentication was checked. Provider errors retain HTTP status and URL-stripped reqwest
+causes so diagnostics can distinguish refused connections, TLS failures and timeouts.
+
+## Markdown export helpers (2026-11-12)
+
+export::markdown preserves turn text and marks interrupted replies before their content,
+so an unfinished code fence cannot hide the marker. Suggested names remove Windows-invalid
+characters and device names, trim dots/whitespace, and cap the complete name at 120 UTF-16
+code units while preserving Unicode scalar boundaries. The library does no file I/O.
+platform::save_file_dialog uses GetSaveFileNameW with call-local UTF-16 buffers, no owner
+HWND or callbacks, a Markdown filter/default extension, overwrite confirmation and
+OFN_NOCHANGEDIR. It runs on the caller's blocking worker and returns a path or cancellation;
+the caller writes the file. The native call has its own modal message loop, so it does not
+block Iced. No COM initialization or application window handle crosses threads.
+API reference: https://learn.microsoft.com/windows/win32/api/commdlg/nf-commdlg-getsavefilenamew
