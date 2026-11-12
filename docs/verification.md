@@ -242,3 +242,25 @@ DPAPI-encrypted session storage, and Responses requests with `store: false`.
 
 Not checked: a real sign-in, token refresh or ChatGPT reply. Those need a person to approve the
 sign-in in a browser with an eligible ChatGPT plan.
+
+## Paced reveal and reply moods (2026-11-12)
+
+Measured: a one-off probe with the real Codex CLI (`cli::chat` on a runtime capped at
+`BLOCKING_THREADS`) logged a timestamp for each delta. The first token came at 5.1 s and the
+last at 6.5 s, often several per read, which confirmed that streaming worked but was too
+quick to see. The probe was removed afterwards.
+
+Automated: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean, and
+`cargo test` passes. New UI state tests: a burst types out over several ticks and Bloop laughs
+only after it has caught up (joke prompt), reduced motion shows text at once, a failed reply
+keeps its partial text and makes Bloop mad, a stopped reply stays mad while older replies
+sleep, everything sleeps after the nap delay, and the laugh check ignores "punctuation" and
+"lollipop".
+
+On screen: a dev build on scratch data (`BLOOP_DATA_DIR`) with a seeded chat drew the sleeping
+Bloop on an older reply and the laughing Bloop ("is cracking up") on a joke reply. Both read
+clearly at 22 px.
+
+Not checked on screen: the live run (thinking, then typing, then happy) and the Mad face. The
+run to see them ended early: the chat panel had closed before a scripted click, so the click
+landed on another window. Unit tests cover these states, but no one has looked at them yet.

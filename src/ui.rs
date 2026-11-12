@@ -48,6 +48,20 @@ const SHOULDER: f32 = 10.0;
 /// Time between scheduled update checks.
 const UPDATE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// Collapsed and untouched for this long, the mascot dozes off.
+/// The part of reply `index` on screen: all of it, except while the newest one types out
+/// (`reveal` bytes of it).
+fn shown(turns: &[Turn], reveal: Option<usize>, index: usize) -> &str {
+    let Some(turn) = turns.get(index) else {
+        return "";
+    };
+    match reveal {
+        Some(end) if index + 1 == turns.len() => {
+            turn.assistant.get(..end).unwrap_or(&turn.assistant)
+        }
+        _ => &turn.assistant,
+    }
+}
+
 const NAP_AFTER: Duration = Duration::from_secs(45);
 
 /// The notch window: borderless, transparent, always on top and out of the taskbar.
@@ -183,6 +197,11 @@ pub struct Island {
     turns: Vec<Turn>,
     /// Parsed assistant replies, one per turn (see `sync_replies`).
     replies: Vec<rich::Reply>,
+    /// Bytes of the newest reply shown so far while it types out; `None` shows it all.
+    /// Streamed text arrives in bursts, so the view reveals it at a steady pace.
+    reveal: Option<usize>,
+    /// The reaction Bloop has once the newest reply has finished typing out.
+    after_reveal: Option<Mood>,
     /// The code block last copied, so its button reads "Copied".
     copied: Option<String>,
     input: String,
@@ -265,6 +284,8 @@ impl Island {
             draft_config: Config::default(),
             turns: Vec::new(),
             replies: Vec::new(),
+            reveal: None,
+            after_reveal: None,
             copied: None,
             input: String::new(),
             status: String::new(),
@@ -375,9 +396,8 @@ impl Island {
         {
             return mood;
         }
-        if self.request.is_some() {
-            let waiting = self.turns.last().is_none_or(|t| t.assistant.is_empty());
-            return if waiting {
+        if self.request.is_some() || self.reveal.is_some() {
+            return if self.shown_last().is_empty() {
                 Mood::Thinking
             } else {
                 Mood::Talking
@@ -406,19 +426,28 @@ impl Island {
         if !self.config.mascot {
             return Space::new().width(0).into();
         }
-        let t = self.tokens();
         let mood = self.mood();
-        let since = self
-            .reaction
+        let since = self.reaction_age(mood);
+        let blink = self.blink_until.is_some_and(|until| self.now < until);
+        self.draw_mascot(mood, since, blink, size)
+    }
+
+    /// Seconds since Bloop started reacting with `mood`, or 0 when it isn't.
+    fn reaction_age(&self, mood: Mood) -> f32 {
+        self.reaction
             .filter(|(m, ..)| *m == mood)
             .map_or(0.0, |(_, start, _)| {
                 self.now.saturating_duration_since(start).as_secs_f32()
-            });
+            })
+    }
+
+    fn draw_mascot(&self, mood: Mood, since: f32, blink: bool, size: f32) -> Element<'_, Message> {
+        let t = self.tokens();
         canvas(Mascot {
             mood,
             t: self.now.saturating_duration_since(self.born).as_secs_f32(),
             since,
-            blink: self.blink_until.is_some_and(|until| self.now < until),
+            blink,
             body: t.foreground,
             face: t.background,
             blush: self.config.accent.rgb().map(|_| t.primary),
@@ -426,6 +455,38 @@ impl Island {
         .width(size)
         .height(size)
         .into()
+    }
+
+    /// How the little Bloop beside a reply looks: thinking until text appears, talking
+    /// while it types out, then reacting (happy, laughing or mad). It keeps that face
+    /// until the chat goes quiet; older replies have dozed off.
+    fn reply_mood(&self, index: usize) -> (Mood, f32) {
+        // Far past any one-shot motion, so a settled face stands still.
+        const SETTLED: f32 = 60.0;
+        let Some(turn) = self.turns.get(index) else {
+            return (Mood::Sleepy, SETTLED);
+        };
+        if index + 1 != self.turns.len() {
+            return (Mood::Sleepy, SETTLED);
+        }
+        if self.request.is_some() || self.reveal.is_some() {
+            let mood = if self.shown(index).is_empty() {
+                Mood::Thinking
+            } else {
+                Mood::Talking
+            };
+            return (mood, 0.0);
+        }
+        if let Some((mood @ (Mood::Happy | Mood::Laughing | Mood::Mad), _, until)) = self.reaction
+            && self.now < until
+        {
+            return (mood, self.reaction_age(mood));
+        }
+        if self.now.saturating_duration_since(self.last_activity) >= NAP_AFTER {
+            return (Mood::Sleepy, SETTLED);
+        }
+        let mood = Mood::for_reply(&turn.user, &turn.assistant, turn.complete);
+        (mood, SETTLED)
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -502,6 +563,10 @@ impl Island {
                 }
                 if self.blink_until.is_some_and(|until| now >= until) {
                     self.blink_until = None;
+                }
+                if self.reveal.is_some() {
+                    self.advance_reveal();
+                    return self.scroll();
                 }
             }
             Message::Blink(now) => {
@@ -707,6 +772,8 @@ impl Island {
                         self.replies.remove(0);
                     }
                 }
+                self.finish_reveal();
+                self.reveal = (!self.reduce_motion()).then_some(0);
                 self.sync_replies();
                 self.input.clear();
                 self.status.clear();
@@ -732,6 +799,10 @@ impl Island {
                     if let Some(turn) = self.turns.last_mut() {
                         turn.assistant.push_str(&delta);
                     }
+                    if self.reveal == Some(0) {
+                        // Show the first characters straight away; ticks type out the rest.
+                        self.advance_reveal();
+                    }
                     self.sync_replies();
                     return self.scroll();
                 }
@@ -741,14 +812,19 @@ impl Island {
                 let mut presence = self.present(Event::Busy(false));
                 match result {
                     Ok(()) => {
+                        let mut mood = Mood::Happy;
                         if let Some(turn) = self.turns.last_mut() {
                             turn.complete = true;
+                            mood = Mood::for_reply(&turn.user, &turn.assistant, true);
                         }
-                        self.react(Mood::Happy, 1.6);
+                        // Bloop reacts once the text has finished typing out.
+                        self.after_reveal = Some(mood);
+                        self.advance_reveal();
                     }
                     Err(error) => {
                         self.status = error;
-                        self.react(Mood::Oops, 2.0);
+                        self.finish_reveal();
+                        self.react(Mood::Mad, 2.0);
                         let failed = self.present(Event::Peek("Reply failed".into()));
                         presence = Task::batch([presence, failed]);
                     }
@@ -769,7 +845,7 @@ impl Island {
             Message::Cancel => {
                 self.cancel();
                 self.status = "Stopped. Partial reply kept out of model context.".into();
-                self.react(Mood::Oops, 0.8);
+                self.react(Mood::Mad, 1.2);
                 let update = self.peek_update_if_pending();
                 return Task::batch([self.persist(), update]);
             }
@@ -938,7 +1014,7 @@ impl Island {
                     }
                     self.confirming_clear = false;
                     self.turns.clear();
-                    self.sync_replies();
+                    self.finish_reveal();
                     self.status.clear();
                     return self.persist();
                 }
@@ -1264,6 +1340,7 @@ impl Island {
             handle.abort();
         }
         self.request_id += 1;
+        self.finish_reveal();
         // Only state changes matter here; this event never shows, hides or focuses the window.
         let _ = self.present(Event::Cancelled);
     }
@@ -1686,6 +1763,8 @@ impl Island {
             Mood::Thinking => "Thinking…",
             Mood::Talking => "Replying…",
             Mood::Happy => "All done",
+            Mood::Laughing => "Haha",
+            Mood::Mad => "Hmph",
             Mood::Oops => "Oops",
             Mood::Sleepy => "Napping",
             Mood::Typing => "Listening…",
@@ -1825,12 +1904,55 @@ impl Island {
     /// is extended rather than parsed again, so streaming only parses the new text.
     fn sync_replies(&mut self) {
         self.replies.truncate(self.turns.len());
-        for (index, turn) in self.turns.iter().enumerate() {
+        for index in 0..self.turns.len() {
+            let shown = shown(&self.turns, self.reveal, index);
             match self.replies.get_mut(index) {
-                Some(reply) => reply.update(&turn.assistant),
-                None => self.replies.push(rich::Reply::new(&turn.assistant)),
+                Some(reply) => reply.update(shown),
+                None => self.replies.push(rich::Reply::new(shown)),
             }
         }
+    }
+
+    /// The part of a reply on screen: all of it, except while the newest one types out.
+    fn shown(&self, index: usize) -> &str {
+        shown(&self.turns, self.reveal, index)
+    }
+
+    fn shown_last(&self) -> &str {
+        self.shown(self.turns.len().saturating_sub(1))
+    }
+
+    /// Types out a few more characters of the newest reply: at least three per tick
+    /// (about 90 a second), more when text piles up, so it never lags far behind. Once the
+    /// reply is complete and fully shown, Bloop has its reaction.
+    fn advance_reveal(&mut self) {
+        if let Some(end) = self.reveal {
+            let text = self.turns.last().map_or("", |t| t.assistant.as_str());
+            let rest = text.get(end..).unwrap_or_default();
+            let step = (rest.chars().count() / 6).max(3);
+            let added = rest.char_indices().nth(step).map_or(rest.len(), |(i, _)| i);
+            let end = end + added;
+            if end < text.len() || self.request.is_some() {
+                self.reveal = Some(end);
+                self.sync_replies();
+                return;
+            }
+            self.reveal = None;
+            self.sync_replies();
+        }
+        if self.request.is_none()
+            && let Some(mood) = self.after_reveal.take()
+        {
+            let seconds = if mood == Mood::Laughing { 2.4 } else { 1.6 };
+            self.react(mood, seconds);
+        }
+    }
+
+    /// Shows the newest reply in full at once and drops any pending reaction.
+    fn finish_reveal(&mut self) {
+        self.reveal = None;
+        self.after_reveal = None;
+        self.sync_replies();
     }
 
     fn chat_view(&self) -> Element<'_, Message> {
@@ -1875,14 +1997,28 @@ impl Island {
                 .padding([8, 12])
                 .max_width(380)
                 .style(style::bubble(t));
-            let mut label = row![
+            let mut label = row![].spacing(8).align_y(Alignment::Center);
+            let (mood, since) = self.reply_mood(index);
+            if self.config.mascot {
+                let blink = index == last && self.blink_until.is_some_and(|u| self.now < u);
+                label = label.push(self.draw_mascot(mood, since, blink, 22.0));
+            }
+            label = label.push(
                 text("bloop")
                     .size(12)
                     .font(MEDIUM)
-                    .color(t.muted_foreground)
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center);
+                    .color(t.muted_foreground),
+            );
+            let doing = match mood {
+                Mood::Thinking => "is thinking…",
+                Mood::Talking => "is typing…",
+                Mood::Laughing if index == last => "is cracking up",
+                Mood::Mad if index == last => "is grumpy",
+                _ => "",
+            };
+            if !doing.is_empty() {
+                label = label.push(text(doing).size(12).color(t.muted_foreground));
+            }
             let streaming = index == last && self.request.is_some();
             if !turn.complete && !streaming {
                 label = label.push(
@@ -1891,14 +2027,20 @@ impl Island {
                         .style(style::badge(t)),
                 );
             }
-            let reply: Element<'_, Message> = match self.replies.get(index) {
-                _ if turn.assistant.is_empty() => text("…").size(14).into(),
-                Some(reply) => reply.view(t, self.copied.as_deref()),
-                None => text(&turn.assistant).size(14).into(),
+            let shown = self.shown(index);
+            let reply: Option<Element<'_, Message>> = match self.replies.get(index) {
+                // Bloop's face (or, without the mascot, "is thinking…") says enough.
+                _ if shown.is_empty() => None,
+                Some(reply) => Some(reply.view(t, self.copied.as_deref())),
+                None => Some(text(shown).size(14).into()),
             };
+            let mut entry = column![label].spacing(4);
+            if let Some(reply) = reply {
+                entry = entry.push(reply);
+            }
             history = history
                 .push(row![Space::new().width(Length::Fill), bubble])
-                .push(column![label, reply].spacing(4));
+                .push(entry);
         }
         let mut body = column![
             scrollable(history)
@@ -2371,6 +2513,96 @@ mod tests {
         assert!(!app.quitting);
         assert_eq!(app.presence.state(), State::Open);
         assert!(app.storage_warning.contains("disk full"));
+    }
+
+    #[test]
+    fn streamed_reply_types_out_and_reacts_after() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::Off;
+        app.input = "tell me a joke".into();
+        let _task = app.update(Message::Send);
+        let id = app.request_id;
+        assert_eq!(app.reply_mood(0).0, Mood::Thinking);
+        let burst = "Why did the scarecrow win an award? He was outstanding in his field.";
+        let _ = app.update(Message::Chunk(id, StreamEvent::Delta(burst.into())));
+        // A burst does not land all at once: only the first few characters show.
+        let first = app.shown(0).len();
+        assert!(first > 0 && first < burst.len(), "{first}");
+        assert_eq!(app.reply_mood(0).0, Mood::Talking);
+        let _ = app.update(Message::Finished(id, Ok(())));
+        // Still typing out, so no reaction yet.
+        assert_eq!(app.mood(), Mood::Talking);
+        let mut ticks = 0;
+        while app.reveal.is_some() {
+            let _ = app.update(Message::Tick(Instant::now()));
+            ticks += 1;
+            assert!(
+                ticks < 60,
+                "reveal should catch up within about two seconds"
+            );
+        }
+        assert!(ticks > 3, "reveal should take a few frames, took {ticks}");
+        assert_eq!(app.shown(0), burst);
+        assert_eq!(app.mood(), Mood::Laughing);
+        assert_eq!(app.reply_mood(0).0, Mood::Laughing);
+    }
+
+    #[test]
+    fn reduced_motion_shows_streamed_text_at_once() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::On;
+        app.input = "hello".into();
+        let _task = app.update(Message::Send);
+        let id = app.request_id;
+        let _ = app.update(Message::Chunk(
+            id,
+            StreamEvent::Delta("Hello there, friend.".into()),
+        ));
+        assert_eq!(app.shown(0), "Hello there, friend.");
+        let _ = app.update(Message::Finished(id, Ok(())));
+        assert_eq!(app.mood(), Mood::Happy);
+    }
+
+    #[test]
+    fn failed_or_stopped_reply_makes_bloop_mad_and_older_replies_sleep() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::Off;
+        app.input = "hello".into();
+        let _task = app.update(Message::Send);
+        let id = app.request_id;
+        let _ = app.update(Message::Chunk(
+            id,
+            StreamEvent::Delta("partial reply".into()),
+        ));
+        let _ = app.update(Message::Finished(id, Err("boom".into())));
+        assert_eq!(app.shown(0), "partial reply");
+        assert_eq!(app.mood(), Mood::Mad);
+        app.input = "again".into();
+        let _task = app.update(Message::Send);
+        app.cancel();
+        assert_eq!(app.reply_mood(0).0, Mood::Sleepy);
+        assert_eq!(app.reply_mood(1).0, Mood::Mad);
+        let _ = app.update(Message::Tick(Instant::now() + NAP_AFTER * 2));
+        assert_eq!(app.reply_mood(1).0, Mood::Sleepy);
+    }
+
+    #[test]
+    fn funny_replies_make_bloop_laugh() {
+        assert_eq!(
+            Mood::for_reply("hi", "Haha, nice one!", true),
+            Mood::Laughing
+        );
+        assert_eq!(Mood::for_reply("hi", "That is 😂", true), Mood::Laughing);
+        assert_eq!(
+            Mood::for_reply("Tell me a joke", "Okay.", true),
+            Mood::Laughing
+        );
+        assert_eq!(
+            Mood::for_reply("fix punctuation", "Done.", true),
+            Mood::Happy
+        );
+        assert_eq!(Mood::for_reply("hi", "A lollipop.", true), Mood::Happy);
+        assert_eq!(Mood::for_reply("joke", "Haha", false), Mood::Mad);
     }
 
     #[test]
