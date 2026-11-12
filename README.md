@@ -26,6 +26,12 @@ Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to
 
 ## Use
 
+- **Chat context.** Beside the model under the prompt, choose **Full chat** (up to 12
+  recent complete turns within 32 KiB), **Last 3 turns**, or **Only this message**.
+  The choice saves immediately and applies to the next send or retry; the system message
+  and custom instructions always stay.
+- **Custom instructions.** On the Model page, tell Bloop about yourself or how to reply,
+  then Save. Up to 2048 bytes are sent with every message, across all model profiles.
 - **Sliver → pill → panel.** At rest bloop is a 120 × 5 px sliver at the top centre of the
   screen. Rest the mouse on it to pop out the pill, then click the pill or press
   **Ctrl+Alt+B** (configurable) to open the chat. Click anywhere else to close it. Escape stops
@@ -38,11 +44,13 @@ Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to
 - **Copy, Retry, Edit.** Every reply has **Copy**; the last one also has **Retry** (ask
   again) and **Edit** (fix your message and resend; Escape cancels). Both replace the last
   exchange rather than adding to it.
+- **Earlier prompts.** With the prompt empty, **Up** brings back this chat's last message
+  and earlier ones; **Down** steps forward and clears it again.
 - **Ask about your clipboard.** Copy some text (an error message, a paragraph), press
   **Ctrl+Alt+Shift+A** (configurable, or off) and type your question. The notch shows the
   attached text and where it will be sent before you send it. **Paste clipboard** under the
   prompt does the same.
-- **Chats.** **New chat** starts over and keeps the old one. **All chats** opens the Chats
+- **Chats.** **New chat** (or **Ctrl+N** in the notch) starts over and keeps the old one. **All chats** opens the Chats
   page in the app window: search, open in the notch, rename, export to Markdown, or delete.
 - **Model profiles.** Save extra providers or models as named profiles on the Model page
   (for example a local model and a cloud one) and switch from the menu under the prompt.
@@ -54,7 +62,10 @@ Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to
   endpoint, key and model without sending a chat.
 - **Bloop replies in person.** A little Bloop sits beside each reply: it thinks while the model
   works, mouths along as the text types out, then grins, cracks up at a joke, or gets grumpy
-  when a reply fails or you stop it. Older replies doze off. With reduced motion the text
+  when a reply fails or you stop it. Older replies doze off. Click Bloop to make it
+  giggle. **Settings → Appearance → Bloop** dresses it up: a hat (top hat, beanie, cap,
+  crown, party or wizard), shades, glasses or a monocle, a bow tie, scarf, robe or cape, and
+  a body colour. **Surprise me** picks a random outfit. With reduced motion the text
   appears at once.
 - **App window.** Setup and settings live in a normal 900 × 620 window with Home, Appearance,
   Model, Shortcut & startup and About pages. First launch walks you through setup; after that,
@@ -102,8 +113,9 @@ With a local model bloop works fully offline. ChatGPT, Claude Code and Codex nee
 - No analytics or telemetry. If you select ChatGPT, Bloop sends your prompt and recent chat
   context to OpenAI and protects the account session with Windows DPAPI. Other chat content
   goes to the model you configured. You can turn off the GitHub update check in Settings.
-- Prompts are limited to 8 KiB and replies to 128 KiB. Context keeps up to 12 recent complete
-  turns within 32 KiB; interrupted replies stay visible but aren't sent back to the model.
+- Prompts are limited to 8 KiB and replies to 128 KiB. Full chat keeps up to 12 recent complete
+  turns within 32 KiB; the context selector can reduce this to three turns or no history.
+  Interrupted replies stay visible but aren't sent back to the model.
 
 ## Build from source
 

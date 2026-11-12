@@ -18,8 +18,8 @@ use crate::{
 use bloop::{
     chatgpt::{self, AccountStatus},
     config::{
-        Accent, Config, Destination, HOVER_DELAYS_MS, NotchPosition, NotchWidth, Provider,
-        ReduceMotion, ThemeChoice,
+        Accent, Config, ContextMode, Destination, HOVER_DELAYS_MS, Look, NotchPosition, NotchWidth,
+        Provider, ReduceMotion, ThemeChoice,
     },
     diagnose,
     launch::{Launch, Startup, startup},
@@ -36,7 +36,7 @@ use iced::{
     futures::SinkExt,
     widget::{
         self, Space, button, canvas, column, container, pick_list, row, scrollable, stack, text,
-        text_input,
+        text_editor, text_input,
     },
     window,
 };
@@ -141,6 +141,7 @@ pub enum Message {
     Provider(Provider),
     Endpoint(String),
     Model(String),
+    Instructions(text_editor::Action),
     ChatGptLoaded(Result<AccountStatus, String>),
     ChatGptSignIn(bool),
     ChatGptCancel,
@@ -182,6 +183,10 @@ pub enum Message {
     Quit,
     QuitWithoutSaving,
     Escape(window::Id),
+    /// Up (true) or Down in the notch: step through this chat's earlier prompts.
+    Recall(window::Id, bool),
+    /// Ctrl+N in the notch.
+    NewChatKey(window::Id),
     OnboardNext,
     OnboardBack,
     OnboardSkip,
@@ -189,6 +194,8 @@ pub enum Message {
     Detected(Vec<Choice>),
     PickChoice(Choice),
     ApiKey(String),
+    PasteKey,
+    KeyPasted(Provider, String, ProfileEdit, Option<String>),
     RemoveKey,
     SetLight(bool),
     SetAutostart(bool),
@@ -198,12 +205,19 @@ pub enum Message {
     /// Show a dashboard page in the app window.
     ShowPage(AppPage),
     SetTheme(ThemeChoice),
+    SetContext(ContextMode),
     SetAccent(Accent),
     SetFeel(Feel),
     SetReduceMotion(ReduceMotion),
     SetNotchWidth(NotchWidth),
     SetNotchPosition(NotchPosition),
     SetMascot(bool),
+    /// Dress the mascot (Appearance page); applies and saves at once.
+    SetLook(Look),
+    /// A random hat, glasses, outfit and colour.
+    ShuffleLook,
+    /// A click on Bloop: a little giggle.
+    PokeMascot,
     SetHoverDelay(u16),
     /// Coarse clock for the update schedule.
     UpdateTick(Instant),
@@ -231,6 +245,7 @@ pub enum UpdateState {
 pub struct Island {
     config: Config,
     draft_config: Config,
+    instructions_editor: text_editor::Content,
     turns: Vec<Turn>,
     /// Parsed assistant replies, one per turn (see `sync_replies`).
     replies: Vec<rich::Reply>,
@@ -244,6 +259,8 @@ pub struct Island {
     input: String,
     /// The input holds the last prompt for Edit & resend.
     editing: bool,
+    /// The input holds the prompt of this turn, recalled with Up; typing clears it.
+    recall: Option<usize>,
     status: String,
     desktop_warning: String,
     storage_warning: String,
@@ -353,6 +370,7 @@ impl Island {
         let state = Self {
             config: Config::default(),
             draft_config: Config::default(),
+            instructions_editor: text_editor::Content::new(),
             turns: Vec::new(),
             replies: Vec::new(),
             reveal: None,
@@ -360,6 +378,7 @@ impl Island {
             copied: None,
             input: String::new(),
             editing: false,
+            recall: None,
             status: String::new(),
             desktop_warning: String::new(),
             storage_warning: String::new(),
@@ -505,6 +524,28 @@ impl Island {
         Mood::Idle
     }
 
+    /// Up fills an empty prompt with this chat's last prompt, then earlier ones; Down walks
+    /// back and finally clears it. Only while nothing else uses the prompt. True if it changed.
+    fn recall(&mut self, up: bool) -> bool {
+        let idle =
+            self.is_open() && self.request.is_none() && !self.editing && self.attachment.is_none();
+        let current = self.recall.filter(|&i| i < self.turns.len());
+        if !idle || (current.is_none() && (!up || !self.input.is_empty())) {
+            return false;
+        }
+        let next = match (current, up) {
+            (None, _) => self.turns.len().checked_sub(1),
+            (Some(i), true) => Some(i.saturating_sub(1)),
+            (Some(i), false) => Some(i + 1).filter(|&n| n < self.turns.len()),
+        };
+        match next {
+            Some(i) => self.input = self.turns[i].user.clone(),
+            None => self.input.clear(),
+        }
+        self.recall = next;
+        true
+    }
+
     fn is_open(&self) -> bool {
         self.presence.state() == State::Open
     }
@@ -544,6 +585,7 @@ impl Island {
             body: t.foreground,
             face: t.background,
             blush: self.config.accent.rgb().map(|_| t.primary),
+            look: self.config.look,
         })
         .width(size)
         .height(size)
@@ -593,6 +635,26 @@ impl Island {
                     key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                     ..
                 }) if status == iced::event::Status::Ignored => Some(Message::Escape(id)),
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key:
+                        iced::keyboard::Key::Named(
+                            key @ (iced::keyboard::key::Named::ArrowUp
+                            | iced::keyboard::key::Named::ArrowDown),
+                        ),
+                    modifiers,
+                    ..
+                }) if status == iced::event::Status::Ignored && modifiers.is_empty() => Some(
+                    Message::Recall(id, key == iced::keyboard::key::Named::ArrowUp),
+                ),
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Character(c),
+                    modifiers,
+                    ..
+                }) if c.as_str().eq_ignore_ascii_case("n")
+                    && modifiers == iced::keyboard::Modifiers::COMMAND =>
+                {
+                    Some(Message::NewChatKey(id))
+                }
                 iced::Event::Mouse(iced::mouse::Event::CursorEntered) => {
                     Some(Message::Cursor(id, true))
                 }
@@ -674,11 +736,14 @@ impl Island {
                     Ok(loaded) => {
                         self.config = loaded.config.clone();
                         self.draft_config = loaded.config;
+                        self.instructions_editor =
+                            text_editor::Content::with_text(&self.draft_config.instructions);
                         self.chats = loaded.chats;
                         match loaded.current {
                             Some((chat, turns)) => {
                                 self.chat = chat;
                                 self.turns = turns;
+                                self.recall = None;
                             }
                             None => {
                                 self.chat.id = model::new_chat_id(0);
@@ -810,6 +875,12 @@ impl Island {
             Message::Input(value) => {
                 if value.len() <= MAX_PROMPT {
                     self.input = value;
+                    self.recall = None;
+                }
+            }
+            Message::Recall(id, up) => {
+                if self.window == Some(id) && self.recall(up) {
+                    return widget::operation::move_cursor_to_end("prompt");
                 }
             }
             Message::Suggest(prompt) => {
@@ -1042,6 +1113,13 @@ impl Island {
             Message::ChatGptSignIn(_) | Message::ChatGptSignOut | Message::ChatGptRefreshModels => {
             }
             Message::Shortcut(value) => self.draft_config.shortcut = value,
+            Message::Instructions(action) => {
+                let edited = action.is_edit();
+                self.instructions_editor.perform(action);
+                if edited {
+                    self.draft_config.instructions = self.instructions_editor.text();
+                }
+            }
             Message::SaveSettings => {
                 if self.loading {
                     return Task::none();
@@ -1093,6 +1171,11 @@ impl Island {
                 self.draft_config.theme = self.config.theme;
                 self.react(Mood::Happy, 0.9);
                 return self.persist();
+            }
+            Message::NewChatKey(id) => {
+                if self.window == Some(id) && self.is_open() && !self.turns.is_empty() {
+                    return self.update(Message::NewChat);
+                }
             }
             Message::NewChat => {
                 if self.request.is_none() && !self.loading {
@@ -1244,6 +1327,26 @@ impl Island {
             }
             Message::PickChoice(choice) => self.apply_choice(&choice),
             Message::ApiKey(value) => self.key_draft = value,
+            Message::PasteKey => {
+                let provider = self.draft_config.provider;
+                let endpoint = self.draft_config.endpoint.clone();
+                let profile = self.profile_edit;
+                return iced::clipboard::read().map(move |text| {
+                    Message::KeyPasted(provider, endpoint.clone(), profile, text)
+                });
+            }
+            Message::KeyPasted(provider, endpoint, profile, value) => {
+                // A delayed read must not paste a server's key into another profile.
+                if provider == self.draft_config.provider
+                    && endpoint == self.draft_config.endpoint
+                    && profile == self.profile_edit
+                    && matches!(provider, Provider::OpenAi | Provider::Unsloth)
+                    && self.key_status != KeySource::Environment
+                    && let Some(value) = value
+                {
+                    self.key_draft = value.trim().to_owned();
+                }
+            }
             Message::RemoveKey => {
                 if let Err(error) = secrets::set_api_key(&self.draft_config.endpoint, None) {
                     self.status = error;
@@ -1341,12 +1444,30 @@ impl Island {
             }
             Message::ShowPage(page) => self.page = page,
             Message::SetTheme(theme) => return self.apply_live(|c| c.theme = theme),
+            Message::SetContext(context) => return self.apply_live(|c| c.context = context),
             Message::SetAccent(accent) => return self.apply_live(|c| c.accent = accent),
             Message::SetFeel(feel) => return self.apply_live(|c| c.motion = feel),
             Message::SetReduceMotion(choice) => {
                 return self.apply_live(|c| c.reduce_motion = choice);
             }
             Message::SetMascot(on) => return self.apply_live(|c| c.mascot = on),
+            Message::SetLook(look) => {
+                self.react(Mood::Happy, 1.6);
+                return self.apply_live(move |c| c.look = look);
+            }
+            Message::ShuffleLook => {
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos() as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let look = self.config.look.shuffled(seed);
+                return self.update(Message::SetLook(look));
+            }
+            Message::PokeMascot => {
+                if self.request.is_none() {
+                    self.react(Mood::Laughing, 2.4);
+                }
+            }
             Message::SetHoverDelay(ms) => {
                 if !HOVER_DELAYS_MS.contains(&ms) {
                     return Task::none();
@@ -1388,6 +1509,7 @@ impl Island {
         let window = self.open_app_window();
         self.onboarding = Some(Onboarding::new());
         self.draft_config = self.config.clone();
+        self.instructions_editor = text_editor::Content::with_text(&self.draft_config.instructions);
         self.autostart = platform::autostart();
         self.autostart_error.clear();
         self.key_draft.clear();
@@ -1421,6 +1543,7 @@ impl Island {
         self.config.theme = theme;
         self.config.onboarded = true;
         self.draft_config = self.config.clone();
+        self.instructions_editor = text_editor::Content::with_text(&self.draft_config.instructions);
         self.status.clear();
         self.page = AppPage::Home;
         self.react(Mood::Happy, 1.2);
@@ -1492,6 +1615,7 @@ impl Island {
         };
         self.opening = None;
         self.turns.clear();
+        self.recall = None;
         self.replies.clear();
         self.finish_reveal();
         self.editing = false;
@@ -1530,6 +1654,7 @@ impl Island {
     /// Sends `prompt` as a new turn. With `replace_last`, the last turn is dropped first
     /// (Retry, Edit & resend), so it is neither shown twice nor sent back as context.
     fn send_prompt(&mut self, prompt: String, replace_last: bool) -> Task<Message> {
+        self.recall = None;
         let Some(config) = self.config.with_profile(self.chat.profile) else {
             self.status =
                 "This chat's model profile was deleted. Start a new chat to keep going.".into();
@@ -1581,7 +1706,12 @@ impl Island {
         if self.chat.title.is_empty() {
             self.chat.title = model::title_for(&prompt);
         }
-        let messages = model::context(&self.turns, &prompt);
+        let messages = model::context(
+            &self.turns,
+            &prompt,
+            &config.instructions,
+            config.context.max_turns(),
+        );
         self.turns.push(Turn {
             user: prompt,
             assistant: String::new(),
@@ -1661,7 +1791,20 @@ impl Island {
                         Message::ApiKey,
                     )
                     .secure(true);
-                let mut column = column![input].spacing(6);
+                let mut column = column![
+                    row![
+                        input,
+                        self.small_button(
+                            Icon::ClipboardPaste,
+                            "Paste key",
+                            "Paste key",
+                            Message::PasteKey,
+                        ),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                ]
+                .spacing(6);
                 if status == KeySource::None && self.legacy_key {
                     column = column.push(
                         row![
@@ -1714,7 +1857,7 @@ impl Island {
         }
         let chat = (!self.turns.is_empty()).then(|| (self.chat.clone(), self.turns.clone()));
         self.queue(jobs::Job::Save {
-            config: self.config.clone(),
+            config: Box::new(self.config.clone()),
             chat,
         })
     }
@@ -2225,8 +2368,12 @@ impl Island {
     fn panel_content(&self) -> Element<'_, Message> {
         let t = self.tokens();
         let status = self.presence.message().unwrap_or(self.status_line());
+        let poke = button(self.mascot(36.0))
+            .padding(0)
+            .style(style::btn(t, Variant::Bare))
+            .on_press(Message::PokeMascot);
         let header = row![
-            self.mascot(30.0),
+            poke,
             column![
                 text("bloop").size(15).font(MEDIUM),
                 text(status).size(12).color(t.muted_foreground),
@@ -2363,8 +2510,13 @@ impl Island {
                 .on_press(Message::Suggest(prompt))
                 .style(style::btn(t, Variant::Outline))
             };
+            let greeter = button(self.mascot(72.0))
+                .padding(0)
+                .style(style::btn(t, Variant::Bare))
+                .on_press(Message::PokeMascot);
             history = history
-                .push(Space::new().height(24))
+                .push(Space::new().height(8))
+                .push(greeter)
                 .push(text("How can I help?").size(26).font(MEDIUM))
                 .push(
                     text("Ask anything. bloop talks to the model you choose, right here in your notch.")
@@ -2421,7 +2573,7 @@ impl Island {
             let reply: Option<Element<'_, Message>> = match self.replies.get(index) {
                 // Bloop's face (or, without the mascot, "is thinking…") says enough.
                 _ if shown.is_empty() => None,
-                Some(reply) => Some(reply.view(t, self.copied.as_deref())),
+                Some(reply) => Some(reply.view(t, self.copied.as_deref(), self.icons_ready)),
                 None => Some(text(shown).size(14).into()),
             };
             let mut entry = column![label].spacing(4);
@@ -2519,7 +2671,7 @@ impl Island {
                 }),
         );
         let idle = self.request.is_none() && !self.loading;
-        let mut footer = row![self.model_switcher(), Space::new().width(Length::Fill)]
+        let mut footer = row![self.model_switcher(), self.context_selector()]
             .spacing(2)
             .align_y(Alignment::Center);
         if self.attachment.is_none() {
@@ -2540,31 +2692,60 @@ impl Island {
             footer = footer.push(self.small_button(
                 Icon::MessageSquarePlus,
                 "New chat",
-                "New chat",
+                "New chat (Ctrl+N)",
                 Message::NewChat,
             ));
         }
-        body.push(footer).into()
+        // Word fallbacks can need another line at the 480 px panel width.
+        body.push(footer.wrap()).into()
     }
 
     /// The chat's model under the prompt; a menu of profiles once any are saved.
     fn model_switcher(&self) -> Element<'_, Message> {
         let t = self.tokens();
         if self.config.profiles.is_empty() {
-            return container(text(self.badge_text()).size(11))
-                .padding([2, 8])
-                .style(style::badge(t))
-                .into();
+            return self.tip(
+                container(
+                    text(self.badge_text())
+                        .size(13)
+                        .wrapping(text::Wrapping::None),
+                )
+                .width(156)
+                .clip(true)
+                .padding([4, 10])
+                .style(style::badge(t)),
+                "Current model",
+            );
         }
         let options = self.profile_options();
         let selected = options.iter().find(|o| o.id == self.chat.profile).cloned();
-        pick_list(options, selected, |option| Message::PickProfile(option.id))
-            .placeholder("Profile removed")
-            .text_size(11)
-            .padding([2, 8])
+        container(
+            pick_list(options, selected, |option| Message::PickProfile(option.id))
+                .placeholder("Profile removed")
+                .text_size(13)
+                .padding([4, 10])
+                .width(156)
+                .style(style::select(t))
+                .menu_style(style::menu(t)),
+        )
+        .clip(true)
+        .into()
+    }
+
+    fn context_selector(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        self.tip(
+            pick_list(
+                ContextMode::ALL,
+                Some(self.config.context),
+                Message::SetContext,
+            )
+            .text_size(13)
+            .padding([4, 10])
             .style(style::select(t))
-            .menu_style(style::menu(t))
-            .into()
+            .menu_style(style::menu(t)),
+            "How much of this chat is sent",
+        )
     }
 
     /// The clipboard text waiting to go with the next prompt, and where it will go.
@@ -2683,8 +2864,8 @@ impl Island {
                 Some(self.draft_config.provider),
                 Message::Provider,
             )
-            .padding([8, 12])
-            .text_size(14)
+            .padding([10, 14])
+            .text_size(15)
             .width(Length::Fill)
             .style(style::select(t))
             .menu_style(style::menu(t)),
@@ -2736,10 +2917,13 @@ impl Island {
         };
         let mut actions = row![].spacing(8);
         if self.chatgpt_cancel.is_some() {
-            actions = actions.push(
-                self.button("Cancel", Variant::Outline)
-                    .on_press(Message::ChatGptCancel),
-            );
+            actions = actions.push(self.icon_action(
+                Icon::X,
+                "Cancel",
+                "Cancel ChatGPT sign-in",
+                Variant::Outline,
+                Some(Message::ChatGptCancel),
+            ));
         } else if self.chatgpt.signed_in {
             let label = if self.chatgpt.plan_enabled {
                 "Reconnect"
@@ -2804,8 +2988,8 @@ impl Island {
                 "Model",
                 row![
                     pick_list(models, selected, |model| Message::Model(model.slug))
-                        .padding([8, 12])
-                        .text_size(14)
+                        .padding([10, 14])
+                        .text_size(15)
                         .width(Length::Fill)
                         .style(style::select(t))
                         .menu_style(style::menu(t)),
@@ -2854,6 +3038,81 @@ mod tests {
         app.loading = false;
         app.storage_disabled = true;
         app
+    }
+
+    #[test]
+    fn context_changes_apply_and_queue_a_save_without_saving_model_edits() {
+        let mut app = ready();
+        app.storage_disabled = false;
+        app.db_path = Some(PathBuf::from("unused-context-test.sqlite3"));
+        app.saving = true;
+        app.draft_config.model = "unsaved-model".into();
+        for mode in ContextMode::ALL {
+            let _ = app.update(Message::SetContext(mode));
+            assert_eq!(app.config.context, mode);
+            assert_eq!(app.draft_config.context, mode);
+            assert_eq!(app.draft_config.model, "unsaved-model");
+            assert_eq!(app.settings_to_save().unwrap().context, mode);
+            assert!(
+                matches!(app.jobs.back(), Some(jobs::Job::Save { config, .. })
+                if config.context == mode && config.model != "unsaved-model")
+            );
+        }
+    }
+
+    #[test]
+    fn pasted_key_fills_only_the_matching_server_and_profile() {
+        let mut app = ready();
+        app.draft_config.provider = Provider::OpenAi;
+        app.key_status = KeySource::None;
+        let endpoint = app.draft_config.endpoint.clone();
+        let pasted = |provider, endpoint, profile, value: Option<&str>| {
+            Message::KeyPasted(provider, endpoint, profile, value.map(str::to_owned))
+        };
+        let _ = app.update(pasted(
+            Provider::OpenAi,
+            endpoint.clone(),
+            ProfileEdit::Default,
+            Some(" sk-test\r\n"),
+        ));
+        assert_eq!(app.key_draft, "sk-test");
+        for message in [
+            pasted(
+                Provider::Unsloth,
+                endpoint.clone(),
+                ProfileEdit::Default,
+                Some("wrong-provider"),
+            ),
+            pasted(
+                Provider::OpenAi,
+                "https://other.example".into(),
+                ProfileEdit::Default,
+                Some("wrong-server"),
+            ),
+            pasted(
+                Provider::OpenAi,
+                endpoint.clone(),
+                ProfileEdit::Existing(1),
+                Some("wrong-profile"),
+            ),
+            pasted(
+                Provider::OpenAi,
+                endpoint.clone(),
+                ProfileEdit::Default,
+                None,
+            ),
+        ] {
+            let _ = app.update(message);
+            assert_eq!(app.key_draft, "sk-test");
+        }
+        app.key_status = KeySource::Environment;
+        let _ = app.update(pasted(
+            Provider::OpenAi,
+            endpoint,
+            ProfileEdit::Default,
+            Some("ignored"),
+        ));
+        assert_eq!(app.key_draft, "sk-test");
     }
 
     #[test]
@@ -3060,6 +3319,73 @@ mod tests {
         assert!(app.presence.message().is_some());
         let (w, h) = (app.spring.w.target, app.spring.h.target);
         assert_eq!(Size::new(w, h), app.size_for(Shape::Compact));
+    }
+
+    #[test]
+    fn up_and_down_recall_this_chats_prompts() {
+        let mut app = ready();
+        let _ = app.update(Message::Toggle);
+        let id = app.window.unwrap();
+        for prompt in ["first", "second"] {
+            app.turns.push(Turn {
+                user: prompt.into(),
+                assistant: "ok".into(),
+                complete: true,
+            });
+        }
+        let _ = app.update(Message::Recall(id, true));
+        assert_eq!(app.input, "second");
+        let _ = app.update(Message::Recall(id, true));
+        assert_eq!(app.input, "first");
+        // The oldest prompt stays put.
+        let _ = app.update(Message::Recall(id, true));
+        assert_eq!(app.input, "first");
+        let _ = app.update(Message::Recall(id, false));
+        assert_eq!(app.input, "second");
+        let _ = app.update(Message::Recall(id, false));
+        assert_eq!(app.input, "");
+        // Down on an empty prompt and Up on a typed one do nothing.
+        let _ = app.update(Message::Recall(id, false));
+        assert_eq!(app.input, "");
+        let _ = app.update(Message::Input("draft".into()));
+        let _ = app.update(Message::Recall(id, true));
+        assert_eq!(app.input, "draft");
+    }
+
+    #[test]
+    fn ctrl_n_starts_a_new_chat_only_in_the_open_notch() {
+        let mut app = ready();
+        let notch = app.window.unwrap();
+        app.turns.push(Turn {
+            user: "hi".into(),
+            assistant: "ok".into(),
+            complete: true,
+        });
+        // Closed notch: nothing happens.
+        let _ = app.update(Message::NewChatKey(notch));
+        assert_eq!(app.turns.len(), 1);
+        let _ = app.update(Message::Toggle);
+        // Another window (the app window): nothing happens.
+        let _ = app.update(Message::NewChatKey(window::Id::unique()));
+        assert_eq!(app.turns.len(), 1);
+        let _ = app.update(Message::NewChatKey(notch));
+        assert!(app.turns.is_empty());
+    }
+
+    #[test]
+    fn dressing_bloop_applies_at_once_and_poking_makes_it_giggle() {
+        let mut app = ready();
+        let look = Look {
+            hat: bloop::config::Hat::TopHat,
+            ..Look::default()
+        };
+        let _ = app.update(Message::SetLook(look));
+        assert_eq!(app.config.look, look);
+        assert_eq!(app.draft_config.look, look);
+        let _ = app.update(Message::ShuffleLook);
+        assert_ne!(app.config.look, look);
+        let _ = app.update(Message::PokeMascot);
+        assert_eq!(app.mood(), Mood::Laughing);
     }
 
     #[test]
@@ -3552,6 +3878,75 @@ mod tests {
         );
         let _ = app.update(Message::JobDone(jobs::Done::Saved(Ok(()))));
         assert!(!app.install_after_save, "the update was attempted");
+    }
+
+    #[test]
+    fn custom_instructions_save_globally_and_trim() {
+        let mut app = ready();
+        let cloud = with_cloud_profile(&mut app);
+        let _ = app.update(Message::Instructions(text_editor::Action::Edit(
+            text_editor::Edit::Paste(std::sync::Arc::new("  I write Rust.\nBe brief.  ".into())),
+        )));
+        let _ = app.update(Message::EditProfile(cloud));
+        assert!(app.config.instructions.is_empty(), "edits wait for Save");
+        let _ = app.update(Message::SaveSettings);
+        assert_eq!(app.config.instructions, "I write Rust.\nBe brief.");
+        assert_eq!(
+            app.config.with_profile(0).unwrap().instructions,
+            app.config.with_profile(cloud).unwrap().instructions
+        );
+        assert_eq!(app.draft_config.instructions, app.config.instructions);
+        assert_eq!(app.instructions_editor.text(), app.config.instructions);
+        let _ = app.update(Message::Instructions(text_editor::Action::SelectAll));
+        let _ = app.update(Message::Instructions(text_editor::Action::Edit(
+            text_editor::Edit::Backspace,
+        )));
+        let _ = app.update(Message::SaveSettings);
+        assert!(
+            app.config.instructions.is_empty(),
+            "instructions can be cleared"
+        );
+    }
+
+    #[test]
+    fn custom_instructions_over_limit_leave_saved_settings_alone() {
+        let mut app = ready();
+        let _ = app.update(Message::Instructions(text_editor::Action::Edit(
+            text_editor::Edit::Paste(std::sync::Arc::new("é".repeat(1025))),
+        )));
+        let _ = app.update(Message::SaveSettings);
+        assert!(app.config.instructions.is_empty());
+        assert!(app.status.contains("2048 bytes"));
+        assert_eq!(
+            app.draft_config.instructions.len(),
+            2050,
+            "keep the draft for correction"
+        );
+    }
+
+    #[test]
+    fn custom_instructions_editor_loads_and_reopening_discards_unsaved_edits() {
+        let mut app = ready();
+        let config = Config {
+            instructions: "I write Rust.\nBe brief.".into(),
+            onboarded: true,
+            ..Config::default()
+        };
+        let _ = app.update(Message::Loaded(Ok(storage::Loaded {
+            config,
+            chats: Vec::new(),
+            current: None,
+        })));
+        assert_eq!(app.instructions_editor.text(), "I write Rust.\nBe brief.");
+        let _ = app.update(Message::Instructions(text_editor::Action::SelectAll));
+        let _ = app.update(Message::Instructions(text_editor::Action::Edit(
+            text_editor::Edit::Insert('x'),
+        )));
+        assert_eq!(app.draft_config.instructions, "x");
+        app.app_window = None;
+        let _ = app.update(Message::OpenWindow);
+        assert_eq!(app.instructions_editor.text(), "I write Rust.\nBe brief.");
+        assert_eq!(app.draft_config.instructions, app.config.instructions);
     }
 
     #[test]

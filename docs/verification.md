@@ -399,3 +399,76 @@ installs after the save that follows it (`a_deferred_update_survives_a_reply`; i
 corrected to look for the save in flight rather than in the queue). `cargo fmt --check`,
 clippy and `cargo test` pass (93 library, 132 app, 8 CLI, 8 diagnose, 10 transport, 9 update).
 Not checked in a running bloop.
+
+## Prompt recall with Up and Down (2026-11-12)
+
+`cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test --bin bloop`
+(123 passed) are clean. `up_and_down_recall_this_chats_prompts` checks that Up on an empty
+prompt brings back the newest prompt and then older ones, stops at the oldest, Down walks back
+and clears, and Up does nothing on a typed draft. Recall is off while a reply streams, while
+editing, and with clipboard text attached; it only reacts to unmodified arrows the prompt
+didn't handle.
+
+Not verified: pressing the keys in a running bloop (another copy held the single-instance
+mutex), and the caret landing at the end of the recalled text.
+
+Ctrl+N in the notch starts a new chat (124 tests pass). `ctrl_n_starts_a_new_chat_only_in_the_open_notch`
+checks it does nothing while the notch is closed or for another window. Not pressed in a
+running bloop.
+
+## Custom instructions (2026-11-12)
+
+Passed: `cargo fmt`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+and `cargo test` (260 passed, four existing live CLI/network tests ignored). The suite
+was rerun after boxing save-job config snapshots. The initial sandbox run could not
+access Credential Manager; the complete suite passed with normal Windows access.
+
+Covered: old config defaults, trimmed multiline round-trip, UTF-8 byte limits,
+unchanged empty system text, appended instructions and exact context-budget boundary;
+Ollama/OpenAI HTTP payloads via loopback fixtures, ChatGPT developer payload and CLI
+flattening; editor loading, edits, Save/clear, oversized draft rejection, shared
+instructions across profiles and draft reset on reopening.
+
+Not checked: appearance or interaction in a running app, or instruction-following by
+live models. No bloop app was launched; the installed copy was left running.
+
+## Notch context, icon buttons and dropdowns (2026-11-12)
+
+Passed: `cargo fmt`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+and `cargo test` (266 passed, four existing live CLI/network tests ignored). Builds used
+the worktree's default `target/debug`; `CARGO_TARGET_DIR` was not set. The initial sandbox
+run failed `secrets::tests::blank_key_removes` and `secrets::tests::credential_round_trip`
+because Credential Manager had no logon session; both passed with normal Windows access.
+
+Covered: all three context modes select the newest complete pairs in chronological
+order (12, 3, or none), skip interrupted turns, keep the system message/instructions and
+current prompt, and respect the 32 KiB budget. Old config defaults and all mode round-trips
+pass. UI state tests check immediate application and queued saves without saving pending
+Model edits, and key paste trimming, empty clipboard, provider/endpoint/profile mismatches
+and environment-key handling. The existing subset-font test verifies all reused icons.
+
+Reviewed Iced widget 0.14.2 source: pick-list padding flows to the overlay menu, while
+menu style has no item-padding field. Reviewed all NotchWidth panel sizes: S is 480 px
+(424 px inside panel padding), M 540 px and L 600 px. The model control is bounded and
+clipped to 156 px; wrapping the footer keeps its controls within the available width,
+including word fallbacks. Settings/setup dropdowns share the larger item padding.
+
+UI not viewed in a running app. No bloop executable was launched. Actual clipboard
+access, tooltip placement, copied-state appearance and dropdown/footer rendering at
+different Windows scales remain unverified. The mascot implementation and Appearance
+mascot toggle were left untouched. No dependencies or font glyphs were added.
+
+## Mascot outfits (2026-11-12)
+
+`cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass (101 library,
+128 app, and the CLI, diagnose, transport and update suites). New tests: a `Look`
+round-trips, old configs load the default and a partial one fills in the rest; **Surprise
+me** never repeats the current outfit (500 seeds); picking a look applies and saves at once;
+clicking Bloop makes it laugh.
+
+Checked by eye only in an SVG mock that copies the drawing's coordinates (idle face, all hats
+but party and wizard, all eyewear, all outfits): everything sits on the body and inside the
+canvas. Not checked: the real Iced drawing in a running bloop (another copy held the
+single-instance mutex), the party and wizard hats, other moods with accessories (a hop with a
+tall hat, sleepy z and mad mark beside a hat), and the Appearance page's layout at 900 px.
+

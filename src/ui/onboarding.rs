@@ -2,6 +2,7 @@
 
 use super::{Island, Message, field};
 use crate::{
+    icons::Icon,
     mascot::Notch,
     style::{self, MEDIUM, Tokens, Variant},
 };
@@ -185,14 +186,13 @@ impl Island {
                 let mut found = column![
                     row![
                         text("Found on this computer:").size(14).width(Length::Fill),
-                        self.button("Retry", Variant::Ghost)
-                            .on_press(Message::Detect),
+                        self.icon_action(Icon::RefreshCw, "Retry", "Detect models again", Variant::Ghost, Some(Message::Detect)),
                     ]
                     .align_y(Alignment::Center),
                     pick_list(choices.as_slice(), selected, Message::PickChoice)
                         .placeholder("Pick one")
-                        .padding([8, 12])
-                        .text_size(14)
+                        .padding([10, 14])
+                        .text_size(15)
                         .width(Length::Fill)
                         .style(style::select(t))
                         .menu_style(style::menu(t)),
@@ -220,8 +220,7 @@ impl Island {
                             .size(14)
                             .color(t.muted_foreground)
                             .width(Length::Fill),
-                        self.button("Retry", Variant::Outline)
-                            .on_press(Message::Detect),
+                        self.icon_action(Icon::RefreshCw, "Retry", "Detect models again", Variant::Outline, Some(Message::Detect)),
                     ]
                     .spacing(10)
                     .align_y(Alignment::Center),

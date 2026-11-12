@@ -269,3 +269,54 @@ no longer leaves the user with no bloop at all.
 shortcuts and Run value). `examples/update_dry_run.rs` uses it to run a real
 install → check → download → verify → setup → relaunch cycle without touching an installed
 bloop. A normal build compiles the script exactly as before.
+
+## Custom instructions (2026-11-12)
+
+Custom instructions are one global setting, edited on the Model page and saved with
+the existing settings flow. Outer whitespace is trimmed; the text is capped at 2048
+UTF-8 bytes to keep this per-message overhead small. Old configs default to empty.
+The context builder appends a labelled `<instructions>` block after the unchanged
+fixed system message, explicitly describing it as preferences, not permission to use
+tools. Keeping it in the system message gives every provider the same context:
+ChatGPT maps it to developer context, and CLIs retain their existing flattening of
+the system message into a user-labelled turn. The entire system message, including
+the block and its delimiters, counts against the 32 KiB context budget; old whole
+pairs are dropped first, and the current prompt is always retained.
+Save jobs box their config snapshot to keep the queue's enum small as settings grow.
+
+## Context selector and dropdowns (2026-11-12)
+
+`Config.context` stores a global `ContextMode`: Full (the default for old configs),
+Last3, or OnlyMessage. Changing the notch selector applies and persists immediately,
+including the settings draft, without saving pending Model page edits. Each send or
+retry snapshots its turn limit (12, 3, or 0) into `model::context`; existing requests
+are unaffected. The builder still keeps only complete whole pairs, newest first within
+the 32 KiB budget, then emits them in chronological order. The system message, custom
+instructions and current prompt remain in every mode. History stays stored and visible.
+
+Notch dropdowns use 13 px text and [4, 10] padding; settings/setup use 15 px and [10, 14].
+Iced widget 0.14.2 forwards pick-list padding to its overlay menu, so these changes also
+enlarge menu items; `style::menu` controls colours/borders and has no item-padding field.
+The smallest open panel is 480 px with 424 px inside its horizontal padding. The model
+control is bounded to 156 px; the context selector keeps its full labels. The footer wraps
+when controls need more room, including word fallbacks while the icon font is unavailable.
+
+Code-block copy uses the existing Copy/Check glyphs and a tooltip, falling back to words.
+Paste key reads the clipboard only on click and fills the draft without saving a secret;
+late results for a different provider, endpoint or edited profile are ignored. Additional
+retry, cancel, update-restart and setup-restart actions reuse existing glyphs and word
+fallbacks. No dependency, font change, background read or network connection was added.
+
+## Mascot outfits (2026-11-12)
+
+Bloop's hat, eyewear, outfit and body colour are a `Look` saved with the settings
+(`config.rs`, so the library still has no GUI code; unknown or missing parts load as the
+default). `mascot.rs` draws them on the same 24-unit grid as the body. A hat would poke out
+of the canvas, so each hat adds headroom (4–8 units) above the grid and Bloop is drawn a
+little smaller in the same square; the antenna is hidden under any hat. A tinted coat uses a
+fixed dark face so it reads in both themes, and accessory colours are fixed for the same
+reason. The outfit is drawn under the face so a laughing mouth stays visible, the cape before
+the body so it hangs behind. To make Bloop more present, the open notch's header shows it at
+36 px (was 30), an empty chat greets you with a 72 px Bloop, and clicking it makes it laugh.
+Appearance changes apply and save at once, like the rest of that page.
+

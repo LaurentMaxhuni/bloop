@@ -566,9 +566,18 @@ mod tests {
 
     #[test]
     fn chatgpt_uses_stateless_responses_with_developer_context() {
-        let body = responses_body("chosen-model", &crate::model::context(&[], "Hello"));
+        let body = responses_body(
+            "chosen-model",
+            &crate::model::context(&[], "Hello", "Be brief.", 12),
+        );
         assert_eq!(body["model"], "chosen-model");
         assert_eq!(body["input"][0]["role"], "developer");
+        assert!(
+            body["input"][0]["content"]
+                .as_str()
+                .unwrap()
+                .ends_with("<instructions>\nBe brief.\n</instructions>")
+        );
         assert_eq!(body["input"][1], json!({"role":"user", "content":"Hello"}));
         assert_eq!(body["store"], false);
         assert_eq!(body["stream"], true);

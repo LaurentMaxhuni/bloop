@@ -9,15 +9,16 @@ use crate::{
 };
 use bloop::{
     config::{
-        Accent, Config, HOVER_DELAYS_MS, MAIN_PROFILE, MAX_PROFILES, NotchPosition, NotchWidth,
-        Profile, ReduceMotion, ThemeChoice,
+        Accent, Config, HOVER_DELAYS_MS, MAIN_PROFILE, MAX_INSTRUCTIONS, MAX_PROFILES,
+        NotchPosition, NotchWidth, Profile, ReduceMotion, ThemeChoice,
     },
+    config::{Coat, Eyewear, Hat, Look, Outfit},
     motion::Feel,
     update::Version,
 };
 use iced::{
     Alignment, Element, Length, Task,
-    widget::{Space, button, column, container, row, scrollable, text, toggler},
+    widget::{Space, button, column, container, row, scrollable, text, text_editor, toggler},
 };
 
 /// Sidebar width and the page content's maximum width, in logical pixels.
@@ -212,9 +213,13 @@ impl Island {
     fn home_page(&self) -> Element<'_, Message> {
         let t = self.tokens();
         let install = matches!(self.update_state, UpdateState::Ready(..)).then(|| {
-            self.button("Restart to update", Variant::Primary)
-                .on_press_maybe(self.request.is_none().then_some(Message::InstallUpdate))
-                .into()
+            self.icon_action(
+                Icon::RefreshCw,
+                "Restart to update",
+                "Restart to update",
+                Variant::Primary,
+                self.request.is_none().then_some(Message::InstallUpdate),
+            )
         });
         let update = self.update_status();
         let version = if update.is_empty() {
@@ -308,6 +313,7 @@ impl Island {
     fn appearance_page(&self) -> Element<'_, Message> {
         column![
             self.section(Icon::Palette, "Look", self.look_section()),
+            self.section(Icon::Star, "Bloop", self.bloop_section()),
             self.section(Icon::Sparkles, "Motion", self.motion_section()),
             self.section(Icon::PanelTop, "Notch", self.notch_section()),
         ]
@@ -437,10 +443,79 @@ impl Island {
                     Message::SetHoverDelay,
                 ),
             ),
+        ]
+        .spacing(16)
+        .into()
+    }
+
+    /// Dress Bloop: a live preview, then hat, glasses, outfit and colour.
+    fn bloop_section(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let look = self.config.look;
+        let mood = self.mood();
+        let blink = self.blink_until.is_some_and(|until| self.now < until);
+        let preview = button(self.draw_mascot(mood, self.reaction_age(mood), blink, 96.0))
+            .padding(0)
+            .style(style::btn(t, Variant::Bare))
+            .on_press(Message::PokeMascot);
+        let controls = column![
+            field(
+                "Hat",
+                self.choices(
+                    Hat::ALL,
+                    look.hat,
+                    |h| h.label().into(),
+                    move |hat| { Message::SetLook(Look { hat, ..look }) }
+                ),
+            ),
+            field(
+                "Glasses",
+                self.choices(
+                    Eyewear::ALL,
+                    look.eyewear,
+                    |e| e.label().into(),
+                    move |eyewear| Message::SetLook(Look { eyewear, ..look }),
+                ),
+            ),
+            field(
+                "Outfit",
+                self.choices(
+                    Outfit::ALL,
+                    look.outfit,
+                    |o| o.label().into(),
+                    move |outfit| { Message::SetLook(Look { outfit, ..look }) }
+                ),
+            ),
+            field(
+                "Colour",
+                self.choices(
+                    Coat::ALL,
+                    look.coat,
+                    |c| c.label().into(),
+                    move |coat| { Message::SetLook(Look { coat, ..look }) }
+                ),
+            ),
+        ]
+        .spacing(16)
+        .width(Length::Fill);
+        let side = column![
+            container(preview)
+                .padding(12)
+                .style(style::card(t, t.background)),
+            self.button("Surprise me", Variant::Outline)
+                .on_press(Message::ShuffleLook),
+        ]
+        .spacing(10)
+        .align_x(Alignment::Center);
+        column![
+            row![side, controls].spacing(24),
             toggler(self.config.mascot)
-                .label("Show the mascot")
+                .label("Show Bloop in the notch")
                 .text_size(14)
                 .on_toggle(Message::SetMascot),
+            text("Click Bloop to make it giggle.")
+                .size(12)
+                .color(t.muted_foreground),
         ]
         .spacing(16)
         .into()
@@ -493,6 +568,33 @@ impl Island {
                 .size(12)
                 .color(t.muted_foreground),
             )
+            .push(field(
+                "Custom instructions",
+                column![
+                    text_editor(&self.instructions_editor)
+                        .on_action(Message::Instructions)
+                        .height(128)
+                        .padding(10)
+                        .size(14)
+                        .font(style::REGULAR)
+                        .style(style::editor(t)),
+                    row![
+                        text("Tell Bloop about yourself or how to reply. Sent with every message.")
+                            .size(12)
+                            .color(t.muted_foreground)
+                            .width(Length::Fill),
+                        text(format!("{} / {MAX_INSTRUCTIONS}", self.draft_config.instructions.len()))
+                            .size(12)
+                            .color(if self.draft_config.instructions.len() > MAX_INSTRUCTIONS {
+                                t.destructive
+                            } else {
+                                t.muted_foreground
+                            }),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(8),
+            ))
             .push(self.save_row())
             .into()
     }
@@ -744,6 +846,7 @@ impl Island {
     /// its place and the default model left alone. Checks everything first.
     pub(super) fn settings_to_save(&self) -> Result<Config, String> {
         let mut config = self.draft_config.clone();
+        config.instructions = config.instructions.trim().to_owned();
         config.profiles = self.config.profiles.clone();
         config.default_profile = self.config.default_profile;
         let id = match self.profile_edit {
@@ -803,6 +906,7 @@ impl Island {
             .config
             .with_profile(id)
             .unwrap_or_else(|| self.config.clone());
+        self.instructions_editor = text_editor::Content::with_text(&self.draft_config.instructions);
     }
 
     fn shortcut_page(&self) -> Element<'_, Message> {
@@ -852,10 +956,13 @@ impl Island {
         )]
         .spacing(8);
         if ready {
-            actions = actions.push(
-                self.button("Restart to update", Variant::Primary)
-                    .on_press_maybe(self.request.is_none().then_some(Message::InstallUpdate)),
-            );
+            actions = actions.push(self.icon_action(
+                Icon::RefreshCw,
+                "Restart to update",
+                "Restart to update",
+                Variant::Primary,
+                self.request.is_none().then_some(Message::InstallUpdate),
+            ));
         }
         let folder = self
             .db_path
@@ -890,8 +997,13 @@ impl Island {
             ),
             field(
                 "Setup",
-                self.button("Run setup again", Variant::Outline)
-                    .on_press(Message::ShowSetup),
+                self.icon_action(
+                    Icon::RotateCcw,
+                    "Run setup again",
+                    "Run setup again",
+                    Variant::Outline,
+                    Some(Message::ShowSetup),
+                ),
             ),
         ]
         .spacing(20);
