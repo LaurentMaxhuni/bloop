@@ -13,6 +13,9 @@
 
 - Rests as a thin sliver at the top centre of the screen; hovering shows a pill, clicking or pressing Ctrl+Alt+B (configurable) opens a chat panel. It hides during fullscreen apps and presentations.
 - Streams replies as they are written, formatted as Markdown, with syntax-highlighted code blocks (with a Copy button) and LaTeX math drawn as formulas.
+- Keeps saved chats (search, rename, export to Markdown), named model profiles, custom instructions sent with every message, and a choice of how much chat history is sent (full chat, last 3 turns, or only the new message).
+- Can attach the clipboard's text to a question (Ctrl+Alt+Shift+A); every reply has Copy, and the last one Retry and Edit.
+- Has an animated mascot, Bloop, that reacts to replies and can be dressed up with hats, glasses, outfits and colours.
 - Has an app window for setup and settings: theme, accent colour, motion, model, shortcut, start with Windows, updates.
 - Updates itself from GitHub Releases and checks each download against a SHA-256 checksum.
 
