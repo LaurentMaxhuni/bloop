@@ -38,6 +38,8 @@ Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to
 - **Copy, Retry, Edit.** Every reply has **Copy**; the last one also has **Retry** (ask
   again) and **Edit** (fix your message and resend; Escape cancels). Both replace the last
   exchange rather than adding to it.
+- **Earlier prompts.** With the prompt empty, **Up** brings back this chat's last message
+  and earlier ones; **Down** steps forward and clears it again.
 - **Ask about your clipboard.** Copy some text (an error message, a paragraph), press
   **Ctrl+Alt+Shift+A** (configurable, or off) and type your question. The notch shows the
   attached text and where it will be sent before you send it. **Paste clipboard** under the

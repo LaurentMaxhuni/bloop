@@ -179,6 +179,8 @@ pub enum Message {
     Quit,
     QuitWithoutSaving,
     Escape(window::Id),
+    /// Up (true) or Down in the notch: step through this chat's earlier prompts.
+    Recall(window::Id, bool),
     OnboardNext,
     OnboardBack,
     OnboardSkip,
@@ -241,6 +243,8 @@ pub struct Island {
     input: String,
     /// The input holds the last prompt for Edit & resend.
     editing: bool,
+    /// The input holds the prompt of this turn, recalled with Up; typing clears it.
+    recall: Option<usize>,
     status: String,
     desktop_warning: String,
     storage_warning: String,
@@ -352,6 +356,7 @@ impl Island {
             copied: None,
             input: String::new(),
             editing: false,
+            recall: None,
             status: String::new(),
             desktop_warning: String::new(),
             storage_warning: String::new(),
@@ -495,6 +500,28 @@ impl Island {
         Mood::Idle
     }
 
+    /// Up fills an empty prompt with this chat's last prompt, then earlier ones; Down walks
+    /// back and finally clears it. Only while nothing else uses the prompt. True if it changed.
+    fn recall(&mut self, up: bool) -> bool {
+        let idle =
+            self.is_open() && self.request.is_none() && !self.editing && self.attachment.is_none();
+        let current = self.recall.filter(|&i| i < self.turns.len());
+        if !idle || (current.is_none() && (!up || !self.input.is_empty())) {
+            return false;
+        }
+        let next = match (current, up) {
+            (None, _) => self.turns.len().checked_sub(1),
+            (Some(i), true) => Some(i.saturating_sub(1)),
+            (Some(i), false) => Some(i + 1).filter(|&n| n < self.turns.len()),
+        };
+        match next {
+            Some(i) => self.input = self.turns[i].user.clone(),
+            None => self.input.clear(),
+        }
+        self.recall = next;
+        true
+    }
+
     fn is_open(&self) -> bool {
         self.presence.state() == State::Open
     }
@@ -583,6 +610,17 @@ impl Island {
                     key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                     ..
                 }) if status == iced::event::Status::Ignored => Some(Message::Escape(id)),
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key:
+                        iced::keyboard::Key::Named(
+                            key @ (iced::keyboard::key::Named::ArrowUp
+                            | iced::keyboard::key::Named::ArrowDown),
+                        ),
+                    modifiers,
+                    ..
+                }) if status == iced::event::Status::Ignored && modifiers.is_empty() => Some(
+                    Message::Recall(id, key == iced::keyboard::key::Named::ArrowUp),
+                ),
                 iced::Event::Mouse(iced::mouse::Event::CursorEntered) => {
                     Some(Message::Cursor(id, true))
                 }
@@ -669,6 +707,7 @@ impl Island {
                             Some((chat, turns)) => {
                                 self.chat = chat;
                                 self.turns = turns;
+                                self.recall = None;
                             }
                             None => {
                                 self.chat.id = model::new_chat_id(0);
@@ -800,6 +839,12 @@ impl Island {
             Message::Input(value) => {
                 if value.len() <= MAX_PROMPT {
                     self.input = value;
+                    self.recall = None;
+                }
+            }
+            Message::Recall(id, up) => {
+                if self.window == Some(id) && self.recall(up) {
+                    return widget::operation::move_cursor_to_end("prompt");
                 }
             }
             Message::Suggest(prompt) => {
@@ -1477,6 +1522,7 @@ impl Island {
             ..Chat::default()
         };
         self.turns.clear();
+        self.recall = None;
         self.replies.clear();
         self.finish_reveal();
         self.editing = false;
@@ -1515,6 +1561,7 @@ impl Island {
     /// Sends `prompt` as a new turn. With `replace_last`, the last turn is dropped first
     /// (Retry, Edit & resend), so it is neither shown twice nor sent back as context.
     fn send_prompt(&mut self, prompt: String, replace_last: bool) -> Task<Message> {
+        self.recall = None;
         let Some(config) = self.config.with_profile(self.chat.profile) else {
             self.status =
                 "This chat's model profile was deleted. Start a new chat to keep going.".into();
@@ -3027,6 +3074,37 @@ mod tests {
         assert!(app.presence.message().is_some());
         let (w, h) = (app.spring.w.target, app.spring.h.target);
         assert_eq!(Size::new(w, h), app.size_for(Shape::Compact));
+    }
+
+    #[test]
+    fn up_and_down_recall_this_chats_prompts() {
+        let mut app = ready();
+        let _ = app.update(Message::Toggle);
+        let id = app.window.unwrap();
+        for prompt in ["first", "second"] {
+            app.turns.push(Turn {
+                user: prompt.into(),
+                assistant: "ok".into(),
+                complete: true,
+            });
+        }
+        let _ = app.update(Message::Recall(id, true));
+        assert_eq!(app.input, "second");
+        let _ = app.update(Message::Recall(id, true));
+        assert_eq!(app.input, "first");
+        // The oldest prompt stays put.
+        let _ = app.update(Message::Recall(id, true));
+        assert_eq!(app.input, "first");
+        let _ = app.update(Message::Recall(id, false));
+        assert_eq!(app.input, "second");
+        let _ = app.update(Message::Recall(id, false));
+        assert_eq!(app.input, "");
+        // Down on an empty prompt and Up on a typed one do nothing.
+        let _ = app.update(Message::Recall(id, false));
+        assert_eq!(app.input, "");
+        let _ = app.update(Message::Input("draft".into()));
+        let _ = app.update(Message::Recall(id, true));
+        assert_eq!(app.input, "draft");
     }
 
     #[test]

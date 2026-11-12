@@ -347,3 +347,15 @@ the one being edited open; `default_profile` round-trips and a dangling one load
 
 Not verified: the new icons, tooltips and profile rows weren't looked at in a running
 bloop, because a debug copy was running and a second one would only signal it.
+
+## Prompt recall with Up and Down (2026-11-12)
+
+`cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test --bin bloop`
+(123 passed) are clean. `up_and_down_recall_this_chats_prompts` checks that Up on an empty
+prompt brings back the newest prompt and then older ones, stops at the oldest, Down walks back
+and clears, and Up does nothing on a typed draft. Recall is off while a reply streams, while
+editing, and with clipboard text attached; it only reacts to unmodified arrows the prompt
+didn't handle.
+
+Not verified: pressing the keys in a running bloop (another copy held the single-instance
+mutex), and the caret landing at the end of the recalled text.
