@@ -1003,9 +1003,13 @@ fn run_command(exe: &std::path::Path) -> String {
     format!("\"{}\" --background", exe.display())
 }
 
-/// Whether an existing Run value must be rewritten (absent means autostart is off: leave it).
-fn needs_migration(current: Option<&str>, expected: &str) -> bool {
-    current.is_some_and(|value| value != expected)
+/// Whether an existing Run value must be rewritten: only this exe's own pre-`--background`
+/// entry (`"<exe>"`). Absent means autostart is off; a value naming another exe belongs to
+/// another copy (the installed one, when this is a dev build) and is left alone, or every
+/// copy launched once would take over sign-in and the installed copy would stop updating.
+fn needs_migration(current: Option<&str>, exe: &std::path::Path) -> bool {
+    let legacy = format!("\"{}\"", exe.display());
+    current.is_some_and(|value| value.trim().eq_ignore_ascii_case(&legacy))
 }
 
 /// Rewrites a Run value left by an older build (no `--background`) so sign-in starts quietly.
@@ -1019,7 +1023,7 @@ pub fn migrate_autostart() {
 #[cfg(windows)]
 fn migrate_run_value(key: &str) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    if needs_migration(run_value(key).as_deref(), &run_command(&exe)) {
+    if needs_migration(run_value(key).as_deref(), &exe) {
         set_run_value(key, true)?;
     }
     Ok(())
@@ -1168,14 +1172,24 @@ pub fn light_theme_system() -> bool {
 
 /// Starts a downloaded installer silently; it waits for bloop to quit, installs, and opens
 /// bloop again (`/RELAUNCH=1`). Previously chosen setup options are kept.
+///
+/// Setup must outlive bloop. If bloop runs inside a job that kills its processes when the job
+/// closes (some launchers and terminals do this), setup is started outside that job; a job
+/// that forbids breaking away gets setup as a normal child instead.
 pub fn launch_installer(path: &std::path::Path) -> Result<(), String> {
-    std::process::Command::new(path)
-        .args([
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            "/NORESTART",
-            "/RELAUNCH=1",
-        ])
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        if bloop::update::installer_command(path)
+            .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+    bloop::update::installer_command(path)
         .spawn()
         .map(drop)
         .map_err(|e| e.to_string())
@@ -1333,10 +1347,22 @@ mod tests {
 
     #[test]
     fn needs_migration_only_for_a_stale_existing_value() {
-        let expected = r#""C:\b.exe" --background"#;
-        assert!(!super::needs_migration(None, expected));
-        assert!(!super::needs_migration(Some(expected), expected));
-        assert!(super::needs_migration(Some(r#""C:\b.exe""#), expected));
+        let exe = std::path::Path::new(r"C:\b.exe");
+        let current = r#""C:\b.exe" --background"#;
+        assert!(!super::needs_migration(None, exe));
+        assert!(!super::needs_migration(Some(current), exe));
+        assert!(super::needs_migration(Some(r#""C:\b.exe""#), exe));
+        assert!(super::needs_migration(Some(r#""c:\B.exe""#), exe));
+    }
+
+    #[test]
+    fn migration_leaves_another_copys_autostart_alone() {
+        // A dev build must not take over the installed copy's sign-in entry, in either form.
+        let dev = std::path::Path::new(r"C:\src\bloop\target\debug\bloop.exe");
+        let installed = r#""C:\Users\u\AppData\Local\Programs\bloop\bloop.exe""#;
+        assert!(!super::needs_migration(Some(installed), dev));
+        let installed = r#""C:\Users\u\AppData\Local\Programs\bloop\bloop.exe" --background"#;
+        assert!(!super::needs_migration(Some(installed), dev));
     }
 
     #[test]

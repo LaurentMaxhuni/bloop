@@ -61,8 +61,10 @@ Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to
   the notch's settings icon or the tray's **Settings** bring it back. Closing it leaves bloop
   running; quit from the tray. The notch opens on the monitor you're working on when you use
   the shortcut.
-- **Updates.** bloop checks GitHub Releases 30 s after start and every 6 h (switchable), checks
-  the download's SHA-256 and offers "Update ready — click to restart".
+- **Updates.** bloop checks GitHub Releases 30 s after start and every 6 h (switchable); a
+  failed check is retried after 5 min, then less often. It checks the download's SHA-256 and
+  offers "Update ready — click to restart". Setup's log is `updates\install.log` in the data
+  folder.
 
 ## Models
 
@@ -146,6 +148,10 @@ Only one bloop runs at a time, so quit the installed copy before launching a dev
   `powershell -ExecutionPolicy Bypass -File installer\build.ps1`. It writes
   `dist\bloop-setup-<version>.exe` (version from `Cargo.toml`); `installer\make-art.ps1` redraws
   the icon and wizard art.
+- **Update dry run:** `cargo run --example update_dry_run` builds fixture installers from
+  `installer/bloop.iss /DFixture` (a separate app that never touches an installed bloop), then
+  checks, downloads, verifies, installs and relaunches against a local fake GitHub. It needs
+  Inno Setup 6.
 - **Update:** bump `version` in `Cargo.toml` and merge it to `main`. Then, on an up-to-date
   `main` with the GitHub CLI signed in, run
   `powershell -ExecutionPolicy Bypass -File installer\release.ps1 -Notes "What changed"`. It

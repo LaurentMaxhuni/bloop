@@ -23,6 +23,8 @@ pub enum Job {
     Delete(i64),
     /// Read a chat to show it in the notch.
     Load(i64),
+    /// Read a chat to export it.
+    Export(i64),
 }
 
 #[derive(Debug, Clone)]
@@ -30,12 +32,14 @@ pub enum Done {
     Saved(Result<(), String>),
     Renamed(Result<(), String>),
     Deleted(i64, Result<(), String>),
-    Loaded(Result<(Chat, Vec<Turn>), String>),
+    Loaded(i64, Result<(Chat, Vec<Turn>), String>),
+    ForExport(Result<(Chat, Vec<Turn>), String>),
 }
 
 impl Job {
-    fn saves_chat(&self, id: i64) -> bool {
-        matches!(self, Job::Save { chat: Some((chat, _)), .. } if chat.id == id)
+    /// Whether the job only touches chat `id`, so deleting that chat makes it pointless.
+    fn only_for_chat(&self, id: i64) -> bool {
+        matches!(self, Job::Rename(c, _) | Job::Load(c) | Job::Export(c) if *c == id)
     }
 
     fn run(self, path: &std::path::Path) -> Done {
@@ -47,14 +51,16 @@ impl Job {
             )),
             Job::Rename(id, title) => Done::Renamed(storage::rename_chat(path, id, &title)),
             Job::Delete(id) => Done::Deleted(id, storage::delete_chat(path, id)),
-            Job::Load(id) => Done::Loaded(storage::load_chat(path, id)),
+            Job::Load(id) => Done::Loaded(id, storage::load_chat(path, id)),
+            Job::Export(id) => Done::ForExport(storage::load_chat(path, id)),
         }
     }
 }
 
 impl Island {
     /// Adds `job` to the queue and starts it if nothing is running. A save replaces queued
-    /// saves it makes redundant; a delete drops queued saves and renames of that chat.
+    /// saves it makes redundant. A delete drops queued renames and reads of that chat, and
+    /// turns queued saves of it into settings-only saves so their settings still land.
     pub(super) fn queue(&mut self, job: Job) -> Task<Message> {
         match &job {
             Job::Save { chat, .. } => {
@@ -67,10 +73,17 @@ impl Island {
                     _ => true,
                 });
             }
-            Job::Delete(id) => self.jobs.retain(|queued| {
-                !queued.saves_chat(*id) && !matches!(queued, Job::Rename(r, _) if r == id)
-            }),
-            Job::Rename(..) | Job::Load(_) => {}
+            Job::Delete(id) => {
+                self.jobs.retain(|queued| !queued.only_for_chat(*id));
+                for queued in &mut self.jobs {
+                    if let Job::Save { chat, .. } = queued
+                        && chat.as_ref().is_some_and(|(c, _)| c.id == *id)
+                    {
+                        *chat = None;
+                    }
+                }
+            }
+            Job::Rename(..) | Job::Load(_) | Job::Export(_) => {}
         }
         self.jobs.push_back(job);
         self.next_job()
@@ -103,7 +116,9 @@ impl Island {
         if self.quitting {
             return iced::exit();
         }
-        if std::mem::take(&mut self.install_after_save) {
+        // A reply in progress defers the update again; the save after it ends drains here.
+        if self.install_after_save && self.request.is_none() {
+            self.install_after_save = false;
             return self.install_update();
         }
         Task::none()
@@ -139,7 +154,8 @@ impl Island {
                 Ok(()) => self.forget_chat(id),
                 Err(error) => self.chats_notice = format!("Couldn't delete the chat: {error}"),
             },
-            Done::Loaded(result) => follow_up = self.opened_chat(result),
+            Done::Loaded(id, result) => follow_up = self.opened_chat(id, result),
+            Done::ForExport(result) => follow_up = self.export_loaded(result),
         }
         Task::batch([follow_up, self.next_job()])
     }

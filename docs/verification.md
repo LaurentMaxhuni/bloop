@@ -347,3 +347,55 @@ the one being edited open; `default_profile` round-trips and a dangling one load
 
 Not verified: the new icons, tooltips and profile rows weren't looked at in a running
 bloop, because a debug copy was running and a second one would only signal it.
+
+## Self-update end to end (2026-11-12)
+
+Automated: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean.
+`cargo test` passes: 93 library, 125 app, 8 CLI-process (3 ignored), 8 diagnose,
+10 HTTP-transport and 9 update tests (2 ignored). New tests cover the retry schedule (5 → 10 → 20 min,
+reset on success, never more than 6 h), migration leaving another copy's Run value alone, and
+the installer's arguments and log path.
+
+Real GitHub (`cargo test --test update -- --ignored`): `releases/latest` reports v0.4.0 with
+`bloop-setup-0.4.0.exe` (8,332,809 bytes) and `bloop-setup-0.4.0.exe.sha256` (88 bytes). The
+tag `v0.4.0` parses, and the asset names match `installer_name`. A build that thinks it is
+0.0.1 finds 0.4.0, downloads it through GitHub's redirect to `release-assets.githubusercontent.com`,
+verifies the SHA-256, and `ready()` accepts it.
+
+Dry run (`cargo run --example update_dry_run`, Inno Setup 6.4, Windows 11 26300): fixture
+installers 0.0.1 and 9.9.9 built from `installer/bloop.iss /DFixture`. Result:
+
+| Check | Result |
+| --- | --- |
+| 0.0.1 installs silently with autostart and the desktop icon off | Pass |
+| Old copy holds the fixture mutex; the update check against a local fake GitHub finds 9.9.9 | Pass |
+| `download_from` streams 4.6 MB, checks size and SHA-256; `ready()` accepts it | Pass |
+| Setup started with `update::installer_command` (the app's exact arguments) while the mutex is held | Pass |
+| Setup waits: the old copy quits after 3.6 s, setup exits 0 at 4.9 s, and the relaunch comes 1.6 s after the mutex is released | Pass |
+| Installed version becomes 9.9.9; the app is relaunched with `--background` | Pass |
+| `install.log` is written next to the installer and records success | Pass |
+| Unmodified (non-fixture) script still compiles with ISCC | Pass |
+| Afterwards no fixture folder, uninstall entry, Start-menu shortcut or Run value is left | Pass |
+
+On this machine, the HKCU Run value was `"C:\github-repos\bloop\target\debug\bloop.exe"
+--background`, written by a dev build. That is the cause recorded in `docs/architecture.md`.
+The installed copy is 0.4.0, the latest release, and `%LOCALAPPDATA%\bloop\updates` never
+existed, so the installed copy never downloaded an update.
+
+Not checked: the fixed app itself updating on the real desktop. A dev bloop was running and
+holding the real mutex, and no release newer than 0.4.0 exists. Also not checked: the
+`DeinitializeSetup` reopen after a failed install (no forced mid-install failure was staged),
+the `CREATE_BREAKAWAY_FROM_JOB` path inside a kill-on-close job, the 6-hour repeat in real
+time, and a check after sleep or hibernation.
+
+## Chat queue fixes (2026-11-12)
+
+Export of a chat that isn't open now queues behind any save of it, so the file has its newest
+turns. Opening a chat ignores a late read once a reply, new chat, another open or a delete
+came in between. Deleting a chat drops queued renames, reads and exports of it but keeps the
+settings part of queued saves. A pasted API key is cleared when another server is picked or
+a new profile starts. An update waiting on a save also waits for a reply in progress, then
+installs after the save that follows it (`a_deferred_update_survives_a_reply`; its check was
+corrected to look for the save in flight rather than in the queue). `cargo fmt --check`,
+clippy and `cargo test` pass (93 library, 132 app, 8 CLI, 8 diagnose, 10 transport, 9 update).
+Not checked in a running bloop.

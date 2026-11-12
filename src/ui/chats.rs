@@ -47,6 +47,21 @@ async fn blocking<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
+/// Shows the save dialog and writes the chat as Markdown, off the UI thread.
+fn export_task(path: PathBuf, chat: Chat, turns: Vec<Turn>) -> Task<Message> {
+    Task::perform(
+        blocking(path, move |_| {
+            let Some(target) = platform::save_file_dialog(&export::file_name(&chat.title))? else {
+                return Ok(None);
+            };
+            std::fs::write(&target, export::markdown(&chat.title, &turns))
+                .map_err(|e| e.to_string())?;
+            Ok(Some(target))
+        }),
+        |result| Message::Chat(ChatAction::Exported(result)),
+    )
+}
+
 /// "Just now", "5 min ago", "3 h ago", "Yesterday", "4 days ago", "6 weeks ago".
 pub fn when(updated: i64, now: i64) -> String {
     let seconds = (now - updated).max(0);
@@ -109,6 +124,7 @@ impl Island {
                     return Task::none();
                 }
                 // Behind any queued save, so it reads the chat's newest turns.
+                self.opening = Some(id);
                 return self.queue(Job::Load(id));
             }
             ChatAction::Rename(id) => {
@@ -177,6 +193,9 @@ impl Island {
                     self.start_chat(profile);
                 }
                 // Runs after any save of this chat already under way, never before it.
+                if self.opening == Some(id) {
+                    self.opening = None;
+                }
                 self.forget_chat(id);
                 return self.queue(Job::Delete(id));
             }
@@ -184,24 +203,11 @@ impl Island {
                 let Some(path) = self.db_path.clone() else {
                     return Task::none();
                 };
-                let current = (id == self.chat.id).then(|| (self.chat.clone(), self.turns.clone()));
-                return Task::perform(
-                    blocking(path, move |path| {
-                        let (chat, turns) = match current {
-                            Some(current) => current,
-                            None => storage::load_chat(path, id)?,
-                        };
-                        let Some(target) =
-                            platform::save_file_dialog(&export::file_name(&chat.title))?
-                        else {
-                            return Ok(None);
-                        };
-                        std::fs::write(&target, export::markdown(&chat.title, &turns))
-                            .map_err(|e| e.to_string())?;
-                        Ok(Some(target))
-                    }),
-                    |result| Message::Chat(ChatAction::Exported(result)),
-                );
+                if id == self.chat.id {
+                    return export_task(path, self.chat.clone(), self.turns.clone());
+                }
+                // Behind any queued save of that chat, so the file has its newest turns.
+                return self.queue(Job::Export(id));
             }
             ChatAction::Exported(result) => match result {
                 Ok(Some(target)) => {
@@ -214,13 +220,19 @@ impl Island {
         Task::none()
     }
 
-    /// Shows a chat read by the queue in the notch, unless a reply started meanwhile.
+    /// Shows a chat read by the queue in the notch, unless it is no longer the one asked
+    /// for: a reply, a new chat, another open or a delete came in between.
     pub(super) fn opened_chat(
         &mut self,
+        id: i64,
         result: Result<(Chat, Vec<Turn>), String>,
     ) -> Task<Message> {
+        if self.opening != Some(id) || self.request.is_some() {
+            return Task::none();
+        }
+        self.opening = None;
         match result {
-            Ok((chat, turns)) if self.request.is_none() => {
+            Ok((chat, turns)) => {
                 self.start_chat(chat.profile);
                 self.chat = chat;
                 self.turns = turns;
@@ -229,9 +241,23 @@ impl Island {
                 let scroll = self.scroll();
                 Task::batch([self.show_notch(), scroll])
             }
-            Ok(_) => Task::none(),
             Err(error) => {
                 self.chats_notice = format!("Couldn't open that chat: {error}");
+                Task::none()
+            }
+        }
+    }
+
+    /// Asks where to save a chat the queue read for export.
+    pub(super) fn export_loaded(
+        &mut self,
+        result: Result<(Chat, Vec<Turn>), String>,
+    ) -> Task<Message> {
+        match (result, self.db_path.clone()) {
+            (Ok((chat, turns)), Some(path)) => export_task(path, chat, turns),
+            (Ok(_), None) => Task::none(),
+            (Err(error), _) => {
+                self.chats_notice = format!("Couldn't export the chat: {error}");
                 Task::none()
             }
         }

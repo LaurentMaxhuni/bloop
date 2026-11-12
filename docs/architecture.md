@@ -236,3 +236,36 @@ OFN_NOCHANGEDIR. It runs on the caller's blocking worker and returns a path or c
 the caller writes the file. The native call has its own modal message loop, so it does not
 block Iced. No COM initialization or application window handle crosses threads.
 API reference: https://learn.microsoft.com/windows/win32/api/commdlg/nf-commdlg-getsavefilenamew
+
+## Self-update fixes (2026-11-12)
+
+Why auto-update looked broken: the check, download and checksum all work against the real
+v0.4.0 release, and so does the silent install. The problem was which copy runs.
+`platform::migrate_autostart` rewrote the HKCU Run value whenever it differed from the
+running exe, so starting a dev build (`target\debug\bloop.exe`) once made it the copy that
+starts at sign-in. That copy holds the single-instance mutex, so the installed copy never runs
+and never updates, and the dev build's version only changes when someone rebuilds it.
+Migration now rewrites only this exe's own pre-`--background` value (`"<exe>"`, compared
+without case) and leaves a value that names another exe alone. The in-app "Start with
+Windows" switch still writes the running exe, because that is an explicit choice.
+
+A failed scheduled check or download used to wait the full six hours. At sign-in the network
+is often not up 30 s after start, so one failure could skip a whole day of checks. Retries now
+come 5 min after a failure and double each time (10, 20, … min) up to the usual six hours,
+and the delay resets after a success. No request is added while things work, and switching
+auto-update off still stops every scheduled check. The only network access is still the
+GitHub Releases check, the asset download and their GitHub redirects.
+
+The installer is started through `update::installer_command`, shared by the app and the dry
+run, so the arguments can't drift. It adds `/LOG=<updates>\install.log`, which makes a
+failed update diagnosable after the fact. Setup is started with `CREATE_BREAKAWAY_FROM_JOB`
+first, so it survives bloop's exit when a launcher put bloop in a kill-on-close job, and as a
+plain child if the job forbids breaking away. `installer/bloop.iss` now waits up to 30 s
+(was 15 s) for the mutex. If setup stops after bloop has quit but before installing anything,
+its new `DeinitializeSetup` reopens the existing copy with `--background`, so a failed update
+no longer leaves the user with no bloop at all.
+
+`/DFixture` builds the same script as a separate app (its own AppId, name, mutex, folder,
+shortcuts and Run value). `examples/update_dry_run.rs` uses it to run a real
+install → check → download → verify → setup → relaunch cycle without touching an installed
+bloop. A normal build compiles the script exactly as before.

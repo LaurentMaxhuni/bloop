@@ -707,6 +707,7 @@ impl Island {
         }
         self.profile_edit = ProfileEdit::New;
         self.profile_name = "New profile".into();
+        self.key_draft.clear();
         self.status.clear();
     }
 

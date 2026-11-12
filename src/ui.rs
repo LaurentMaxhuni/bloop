@@ -51,6 +51,9 @@ pub const SLIVER: Size = Size::new(120.0, 5.0);
 const SHOULDER: f32 = 10.0;
 /// Time between scheduled update checks.
 const UPDATE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+/// First wait after a scheduled check or download fails; it doubles up to [`UPDATE_EVERY`].
+/// Sign-in starts bloop before the network is often up, so the first check can fail.
+const UPDATE_RETRY: Duration = Duration::from_secs(5 * 60);
 /// Collapsed and untouched for this long, the mascot dozes off.
 /// The part of reply `index` on screen: all of it, except while the newest one types out
 /// (`reveal` bytes of it).
@@ -264,6 +267,9 @@ pub struct Island {
     jobs: std::collections::VecDeque<jobs::Job>,
     /// Restart to update once the queue is empty.
     install_after_save: bool,
+    /// The chat the Chats page asked to open, until the queue has read it. Anything that
+    /// changes the notch's chat meanwhile clears it, so a late read can't replace it.
+    opening: Option<i64>,
     /// An older bloop's key, not tied to any server, is still saved.
     legacy_key: bool,
     chats_notice: String,
@@ -298,6 +304,8 @@ pub struct Island {
     up_to_date: bool,
     /// When the next scheduled update check is due.
     next_check: Instant,
+    /// Scheduled checks or downloads that failed in a row (sets the retry delay).
+    update_failures: u32,
     /// The "ready" peek waits for a streaming reply to finish.
     update_peek_pending: bool,
     /// Starts the downloaded installer; replaced in tests.
@@ -371,6 +379,7 @@ impl Island {
             confirm_delete: None,
             jobs: std::collections::VecDeque::new(),
             install_after_save: false,
+            opening: None,
             legacy_key: false,
             chats_notice: String::new(),
             profile_edit: ProfileEdit::Default,
@@ -390,6 +399,7 @@ impl Island {
             update_state: UpdateState::Idle,
             up_to_date: false,
             next_check: Instant::now() + Duration::from_secs(30),
+            update_failures: 0,
             update_peek_pending: false,
             installer_launcher: platform::launch_installer,
             window: None,
@@ -1288,16 +1298,18 @@ impl Island {
             Message::UpdateChecked(manual, result) => match result {
                 Ok(Some(release)) => return self.start_download(release),
                 Ok(None) => {
+                    self.update_failures = 0;
                     self.update_state = UpdateState::Idle;
                     self.up_to_date = manual;
                 }
                 Err(error) => {
-                    // Scheduled checks fail quietly and simply try again later.
+                    // Scheduled checks fail quietly and try again soon (see `UPDATE_RETRY`).
                     self.update_state = if manual {
                         UpdateState::Failed(format!("Couldn't check for updates: {error}"))
                     } else {
                         UpdateState::Idle
                     };
+                    self.retry_update_later(Instant::now());
                 }
             },
             Message::UpdateProgress(version, percent) => {
@@ -1309,6 +1321,7 @@ impl Island {
             }
             Message::UpdateReady(result) => match result {
                 Ok((version, path)) => {
+                    self.update_failures = 0;
                     self.update_state = UpdateState::Ready(version, path);
                     self.update_peek_pending = true;
                     return self.peek_update_if_pending();
@@ -1316,6 +1329,7 @@ impl Island {
                 Err(error) => {
                     self.update_state =
                         UpdateState::Failed(format!("Couldn't download the update: {error}"));
+                    self.retry_update_later(Instant::now());
                 }
             },
             Message::InstallUpdate => return self.install_update(),
@@ -1476,6 +1490,7 @@ impl Island {
             profile,
             ..Chat::default()
         };
+        self.opening = None;
         self.turns.clear();
         self.replies.clear();
         self.finish_reveal();
@@ -1582,6 +1597,7 @@ impl Island {
         self.sync_replies();
         self.input.clear();
         self.status.clear();
+        self.opening = None;
         self.touch_chat();
         self.request_id += 1;
         let id = self.request_id;
@@ -1605,12 +1621,20 @@ impl Island {
     }
 
     fn apply_choice(&mut self, choice: &Choice) {
+        if choice.provider != self.draft_config.provider
+            || choice.endpoint != self.draft_config.endpoint
+        {
+            // A pasted key belongs to the server it was pasted for.
+            self.key_draft.clear();
+            self.forget_connection_test();
+        }
         // Re-picking the CLI already in use keeps the model the user typed for it.
         if !(choice.provider.is_cli() && choice.provider == self.draft_config.provider) {
             self.draft_config.model = choice.model.clone();
         }
         self.draft_config.provider = choice.provider;
         self.draft_config.endpoint = choice.endpoint.clone();
+        self.refresh_key_status();
     }
 
     /// API key field for providers that take one, or where the key comes from.
@@ -1855,6 +1879,15 @@ impl Island {
             UpdateState::Ready(version, _) => format!("{version} ready"),
             UpdateState::Failed(error) => error.clone(),
         }
+    }
+
+    /// After a failed check or download: the next scheduled check comes 5 min later, then
+    /// 10, 20, … up to the usual six hours, instead of a full six hours after a blip.
+    fn retry_update_later(&mut self, now: Instant) {
+        let factor = 2u32.saturating_pow(self.update_failures.min(16));
+        let delay = UPDATE_RETRY.saturating_mul(factor).min(UPDATE_EVERY);
+        self.update_failures = self.update_failures.saturating_add(1);
+        self.next_check = self.next_check.min(now + delay);
     }
 
     fn start_download(&mut self, release: Release) -> Task<Message> {
@@ -3412,6 +3445,116 @@ mod tests {
     }
 
     #[test]
+    fn a_pasted_key_never_follows_a_picked_server() {
+        let mut app = ready();
+        let _ = app.update(Message::PickChoice(Choice::ollama(
+            "http://127.0.0.1:11434",
+            "a",
+        )));
+        let _ = app.update(Message::ApiKey("sk-a".into()));
+        let _ = app.update(Message::PickChoice(Choice::ollama(
+            "http://127.0.0.1:8080",
+            "b",
+        )));
+        assert!(app.key_draft.is_empty());
+        let _ = app.update(Message::ApiKey("sk-a".into()));
+        let _ = app.update(Message::NewProfile);
+        assert!(app.key_draft.is_empty());
+    }
+
+    fn queued_storage() -> Island {
+        let mut app = ready();
+        app.storage_disabled = false;
+        app.db_path = Some(PathBuf::from("unused.sqlite3"));
+        app.saving = true; // a job is running
+        app
+    }
+
+    fn other_chat(id: i64) -> (Chat, Vec<Turn>) {
+        let chat = Chat {
+            id,
+            title: "Other".into(),
+            ..Chat::default()
+        };
+        (chat, turns("other"))
+    }
+
+    #[test]
+    fn a_deleted_chat_is_never_opened() {
+        let mut app = queued_storage();
+        let _ = app.update(Message::Chat(ChatAction::Open(42)));
+        let _ = app.update(Message::Chat(ChatAction::Delete(42)));
+        let _ = app.update(Message::Chat(ChatAction::DeleteConfirm));
+        assert!(
+            app.jobs
+                .iter()
+                .all(|job| !matches!(job, jobs::Job::Load(42)))
+        );
+        // A read already under way lands after the delete was asked for.
+        let _ = app.update(Message::JobDone(jobs::Done::Loaded(42, Ok(other_chat(42)))));
+        assert_ne!(app.chat.id, 42);
+    }
+
+    #[test]
+    fn a_late_chat_read_never_hides_a_new_reply() {
+        let mut app = queued_storage();
+        let _ = app.update(Message::Chat(ChatAction::Open(42)));
+        exchange(&mut app, "here", "reply");
+        let current = app.chat.id;
+        let _ = app.update(Message::JobDone(jobs::Done::Loaded(42, Ok(other_chat(42)))));
+        assert_eq!(app.chat.id, current);
+        assert_eq!(app.turns[0].assistant, "reply");
+    }
+
+    #[test]
+    fn opening_a_chat_shows_it_when_nothing_changed() {
+        let mut app = queued_storage();
+        let _ = app.update(Message::Chat(ChatAction::Open(42)));
+        let _ = app.update(Message::JobDone(jobs::Done::Loaded(42, Ok(other_chat(42)))));
+        assert_eq!(app.chat.id, 42);
+        assert_eq!(app.turns[0].user, "other");
+    }
+
+    #[test]
+    fn deleting_a_chat_keeps_queued_settings() {
+        let mut app = queued_storage();
+        exchange(&mut app, "chat A", "reply");
+        let a = app.chat.id;
+        app.config.ask_shortcut = "Ctrl+Alt+Q".into();
+        let _ = app.persist();
+        let _ = app.update(Message::Chat(ChatAction::Delete(a)));
+        let _ = app.update(Message::Chat(ChatAction::DeleteConfirm));
+        assert!(app.jobs.iter().any(|job| matches!(job,
+            jobs::Job::Save { config, chat: None } if config.ask_shortcut == "Ctrl+Alt+Q")));
+    }
+
+    #[test]
+    fn exporting_another_chat_waits_for_its_saves() {
+        let mut app = queued_storage();
+        let _ = app.update(Message::Chat(ChatAction::Export(42)));
+        assert!(matches!(app.jobs.back(), Some(jobs::Job::Export(42))));
+    }
+
+    #[test]
+    fn a_deferred_update_survives_a_reply() {
+        let mut app = queued_storage();
+        app.install_after_save = true;
+        app.input = "hi".into();
+        let _task = app.update(Message::Send);
+        app.jobs.clear();
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(Ok(()))));
+        assert!(app.install_after_save, "still waiting for the reply");
+        let id = app.request_id;
+        let _ = app.update(Message::Finished(id, Ok(())));
+        assert!(
+            !app.idle_storage(),
+            "the save after the reply is under way and drains to the update"
+        );
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(Ok(()))));
+        assert!(!app.install_after_save, "the update was attempted");
+    }
+
+    #[test]
     fn saving_a_new_profile_keeps_the_default_model() {
         let mut app = ready();
         let default_model = app.config.model.clone();
@@ -3829,6 +3972,51 @@ mod tests {
         let _ = app.update(Message::UpdateChecked(false, Err("offline".into())));
         assert_eq!(app.update_state, UpdateState::Idle);
         assert!(app.update_status().contains("Up to date") || app.update_status().is_empty());
+    }
+
+    #[test]
+    fn failed_scheduled_check_retries_soon_then_backs_off() {
+        let mut app = ready();
+        let start = Instant::now() + Duration::from_secs(60);
+        let check_at = |app: &mut Island, at: Instant| {
+            app.update_state = UpdateState::Idle;
+            let _ = app.update(Message::UpdateTick(at));
+            app.update_state == UpdateState::Checking
+        };
+        assert!(check_at(&mut app, start));
+        // Offline at sign-in: try again in 5 minutes, not 6 hours.
+        let _ = app.update(Message::UpdateChecked(false, Err("offline".into())));
+        let first = Instant::now();
+        assert!(!check_at(&mut app, first + Duration::from_secs(4 * 60)));
+        assert!(check_at(&mut app, first + Duration::from_secs(5 * 60 + 1)));
+        // Again offline: 10 minutes.
+        let _ = app.update(Message::UpdateChecked(false, Err("offline".into())));
+        let second = Instant::now();
+        assert!(!check_at(&mut app, second + Duration::from_secs(9 * 60)));
+        assert!(check_at(
+            &mut app,
+            second + Duration::from_secs(10 * 60 + 1)
+        ));
+        // A failed download is retried the same way, and success resets the delay.
+        let _ = app.update(Message::UpdateReady(Err("connection reset".into())));
+        let third = Instant::now();
+        assert!(check_at(&mut app, third + Duration::from_secs(20 * 60 + 1)));
+        let _ = app.update(Message::UpdateChecked(false, Ok(None)));
+        assert_eq!(app.update_failures, 0);
+        assert!(!check_at(
+            &mut app,
+            third + Duration::from_secs(5 * 60 * 60)
+        ));
+    }
+
+    #[test]
+    fn many_failures_never_wait_longer_than_the_schedule() {
+        let mut app = ready();
+        for _ in 0..40 {
+            app.next_check = Instant::now() + UPDATE_EVERY * 2;
+            let _ = app.update(Message::UpdateChecked(false, Err("offline".into())));
+        }
+        assert!(app.next_check <= Instant::now() + UPDATE_EVERY);
     }
 
     #[test]
