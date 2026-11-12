@@ -554,7 +554,7 @@ impl Island {
         match message {
             Message::Window(id) => {
                 self.window = id;
-                return self.place_window();
+                return self.place_window(platform::Target::Current);
             }
             Message::Tick(now) => {
                 self.now = now;
@@ -1376,6 +1376,11 @@ impl Island {
     /// window work: size animation, hide/show, and focus.
     fn present_at(&mut self, event: Event, now: Instant) -> Task<Message> {
         let (state_before, shape_before) = (self.presence.state(), self.presence.shape());
+        let target = if event == Event::Shortcut {
+            platform::Target::Active
+        } else {
+            platform::Target::Current
+        };
         self.presence.on(event, now);
         let (state, shape) = (self.presence.state(), self.presence.shape());
         let mut tasks = Vec::new();
@@ -1389,7 +1394,7 @@ impl Island {
         if shape != shape_before {
             if shape_before == Shape::Sliver {
                 // Coming out of the sliver: pick up resolution, scaling or taskbar changes.
-                tasks.push(self.place_window());
+                tasks.push(self.place_window(target));
             }
             self.retarget(shape, now);
             if self.reduce_motion() {
@@ -1602,7 +1607,7 @@ impl Island {
         if !animate {
             self.spring.snap();
         }
-        self.place_window()
+        self.place_window(platform::Target::Current)
     }
 
     /// Points the spring at `shape`. Starting from rest, the clock starts now, so the first
@@ -1618,19 +1623,16 @@ impl Island {
         }
     }
 
-    fn place_window(&mut self) -> Task<Message> {
+    fn place_window(&mut self, target: platform::Target) -> Task<Message> {
         self.placements += 1;
         let Some(id) = self.window else {
             return Task::none();
         };
         let canvas = self.canvas_size();
-        let position = platform::place(canvas, self.config.notch_position);
+        let position = self.config.notch_position;
         self.region = None;
         Task::batch([
-            window::resize(id, canvas),
-            position
-                .map(|point| window::move_to(id, point))
-                .unwrap_or_else(Task::none),
+            window::run(id, move |w| platform::place_on(w, canvas, position, target)).discard(),
             self.update_region(),
         ])
     }

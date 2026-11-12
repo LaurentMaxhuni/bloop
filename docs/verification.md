@@ -264,3 +264,15 @@ clearly at 22 px.
 Not checked on screen: the live run (thinking, then typing, then happy) and the Mad face. The
 run to see them ended early: the chat panel had closed before a scripted click, so the click
 landed on another window. Unit tests cover these states, but no one has looked at them yet.
+
+## Monitor placement (2026-11-12)
+
+Automated geometry covers left/centre/right, negative desktop coordinates, a nonzero
+work-area top, and 100%, 125%, 150%, and 200% scaling. Reviewed the pinned winit 0.30.13
+WM_DPICHANGED handler: its suggested-rectangle SetWindowPos completes inside the handler.
+The placement callback reapplies the intended physical rectangle after the first move.
+Required gates: cargo fmt, cargo clippy --all-targets -- -D warnings, cargo test.
+No bloop executable was launched. Actual monitor selection, focus ordering and cross-DPI
+movement remain unverified on screen; test both directions between differently scaled
+monitors, with the foreground window on each monitor and with a bloop window foreground.
+All three gates passed. cargo test required the normal Windows session: the sandbox could not access Credential Manager for two existing secrets tests. Real-CLI and live-GitHub tests remain ignored.

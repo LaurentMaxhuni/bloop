@@ -138,3 +138,16 @@ draws a small Bloop beside each reply. Only the newest one moves, and only on th
 notch mascot already runs, so this adds no new timers. Older replies show Bloop asleep, as
 does the newest after 45 s of quiet. The two new moods are Laughing (squeezed eyes, open
 mouth, a bounce that fades) and Mad (slanted brows, frown, a brief tremble, an anger mark).
+
+## Monitor placement (2026-11-12)
+
+The notch uses physical HWND placement on its owning Iced event-loop thread. Shortcut
+opening from the sliver targets the foreground application's monitor, ignoring our own
+process, then the cursor, then primary. Other placements retain the current monitor.
+The work-area origin stays physical; only canvas dimensions and edge inset are scaled.
+Two synchronous SetWindowPos calls preserve activation and Z order: the first lets
+winit 0.30.13 handle WM_DPICHANGED and its suggested rectangle, and the second restores
+our exact requested rectangle after that handler returns. There is no timer or polling.
+Initial window settings retain the existing primary_position logical-coordinate helper.
+See Microsoft's SetWindowPos documentation:
+https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setwindowpos

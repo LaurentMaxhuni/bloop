@@ -427,6 +427,152 @@ pub fn fullscreen_active() -> bool {
 /// Gap between a left/right notch and the edge of the screen.
 pub const EDGE_INSET: f32 = 24.0;
 
+#[derive(Debug, Clone, Copy)]
+pub enum Target {
+    Current,
+    Active,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+struct PhysicalRect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+#[cfg(any(windows, test))]
+fn physical_rect(
+    area: [i32; 4],
+    scale: f32,
+    canvas: Size,
+    position: NotchPosition,
+) -> PhysicalRect {
+    let [left, top, right, _bottom] = area;
+    let width = (canvas.width * scale).round() as i32;
+    let height = (canvas.height * scale).round() as i32;
+    let inset = (EDGE_INSET * scale).round() as i32;
+    let x = match position {
+        NotchPosition::Centre => left + (right - left - width) / 2,
+        NotchPosition::Left => left + inset,
+        NotchPosition::Right => right - inset - width,
+    };
+    PhysicalRect {
+        x,
+        y: top,
+        width,
+        height,
+    }
+}
+
+#[cfg(windows)]
+fn target_monitor(
+    hwnd: windows::Win32::Foundation::HWND,
+    target: Target,
+) -> windows::Win32::Graphics::Gdi::HMONITOR {
+    use windows::Win32::{
+        Foundation::POINT,
+        Graphics::Gdi::{
+            MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint, MonitorFromWindow,
+        },
+        UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId},
+    };
+    // SAFETY: live callback HWND; other handles are queried from Windows. All output
+    // pointers refer to initialized stack storage. No handle ownership is transferred.
+    unsafe {
+        if matches!(target, Target::Current) {
+            return MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+        }
+        let foreground = GetForegroundWindow();
+        let mut process = 0;
+        if !foreground.is_invalid()
+            && GetWindowThreadProcessId(foreground, Some(&mut process)) != 0
+            && process != std::process::id()
+        {
+            let monitor = MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL);
+            if !monitor.is_invalid() {
+                return monitor;
+            }
+        }
+        let mut cursor = POINT::default();
+        if GetCursorPos(&mut cursor).is_ok() {
+            return MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
+        }
+        MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY)
+    }
+}
+
+/// Place the undecorated notch in physical desktop pixels, on the window thread.
+pub fn place_on(
+    window: &dyn iced::window::Window,
+    canvas: Size,
+    position: NotchPosition,
+    target: Target,
+) {
+    #[cfg(windows)]
+    {
+        use iced::window::raw_window_handle::RawWindowHandle;
+        use windows::Win32::{
+            Foundation::HWND,
+            Graphics::Gdi::{GetMonitorInfoW, MONITORINFO},
+            UI::{
+                HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
+                WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos},
+            },
+        };
+        let Ok(handle) = window.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+            return;
+        };
+        let hwnd = HWND(handle.hwnd.get() as *mut _);
+        let monitor = target_monitor(hwnd, target);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: monitor is selected by Windows; cbSize describes valid writable storage.
+        if !unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() } {
+            return;
+        }
+        let (mut xdpi, mut ydpi) = (96, 96);
+        // SAFETY: valid monitor and output pointers; initialized DPI is retained on failure.
+        let _ = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut xdpi, &mut ydpi) };
+        let area = info.rcWork;
+        let rect = physical_rect(
+            [area.left, area.top, area.right, area.bottom],
+            xdpi.max(96) as f32 / 96.0,
+            canvas,
+            position,
+        );
+        // The first synchronous move lets winit handle WM_DPICHANGED (including its
+        // suggested-rectangle resize). Reapply our exact rectangle after it returns.
+        // No ASYNCWINDOWPOS: window::run executes on the owning event-loop thread.
+        for _ in 0..2 {
+            // SAFETY: HWND is borrowed from this live window callback. Pixel dimensions
+            // are computed above; flags preserve activation and the existing Z order.
+            if let Err(error) = unsafe {
+                SetWindowPos(
+                    hwnd,
+                    None,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    SWP_NOACTIVATE | SWP_NOZORDER,
+                )
+            } {
+                tracing::warn!("Could not place notch: {error}");
+                break;
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (window, canvas, position, target);
+}
+
 /// Centred top-of-screen origin for a window of `size` on the primary monitor.
 pub fn primary_position(size: Size) -> Option<Point> {
     place(size, NotchPosition::Centre)
@@ -922,6 +1068,46 @@ pub fn launch_installer(path: &std::path::Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn placement_uses_physical_origin_and_target_scale() {
+        use super::*;
+        let area = [-2560, -120, 0, 1320];
+        for (scale, width, height, inset) in [
+            (1.0, 600, 400, 24),
+            (1.5, 900, 600, 36),
+            (2.0, 1200, 800, 48),
+        ] {
+            for (position, x) in [
+                (NotchPosition::Centre, -2560 + (2560 - width) / 2),
+                (NotchPosition::Left, -2560 + inset),
+                (NotchPosition::Right, -inset - width),
+            ] {
+                assert_eq!(
+                    physical_rect(area, scale, Size::new(600.0, 400.0), position),
+                    PhysicalRect {
+                        x,
+                        y: -120,
+                        width,
+                        height
+                    }
+                );
+            }
+        }
+        assert_eq!(
+            physical_rect(
+                [1920, 40, 4480, 1440],
+                1.25,
+                Size::new(601.0, 401.0),
+                NotchPosition::Right
+            ),
+            PhysicalRect {
+                x: 3699,
+                y: 40,
+                width: 751,
+                height: 501
+            }
+        );
+    }
     #[test]
     fn fullscreen_query_does_not_panic() {
         let _ = super::fullscreen_active();
