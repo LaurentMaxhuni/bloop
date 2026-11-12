@@ -264,3 +264,229 @@ clearly at 22 px.
 Not checked on screen: the live run (thinking, then typing, then happy) and the Mad face. The
 run to see them ended early: the chat panel had closed before a scripted click, so the click
 landed on another window. Unit tests cover these states, but no one has looked at them yet.
+
+## Monitor placement (2026-11-12)
+
+Automated geometry covers left/centre/right, negative desktop coordinates, a nonzero
+work-area top, and 100%, 125%, 150%, and 200% scaling. Reviewed the pinned winit 0.30.13
+WM_DPICHANGED handler: its suggested-rectangle SetWindowPos completes inside the handler.
+The placement callback reapplies the intended physical rectangle after the first move.
+Required gates: cargo fmt, cargo clippy --all-targets -- -D warnings, cargo test.
+No bloop executable was launched. Actual monitor selection, focus ordering and cross-DPI
+movement remain unverified on screen; test both directions between differently scaled
+monitors, with the foreground window on each monitor and with a bloop window foreground.
+All three gates passed. cargo test required the normal Windows session: the sandbox could not access Credential Manager for two existing secrets tests. Real-CLI and live-GitHub tests remain ignored.
+
+## Independent clipboard shortcut (2026-11-12)
+
+Unit coverage checks distinct Toggle/Ask routing, disabling Ask without affecting Toggle,
+invalid syntax, duplicate bindings in either direction, idempotent registration and
+preserving the old binding after registration failure. Both shortcuts reuse validate_shortcut.
+No desktop hotkeys were registered in these tests; Windows registration and actual key
+presses remain unverified. UI integration is intentionally just an empty Event::Ask arm.
+Passed: cargo fmt, cargo clippy --all-targets -- -D warnings, and cargo test (normal Windows session; existing live tests ignored).
+
+## Connection diagnostics (2026-11-12)
+
+Loopback tests cover Ollama/OpenAI/Unsloth model-list success, missing and empty models,
+401/403, 404, refused port, a silent server timeout, a TLS certificate alert, malformed
+JSON, and invalid URLs. Requests are body-free GETs to api/tags or v1/models, with no chat.
+Model suggestions stop at five. Unit checks cover CLI path/missing reports and ChatGPT's
+signed-out/plan-disabled gates. Live ChatGPT authentication/model access and real CLI
+sign-in were not exercised. CLI hints follow the vendors' installation documentation:
+https://support.claude.com/en/articles/14554922-claude-code-user-faq
+https://github.com/openai/codex/blob/main/README.md
+Passed: cargo fmt, cargo clippy --all-targets -- -D warnings, and cargo test (normal Windows session). All eight loopback diagnostics passed; the silent-server check returned in about three seconds.
+
+## Markdown export helpers (2026-11-12)
+
+Unit tests cover transcript order, preserved Markdown/Unicode, interrupted and empty replies,
+empty titles, invalid filename characters, case-insensitive device names (including those
+with extensions and superscript digits), extension normalization and UTF-16 length bounds.
+The Windows Save-dialog API compiles with its added windows crate feature. Its buffers,
+cancellation/error branch and worker-thread ownership were reviewed against Microsoft's
+API documentation. The dialog was not opened; save/cancel/overwrite interactions and
+non-Windows compilation remain unverified. No bloop executable was launched.
+Passed: cargo fmt, cargo clippy --all-targets -- -D warnings, and cargo test (normal Windows session): 220 passed, four existing live-network/CLI tests ignored.
+
+## v1.1–v1.3: reply actions, profiles, clipboard ask, chats (2026-11-12)
+
+Passed on the branch `feat/v1.1-v1.3`: `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo test` (245 passed, 4 live CLI tests
+ignored as usual).
+
+Covered by tests: Retry and Edit & resend replace the last turn and are ignored while
+streaming; New chat keeps the old chat listed; switching profile in a chat with history
+starts a new chat; a chat's local history isn't sent after the default changes to a cloud
+endpoint (Send and Retry); a deleted profile blocks sending; chats imported from the old
+single history are never sent; clipboard text is fenced, capped, sent once, refused when
+the whole prompt is too long and dropped on chat change or a late read; keys are stored
+per endpoint origin and a typed key is dropped when the server or profile changes; the
+storage queue keeps the outgoing chat's save ahead of a chat load, a delete removes that
+chat's queued saves and runs after the save in flight, and Quit waits for queued jobs;
+storage migration, listing, search, rename and delete against real SQLite files; relative
+dates. Codex reviewed the branch and found seven problems (all fixed, with tests above); a
+second Codex review of the fixes stopped at its usage limit before reporting.
+
+Not verified: none of the new UI was looked at or clicked in a running bloop, because the
+installed copy was running and a dev build would only signal it. Not exercised: the Save
+dialog, the second global hotkey on the desktop, Test connection against real servers,
+moving across monitors with different scaling, and the migration on a real 0.4 database.
+
+## Icon buttons and default profile (2026-11-12)
+
+Passed: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
+(249 passed, 4 ignored as usual), built in a separate target directory because a running
+debug bloop held `target/debug`.
+
+Covered by tests: every `Icon` has a glyph in the subset font (and a left-out one
+doesn't); the star makes a profile the default, New chat starts on it, Save leaves it
+alone, deleting it returns the star to Main, and a missing id can't be starred; a profile
+is deleted only after Delete is confirmed, Keep cancels; deleting another profile leaves
+the one being edited open; `default_profile` round-trips and a dangling one loads as 0.
+
+Not verified: the new icons, tooltips and profile rows weren't looked at in a running
+bloop, because a debug copy was running and a second one would only signal it.
+
+## Self-update end to end (2026-11-12)
+
+Automated: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean.
+`cargo test` passes: 93 library, 125 app, 8 CLI-process (3 ignored), 8 diagnose,
+10 HTTP-transport and 9 update tests (2 ignored). New tests cover the retry schedule (5 → 10 → 20 min,
+reset on success, never more than 6 h), migration leaving another copy's Run value alone, and
+the installer's arguments and log path.
+
+Real GitHub (`cargo test --test update -- --ignored`): `releases/latest` reports v0.4.0 with
+`bloop-setup-0.4.0.exe` (8,332,809 bytes) and `bloop-setup-0.4.0.exe.sha256` (88 bytes). The
+tag `v0.4.0` parses, and the asset names match `installer_name`. A build that thinks it is
+0.0.1 finds 0.4.0, downloads it through GitHub's redirect to `release-assets.githubusercontent.com`,
+verifies the SHA-256, and `ready()` accepts it.
+
+Dry run (`cargo run --example update_dry_run`, Inno Setup 6.4, Windows 11 26300): fixture
+installers 0.0.1 and 9.9.9 built from `installer/bloop.iss /DFixture`. Result:
+
+| Check | Result |
+| --- | --- |
+| 0.0.1 installs silently with autostart and the desktop icon off | Pass |
+| Old copy holds the fixture mutex; the update check against a local fake GitHub finds 9.9.9 | Pass |
+| `download_from` streams 4.6 MB, checks size and SHA-256; `ready()` accepts it | Pass |
+| Setup started with `update::installer_command` (the app's exact arguments) while the mutex is held | Pass |
+| Setup waits: the old copy quits after 3.6 s, setup exits 0 at 4.9 s, and the relaunch comes 1.6 s after the mutex is released | Pass |
+| Installed version becomes 9.9.9; the app is relaunched with `--background` | Pass |
+| `install.log` is written next to the installer and records success | Pass |
+| Unmodified (non-fixture) script still compiles with ISCC | Pass |
+| Afterwards no fixture folder, uninstall entry, Start-menu shortcut or Run value is left | Pass |
+
+On this machine, the HKCU Run value was `"C:\github-repos\bloop\target\debug\bloop.exe"
+--background`, written by a dev build. That is the cause recorded in `docs/architecture.md`.
+The installed copy is 0.4.0, the latest release, and `%LOCALAPPDATA%\bloop\updates` never
+existed, so the installed copy never downloaded an update.
+
+Not checked: the fixed app itself updating on the real desktop. A dev bloop was running and
+holding the real mutex, and no release newer than 0.4.0 exists. Also not checked: the
+`DeinitializeSetup` reopen after a failed install (no forced mid-install failure was staged),
+the `CREATE_BREAKAWAY_FROM_JOB` path inside a kill-on-close job, the 6-hour repeat in real
+time, and a check after sleep or hibernation.
+
+## Chat queue fixes (2026-11-12)
+
+Export of a chat that isn't open now queues behind any save of it, so the file has its newest
+turns. Opening a chat ignores a late read once a reply, new chat, another open or a delete
+came in between. Deleting a chat drops queued renames, reads and exports of it but keeps the
+settings part of queued saves. A pasted API key is cleared when another server is picked or
+a new profile starts. An update waiting on a save also waits for a reply in progress, then
+installs after the save that follows it (`a_deferred_update_survives_a_reply`; its check was
+corrected to look for the save in flight rather than in the queue). `cargo fmt --check`,
+clippy and `cargo test` pass (93 library, 132 app, 8 CLI, 8 diagnose, 10 transport, 9 update).
+Not checked in a running bloop.
+
+## Prompt recall with Up and Down (2026-11-12)
+
+`cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test --bin bloop`
+(123 passed) are clean. `up_and_down_recall_this_chats_prompts` checks that Up on an empty
+prompt brings back the newest prompt and then older ones, stops at the oldest, Down walks back
+and clears, and Up does nothing on a typed draft. Recall is off while a reply streams, while
+editing, and with clipboard text attached; it only reacts to unmodified arrows the prompt
+didn't handle.
+
+Not verified: pressing the keys in a running bloop (another copy held the single-instance
+mutex), and the caret landing at the end of the recalled text.
+
+Ctrl+N in the notch starts a new chat (124 tests pass). `ctrl_n_starts_a_new_chat_only_in_the_open_notch`
+checks it does nothing while the notch is closed or for another window. Not pressed in a
+running bloop.
+
+## Custom instructions (2026-11-12)
+
+Passed: `cargo fmt`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+and `cargo test` (260 passed, four existing live CLI/network tests ignored). The suite
+was rerun after boxing save-job config snapshots. The initial sandbox run could not
+access Credential Manager; the complete suite passed with normal Windows access.
+
+Covered: old config defaults, trimmed multiline round-trip, UTF-8 byte limits,
+unchanged empty system text, appended instructions and exact context-budget boundary;
+Ollama/OpenAI HTTP payloads via loopback fixtures, ChatGPT developer payload and CLI
+flattening; editor loading, edits, Save/clear, oversized draft rejection, shared
+instructions across profiles and draft reset on reopening.
+
+Not checked: appearance or interaction in a running app, or instruction-following by
+live models. No bloop app was launched; the installed copy was left running.
+
+## Notch context, icon buttons and dropdowns (2026-11-12)
+
+Passed: `cargo fmt`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+and `cargo test` (266 passed, four existing live CLI/network tests ignored). Builds used
+the worktree's default `target/debug`; `CARGO_TARGET_DIR` was not set. The initial sandbox
+run failed `secrets::tests::blank_key_removes` and `secrets::tests::credential_round_trip`
+because Credential Manager had no logon session; both passed with normal Windows access.
+
+Covered: all three context modes select the newest complete pairs in chronological
+order (12, 3, or none), skip interrupted turns, keep the system message/instructions and
+current prompt, and respect the 32 KiB budget. Old config defaults and all mode round-trips
+pass. UI state tests check immediate application and queued saves without saving pending
+Model edits, and key paste trimming, empty clipboard, provider/endpoint/profile mismatches
+and environment-key handling. The existing subset-font test verifies all reused icons.
+
+Reviewed Iced widget 0.14.2 source: pick-list padding flows to the overlay menu, while
+menu style has no item-padding field. Reviewed all NotchWidth panel sizes: S is 480 px
+(424 px inside panel padding), M 540 px and L 600 px. The model control is bounded and
+clipped to 156 px; wrapping the footer keeps its controls within the available width,
+including word fallbacks. Settings/setup dropdowns share the larger item padding.
+
+UI not viewed in a running app. No bloop executable was launched. Actual clipboard
+access, tooltip placement, copied-state appearance and dropdown/footer rendering at
+different Windows scales remain unverified. The mascot implementation and Appearance
+mascot toggle were left untouched. No dependencies or font glyphs were added.
+
+## Mascot outfits (2026-11-12)
+
+`cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass (101 library,
+128 app, and the CLI, diagnose, transport and update suites). New tests: a `Look`
+round-trips, old configs load the default and a partial one fills in the rest; **Surprise
+me** never repeats the current outfit (500 seeds); picking a look applies and saves at once;
+clicking Bloop makes it laugh.
+
+Checked by eye only in an SVG mock that copies the drawing's coordinates (idle face, all hats
+but party and wizard, all eyewear, all outfits): everything sits on the body and inside the
+canvas. Not checked: the real Iced drawing in a running bloop (another copy held the
+single-instance mutex), the party and wizard hats, other moods with accessories (a hop with a
+tall hat, sleepy z and mad mark beside a hat), and the Appearance page's layout at 900 px.
+
+
+## 0.5.0 release build (2026-11-12)
+
+`cargo build --release` and the full checks pass on the merged branch (104 library, 140 app,
+8 CLI, 8 diagnose, 11 transport, 9 update). The release exe was started against a scratch
+`BLOOP_DATA_DIR` with outfits seeded into its settings, and screenshots were taken:
+
+| Check | Result |
+| --- | --- |
+| Setup screen's 96 px Bloop in wizard hat, round glasses, robe, lilac coat | Pass: hat sits on the head inside the canvas, glasses frame the eyes, robe follows the body |
+| Party hat, shades, bow tie, mint coat | Pass |
+| Top hat, monocle, cape, classic coat | Pass: cape hangs behind the body |
+| App window Home page reports bloop 0.5.0 | Pass |
+
+Not checked: the Appearance page's Bloop section, the Model page (custom instructions, Paste
+key, bigger dropdowns) and the open notch (context selector, header and greeting Bloop,
+prompt recall, Ctrl+N). Synthetic mouse clicks and hover didn't reach the window, and
+AGENTS.md says not to drive the desktop, so these need a person.

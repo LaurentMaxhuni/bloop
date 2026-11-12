@@ -275,3 +275,19 @@ async fn real_github_latest_does_not_error() {
     let result = update::latest(&Version::current()).await;
     assert!(result.is_ok(), "{result:?}");
 }
+
+/// Real GitHub, as a build one release behind sees it (network, downloads the installer):
+/// `cargo test --test update -- --ignored`.
+#[tokio::test]
+#[ignore = "downloads the latest installer from GitHub"]
+async fn real_github_older_build_downloads_latest() {
+    let older = v("0.0.1");
+    let release = update::latest(&older)
+        .await
+        .unwrap()
+        .expect("a published release");
+    let dir = temp_dir("real");
+    let path = update::download(&release, &dir, |_| {}).await.unwrap();
+    assert_eq!(update::ready(&dir, &older), Some((release.version, path)));
+    std::fs::remove_dir_all(dir).unwrap();
+}

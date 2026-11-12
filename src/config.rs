@@ -78,6 +78,37 @@ pub enum ThemeChoice {
     System,
 }
 
+/// How much completed chat history accompanies the next prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ContextMode {
+    #[default]
+    Full,
+    Last3,
+    OnlyMessage,
+}
+
+impl ContextMode {
+    pub const ALL: [Self; 3] = [Self::Full, Self::Last3, Self::OnlyMessage];
+
+    pub fn max_turns(self) -> usize {
+        match self {
+            Self::Full => 12,
+            Self::Last3 => 3,
+            Self::OnlyMessage => 0,
+        }
+    }
+}
+
+impl std::fmt::Display for ContextMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Full => "Full chat",
+            Self::Last3 => "Last 3 turns",
+            Self::OnlyMessage => "Only this message",
+        })
+    }
+}
+
 /// Colour for buttons, focus rings and the mascot's cheeks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Accent {
@@ -191,6 +222,9 @@ pub struct Config {
     pub provider: Provider,
     pub endpoint: String,
     pub model: String,
+    /// Global reply preferences, sent with every message across all profiles.
+    pub instructions: String,
+    pub context: ContextMode,
     pub shortcut: String,
     pub theme: ThemeChoice,
     /// First-launch setup finished; old configs without it load as false.
@@ -201,9 +235,81 @@ pub struct Config {
     pub notch_width: NotchWidth,
     pub notch_position: NotchPosition,
     pub mascot: bool,
+    /// The mascot's hat, glasses, outfit and colour.
+    pub look: Look,
     /// Look for new versions on GitHub every six hours.
     pub auto_update: bool,
     pub hover_delay_ms: u16,
+    /// Global shortcut that opens the notch with the clipboard's text attached; empty = off.
+    pub ask_shortcut: String,
+    /// Saved model profiles besides the main one (provider, endpoint and model above).
+    pub profiles: Vec<Profile>,
+    /// The profile new chats start on: 0 is the main one, else a saved profile's id.
+    pub default_profile: u32,
+}
+
+/// A named provider, endpoint and model to switch to from the notch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Profile {
+    /// Never 0: that id means the main profile.
+    pub id: u32,
+    pub name: String,
+    pub provider: Provider,
+    pub endpoint: String,
+    pub model: String,
+}
+
+pub const MAX_PROFILES: usize = 8;
+pub const MAX_INSTRUCTIONS: usize = 2048;
+
+/// The name shown for profile 0, the provider, endpoint and model kept at the top level.
+pub const MAIN_PROFILE: &str = "Main";
+
+/// Where a chat's messages go. Context collected for one destination is never sent to
+/// another, so a chat keeps the destination of its first message.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Destination {
+    /// A model server on this computer (loopback endpoint).
+    Local,
+    /// Anything else, named by provider or endpoint origin.
+    Cloud(String),
+}
+
+impl Destination {
+    /// Stable text form saved with a chat: "local" or "cloud:<name>".
+    pub fn key(&self) -> String {
+        match self {
+            Destination::Local => "local".into(),
+            Destination::Cloud(name) => format!("cloud:{name}"),
+        }
+    }
+
+    /// Reads `key()`'s form back; anything unknown counts as cloud.
+    pub fn from_key(key: &str) -> Destination {
+        match key.strip_prefix("cloud:") {
+            _ if key == "local" => Destination::Local,
+            Some(name) => Destination::Cloud(name.into()),
+            None => Destination::Cloud(key.into()),
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Destination::Local => "Local",
+            Destination::Cloud(_) => "Cloud",
+        }
+    }
+
+    /// Who receives the chat, for messages: "this computer", "ChatGPT", a host name.
+    pub fn describe(&self) -> String {
+        match self {
+            Destination::Local => "this computer".into(),
+            Destination::Cloud(name) => name
+                .split_once("://")
+                .map_or(name.as_str(), |(_, host)| host)
+                .to_owned(),
+        }
+    }
 }
 
 /// The saved shape, which may still carry the old `light` flag instead of `theme`.
@@ -223,6 +329,8 @@ struct ConfigFields {
     provider: Provider,
     endpoint: String,
     model: String,
+    instructions: String,
+    context: ContextMode,
     shortcut: String,
     onboarded: bool,
     accent: Accent,
@@ -231,8 +339,12 @@ struct ConfigFields {
     notch_width: NotchWidth,
     notch_position: NotchPosition,
     mascot: bool,
+    look: Look,
     hover_delay_ms: u16,
     auto_update: bool,
+    ask_shortcut: String,
+    profiles: Vec<Profile>,
+    default_profile: u32,
 }
 
 impl Default for ConfigFields {
@@ -242,6 +354,8 @@ impl Default for ConfigFields {
             provider: c.provider,
             endpoint: c.endpoint,
             model: c.model,
+            instructions: c.instructions,
+            context: c.context,
             shortcut: c.shortcut,
             onboarded: c.onboarded,
             accent: c.accent,
@@ -250,8 +364,12 @@ impl Default for ConfigFields {
             notch_width: c.notch_width,
             notch_position: c.notch_position,
             mascot: c.mascot,
+            look: c.look,
             auto_update: c.auto_update,
             hover_delay_ms: c.hover_delay_ms,
+            ask_shortcut: c.ask_shortcut,
+            profiles: c.profiles,
+            default_profile: c.default_profile,
         }
     }
 }
@@ -263,6 +381,8 @@ impl From<StoredConfig> for Config {
             provider: f.provider,
             endpoint: f.endpoint,
             model: f.model,
+            instructions: f.instructions.trim().to_owned(),
+            context: f.context,
             shortcut: f.shortcut,
             theme: stored.theme.unwrap_or(match stored.light {
                 Some(true) => ThemeChoice::Light,
@@ -275,12 +395,21 @@ impl From<StoredConfig> for Config {
             notch_width: f.notch_width,
             notch_position: f.notch_position,
             mascot: f.mascot,
+            look: f.look,
             auto_update: f.auto_update,
             // Hand-edited or future values snap to the nearest choice instead of failing to load.
             hover_delay_ms: *HOVER_DELAYS_MS
                 .iter()
                 .min_by_key(|&&ms| ms.abs_diff(f.hover_delay_ms))
                 .unwrap_or(&150),
+            ask_shortcut: f.ask_shortcut,
+            // A hand-edited default that names no saved profile falls back to the main one.
+            default_profile: if f.profiles.iter().any(|p| p.id == f.default_profile) {
+                f.default_profile
+            } else {
+                0
+            },
+            profiles: f.profiles,
         }
     }
 }
@@ -291,6 +420,8 @@ impl Default for Config {
             provider: Provider::Ollama,
             endpoint: "http://127.0.0.1:11434".into(),
             model: "qwen3:4b".into(),
+            instructions: String::new(),
+            context: ContextMode::Full,
             shortcut: "Ctrl+Alt+B".into(),
             theme: ThemeChoice::Dark,
             onboarded: false,
@@ -300,8 +431,12 @@ impl Default for Config {
             notch_width: NotchWidth::M,
             notch_position: NotchPosition::Centre,
             mascot: true,
+            look: Look::default(),
             auto_update: true,
             hover_delay_ms: 150,
+            ask_shortcut: "Ctrl+Alt+Shift+A".into(),
+            profiles: Vec::new(),
+            default_profile: 0,
         }
     }
 }
@@ -326,40 +461,340 @@ pub fn validate_endpoint(value: &str) -> Result<reqwest::Url, String> {
     Ok(url)
 }
 
+/// Checks one provider, endpoint and model combination.
+pub fn validate_model(provider: Provider, endpoint: &str, model: &str) -> Result<(), String> {
+    if provider.is_cli() {
+        // The model becomes a CLI argument, so it may never look like a flag or contain spaces.
+        let model = model.trim();
+        if model.len() > 200 {
+            return Err("Model must contain at most 200 bytes.".into());
+        }
+        if model.starts_with('-')
+            || !model
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._:/-".contains(c))
+        {
+            return Err("Model may contain only letters, digits and . _ : / -".into());
+        }
+    } else if provider == Provider::ChatGpt {
+        if model.len() > 200 {
+            return Err("Model must contain at most 200 bytes.".into());
+        }
+    } else {
+        validate_endpoint(endpoint)?;
+        if model.trim().is_empty() || model.len() > 200 {
+            return Err("Model must contain 1–200 bytes.".into());
+        }
+    }
+    Ok(())
+}
+
+/// Where messages for `provider` at `endpoint` end up.
+pub fn destination(provider: Provider, endpoint: &str) -> Destination {
+    match provider {
+        Provider::ClaudeCode => Destination::Cloud("Claude Code".into()),
+        Provider::Codex => Destination::Cloud("Codex".into()),
+        Provider::ChatGpt => Destination::Cloud("ChatGPT".into()),
+        Provider::Ollama | Provider::OpenAi | Provider::Unsloth => {
+            match validate_endpoint(endpoint) {
+                Ok(url) if url.scheme() == "http" => Destination::Local,
+                Ok(url) => Destination::Cloud(url.origin().ascii_serialization()),
+                // Invalid endpoints never send; name them so they never match a real one.
+                Err(_) => Destination::Cloud(format!("invalid:{endpoint}")),
+            }
+        }
+    }
+}
+
+impl Profile {
+    pub fn validate(&self) -> Result<(), String> {
+        let name = self.name.trim();
+        if name.is_empty() || name.chars().count() > 40 {
+            return Err("Give the profile a name of 1–40 characters.".into());
+        }
+        if self.id == 0 {
+            return Err("Profile id 0 is reserved for the main profile.".into());
+        }
+        validate_model(self.provider, &self.endpoint, &self.model)
+    }
+}
+
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
-        if self.provider.is_cli() {
-            // The model becomes a CLI argument, so it may never look like a flag or contain spaces.
-            let model = self.model.trim();
-            if model.len() > 200 {
-                return Err("Model must contain at most 200 bytes.".into());
-            }
-            if model.starts_with('-')
-                || !model
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "._:/-".contains(c))
-            {
-                return Err("Model may contain only letters, digits and . _ : / -".into());
-            }
-        } else if self.provider == Provider::ChatGpt {
-            if self.model.len() > 200 {
-                return Err("Model must contain at most 200 bytes.".into());
-            }
-        } else {
-            validate_endpoint(&self.endpoint)?;
-            if self.model.trim().is_empty() || self.model.len() > 200 {
-                return Err("Model must contain 1–200 bytes.".into());
-            }
+        validate_model(self.provider, &self.endpoint, &self.model)?;
+        if self.instructions.trim().len() > MAX_INSTRUCTIONS {
+            return Err(format!(
+                "Custom instructions must contain at most {MAX_INSTRUCTIONS} bytes."
+            ));
         }
         if self.shortcut.trim().is_empty() || self.shortcut.len() > 100 {
             return Err("Enter a global shortcut, such as Ctrl+Alt+B.".into());
         }
+        if self.ask_shortcut.len() > 100 {
+            return Err("The clipboard shortcut is too long.".into());
+        }
+        if self.profiles.len() > MAX_PROFILES {
+            return Err(format!("Keep at most {MAX_PROFILES} saved profiles."));
+        }
+        let mut ids = std::collections::HashSet::new();
+        for profile in &self.profiles {
+            profile.validate()?;
+            if !ids.insert(profile.id) {
+                return Err("Two profiles share an id.".into());
+            }
+        }
+        if self.default_profile != 0 && !ids.contains(&self.default_profile) {
+            return Err("The default profile no longer exists.".into());
+        }
         Ok(())
+    }
+
+    /// Where this config's default model sends messages.
+    pub fn destination(&self) -> Destination {
+        destination(self.provider, &self.endpoint)
+    }
+
+    /// This config with profile `id`'s provider, endpoint and model swapped in; 0 is the
+    /// main profile. `None` when the profile no longer exists.
+    pub fn with_profile(&self, id: u32) -> Option<Config> {
+        if id == 0 {
+            return Some(self.clone());
+        }
+        let profile = self.profiles.iter().find(|p| p.id == id)?;
+        Some(Config {
+            provider: profile.provider,
+            endpoint: profile.endpoint.clone(),
+            model: profile.model.clone(),
+            ..self.clone()
+        })
+    }
+
+    /// The display name of profile `id`.
+    pub fn profile_name(&self, id: u32) -> Option<&str> {
+        if id == 0 {
+            return Some(MAIN_PROFILE);
+        }
+        self.profiles
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.name.as_str())
+    }
+
+    /// The profile new chats start on, falling back to the main one.
+    pub fn default_profile(&self) -> u32 {
+        if self.profile_name(self.default_profile).is_some() {
+            self.default_profile
+        } else {
+            0
+        }
+    }
+
+    /// An id no saved profile uses yet.
+    pub fn next_profile_id(&self) -> u32 {
+        self.profiles.iter().map(|p| p.id).max().unwrap_or(0) + 1
+    }
+}
+
+macro_rules! choice {
+    ($(#[$meta:meta])* $name:ident { $($variant:ident => $label:literal),+ $(,)? }) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+        pub enum $name {
+            #[default]
+            $($variant),+
+        }
+
+        impl $name {
+            pub const ALL: &'static [$name] = &[$($name::$variant),+];
+
+            pub fn label(self) -> &'static str {
+                match self {
+                    $($name::$variant => $label),+
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.label())
+            }
+        }
+    };
+}
+
+choice!(
+    /// Something on Bloop's head; any hat hides the antenna.
+    Hat {
+        None => "None",
+        TopHat => "Top hat",
+        Beanie => "Beanie",
+        Cap => "Cap",
+        Crown => "Crown",
+        Party => "Party",
+        Wizard => "Wizard",
+    }
+);
+
+choice!(
+    /// Something over Bloop's eyes.
+    Eyewear {
+        None => "None",
+        Sunglasses => "Shades",
+        Round => "Glasses",
+        Monocle => "Monocle",
+    }
+);
+
+choice!(
+    /// Something Bloop wears below the face.
+    Outfit {
+        None => "None",
+        BowTie => "Bow tie",
+        Scarf => "Scarf",
+        Robe => "Robe",
+        Cape => "Cape",
+    }
+);
+
+choice!(
+    /// Bloop's body colour; Classic follows the theme's text colour.
+    Coat {
+        Classic => "Classic",
+        Mint => "Mint",
+        Peach => "Peach",
+        Lilac => "Lilac",
+        Sky => "Sky",
+        Lemon => "Lemon",
+    }
+);
+
+/// How Bloop is dressed. Saved with the settings; anything unknown loads as the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Look {
+    pub hat: Hat,
+    pub eyewear: Eyewear,
+    pub outfit: Outfit,
+    pub coat: Coat,
+}
+
+impl Look {
+    /// A random outfit that differs from `self`, seeded by the caller (no extra dependency).
+    pub fn shuffled(self, seed: u64) -> Look {
+        let pick = |n: usize, shift: u32| ((seed >> shift) as usize) % n;
+        let next = Look {
+            hat: Hat::ALL[pick(Hat::ALL.len(), 0)],
+            eyewear: Eyewear::ALL[pick(Eyewear::ALL.len(), 8)],
+            outfit: Outfit::ALL[pick(Outfit::ALL.len(), 16)],
+            coat: Coat::ALL[pick(Coat::ALL.len(), 24)],
+        };
+        if next == self {
+            Look {
+                hat: Hat::ALL[(pick(Hat::ALL.len(), 0) + 1) % Hat::ALL.len()],
+                ..next
+            }
+        } else {
+            next
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn context_defaults_and_round_trips() {
+        use super::{Config, ContextMode};
+
+        let old: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.context, ContextMode::Full);
+        for mode in ContextMode::ALL {
+            let config = Config {
+                context: mode,
+                ..Config::default()
+            };
+            let back: Config =
+                serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+            assert_eq!(back.context, mode);
+        }
+    }
+
+    #[test]
+    fn mascot_look_round_trips_and_unknown_parts_fall_back() {
+        use super::{Coat, Eyewear, Hat, Look, Outfit};
+        let old: super::Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.look, Look::default());
+        let look = Look {
+            hat: Hat::Wizard,
+            eyewear: Eyewear::Sunglasses,
+            outfit: Outfit::Robe,
+            coat: Coat::Lilac,
+        };
+        let config = super::Config {
+            look,
+            ..super::Config::default()
+        };
+        let back: super::Config =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(back.look, look);
+        let partial: super::Config = serde_json::from_str(r#"{"look": {"hat": "Crown"}}"#).unwrap();
+        assert_eq!(partial.look.hat, Hat::Crown);
+        assert_eq!(partial.look.outfit, Outfit::None);
+    }
+
+    #[test]
+    fn shuffled_look_always_changes() {
+        use super::Look;
+        let mut look = Look::default();
+        for seed in 0..500u64 {
+            let next = look.shuffled(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            assert_ne!(next, look);
+            look = next;
+        }
+    }
+
+    #[test]
+    fn custom_instructions_default_and_round_trip() {
+        let old: super::Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(serde_json::to_value(old).unwrap()["instructions"], "");
+        let config: super::Config = serde_json::from_value(serde_json::json!({
+            "instructions": "  I write Rust.\nKeep replies short.  "
+        }))
+        .unwrap();
+        let back: super::Config =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(back).unwrap()["instructions"],
+            "I write Rust.\nKeep replies short."
+        );
+    }
+
+    #[test]
+    fn custom_instructions_limit_counts_trimmed_utf8_bytes() {
+        let config = |instructions: String| -> super::Config {
+            serde_json::from_value(serde_json::json!({"instructions": instructions})).unwrap()
+        };
+        assert!(
+            config(format!("  {}\n", "é".repeat(1024)))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            super::Config {
+                instructions: format!("  {}\n", "é".repeat(1024)),
+                ..super::Config::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        let error = config(format!("{}a", "é".repeat(1024)))
+            .validate()
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Custom instructions must contain at most 2048 bytes."
+        );
+    }
+
     #[test]
     fn plaintext_remote_endpoint_is_rejected() {
         assert!(super::validate_endpoint("http://example.com:11434").is_err());
@@ -503,5 +938,92 @@ mod tests {
             "http://127.0.0.1:8888/v1"
         );
         assert_eq!(Provider::ALL.len(), 6);
+    }
+
+    #[test]
+    fn destinations_split_local_from_cloud() {
+        use super::{Destination, Provider, destination};
+        assert_eq!(
+            destination(Provider::Ollama, "http://127.0.0.1:11434"),
+            Destination::Local
+        );
+        assert_eq!(
+            destination(Provider::OpenAi, "https://api.example.com/v1"),
+            Destination::Cloud("https://api.example.com".into())
+        );
+        assert_eq!(destination(Provider::Codex, "").key(), "cloud:Codex");
+        assert_ne!(
+            destination(Provider::OpenAi, "https://a.example.com/v1"),
+            destination(Provider::OpenAi, "https://b.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn profiles_validate_and_swap_in() {
+        use super::{Config, Profile, Provider};
+        let mut config = Config::default();
+        let work = Profile {
+            id: config.next_profile_id(),
+            name: "Work".into(),
+            provider: Provider::ChatGpt,
+            endpoint: String::new(),
+            model: String::new(),
+        };
+        config.profiles.push(work.clone());
+        assert!(config.validate().is_ok());
+        let swapped = config.with_profile(work.id).unwrap();
+        assert_eq!(swapped.provider, Provider::ChatGpt);
+        assert_eq!(swapped.shortcut, config.shortcut);
+        assert!(config.with_profile(99).is_none());
+        assert_eq!(config.profile_name(0), Some("Main"));
+
+        config.profiles.push(work);
+        assert!(config.validate().is_err(), "duplicate ids");
+        config.profiles.pop();
+        config.profiles[0].name = " ".into();
+        assert!(config.validate().is_err(), "blank name");
+    }
+
+    #[test]
+    fn old_config_has_no_profiles_and_the_default_ask_shortcut() {
+        let c: super::Config = serde_json::from_str("{}").unwrap();
+        assert!(c.profiles.is_empty());
+        assert_eq!(c.ask_shortcut, "Ctrl+Alt+Shift+A");
+        assert_eq!(c.default_profile, 0);
+    }
+
+    #[test]
+    fn default_profile_must_name_a_saved_profile() {
+        use super::{Config, Profile, Provider};
+        let mut config = Config::default();
+        config.profiles.push(Profile {
+            id: 3,
+            name: "Work".into(),
+            provider: Provider::Codex,
+            endpoint: String::new(),
+            model: String::new(),
+        });
+        config.default_profile = 3;
+        assert!(config.validate().is_ok());
+        assert_eq!(config.default_profile(), 3);
+        config.default_profile = 4;
+        assert!(config.validate().is_err());
+        assert_eq!(
+            config.default_profile(),
+            0,
+            "falls back to the main profile"
+        );
+
+        // A saved file naming a missing profile loads with the main one as default.
+        let json = serde_json::json!({ "default_profile": 9 }).to_string();
+        let loaded: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.default_profile, 0);
+        let json = serde_json::to_string(&config.clone()).unwrap();
+        let mut back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.default_profile, 0, "4 isn't saved");
+        back.default_profile = 3;
+        let json = serde_json::to_string(&back).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.default_profile, 3);
     }
 }

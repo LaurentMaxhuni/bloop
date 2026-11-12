@@ -138,3 +138,185 @@ draws a small Bloop beside each reply. Only the newest one moves, and only on th
 notch mascot already runs, so this adds no new timers. Older replies show Bloop asleep, as
 does the newest after 45 s of quiet. The two new moods are Laughing (squeezed eyes, open
 mouth, a bounce that fades) and Mad (slanted brows, frown, a brief tremble, an anger mark).
+
+## Chats, model profiles and clipboard ask (2026-11-12)
+
+- **Chats replace the single history.** A `chats` table holds one row per conversation
+  (title, profile, destination, last change, turns as JSON). On first load the old
+  `state.history` becomes one chat in a single transaction and is emptied, so the
+  migration runs once. The old schema never recorded where that history was sent (the
+  settings may have changed since), so the imported chat is marked `unknown` and bloop
+  won't send it anywhere; it can be read, exported or deleted. A chat without turns is
+  never written, so "New chat" costs nothing. Chat ids are creation times in
+  milliseconds, assigned in the UI, so a save never needs a round trip to learn its id.
+- **One storage queue.** Saves (settings plus the chat in the notch), renames, deletes and
+  loads of whole chats run one at a time, in order, each with a snapshot taken when it was
+  queued (`ui/jobs.rs`). A newer save replaces queued saves of the same chat; a delete
+  drops that chat's queued saves and renames and runs after the one in flight. So
+  switching chats can't lose the outgoing chat's last reply, an old save can't bring a
+  deleted chat back, and opening a chat reads its newest turns. Quit and Restart to update
+  wait for the queue to empty. Search reads outside the queue; it may miss a reply still
+  being saved. (Found by Codex reviewing the first version, which tracked one save.)
+- **A chat keeps its destination.** Each chat records where its first message went:
+  `local` (a loopback endpoint) or `cloud:<provider or origin>`. bloop refuses to send a
+  chat's history anywhere else, including Retry, which would resend an old prompt. Changing
+  the default model or a profile's endpoint therefore can't move local context to a cloud
+  service; the user starts a new chat instead. Switching profile in the notch does exactly
+  that when the chat already has turns.
+- **Profiles** are extra named provider/endpoint/model sets in the config (at most 8); the
+  existing provider, endpoint and model stay the default profile, so older configs load
+  unchanged. Sending swaps the chat's profile into a copy of the config, so the provider
+  code didn't change.
+- **Default profile (2026-11-12).** `default_profile` names the profile new chats start
+  on (0, the built-in one, unless the user stars another). The built-in profile is shown
+  as "Main" rather than "Default", because the default can now be any profile. The star
+  applies and saves at once, like Appearance, and never touches unsaved Model page edits;
+  Save keeps the stored value. Deleting the starred profile hands the star back to Main,
+  and a saved file naming a missing profile loads with Main as the default. New chat now
+  starts on the default instead of the current chat's profile, so the star means one
+  thing everywhere. Deleting a profile asks first, as deleting a chat does.
+- **Icons over long labels (2026-11-12).** Frequent actions (send, stop, copy, retry,
+  edit, new chat, chat list, profile and chat row actions, page links on Home) are Lucide
+  icons with a tooltip; they show their word until the icon font loads, as the header
+  already did. Confirmations (Keep/Delete), Save, sign-in and setup keep text, where a
+  wrong guess costs more. The font subset grew to 27 glyphs (10 KB); a test reads the
+  font's cmap so a code point missing from the subset fails the build instead of drawing
+  a box.
+- **API keys follow the endpoint.** Saved keys are keyed by endpoint origin in Credential
+  Manager (`bloop/api-key/<origin>`), so a profile for one server never sends the key
+  saved for another. The old single key moves to the endpoint configured at first start.
+  `BLOOP_API_KEY` still applies to every endpoint, as before. The single key an older
+  bloop saved isn't moved automatically, because the endpoint may have changed since it
+  was saved; the Model page offers to tie it to the endpoint shown, and it's never sent
+  until the user does. A key typed into the field is dropped when the provider, profile or
+  server changes, so it can't be saved for a server it wasn't pasted for.
+- **Clipboard ask** is a second global hotkey (default Ctrl+Alt+Shift+A, empty turns it
+  off). It reads clipboard text only when pressed, attaches up to 6 KiB below the
+  question in a code fence longer than any backtick run inside it, and shows the text and
+  the destination before anything is sent. The attachment belongs to the chat it was made
+  in: New chat, opening another chat or a late clipboard read never carries it over. No image capture yet: many supported models
+  can't read images, so a screen-region feature should go through local OCR first.
+- **Markdown export** writes a chat through the standard Windows Save dialog; nothing is
+  written without the user picking a file.
+
+## Monitor placement (2026-11-12)
+
+The notch uses physical HWND placement on its owning Iced event-loop thread. Shortcut
+opening from the sliver targets the foreground application's monitor, ignoring our own
+process, then the cursor, then primary. Other placements retain the current monitor.
+The work-area origin stays physical; only canvas dimensions and edge inset are scaled.
+Two synchronous SetWindowPos calls preserve activation and Z order: the first lets
+winit 0.30.13 handle WM_DPICHANGED and its suggested rectangle, and the second restores
+our exact requested rectangle after that handler returns. There is no timer or polling.
+Initial window settings retain the existing primary_position logical-coordinate helper.
+See Microsoft's SetWindowPos documentation:
+https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setwindowpos
+
+## Connection diagnostics (2026-11-12)
+
+The library's diagnose::test_connection returns a Report and has a ten-second overall
+budget. HTTP providers reuse the existing bounded model-list GET (three seconds), without
+sending chat content. ChatGPT first reads account/plan status and lists models only when
+plan usage is enabled; at most one existing token-refresh request precedes that GET.
+The refresh remains cancellation-safe and may finish persisting rotated credentials after
+the diagnostic deadline. No new endpoint or background request is introduced.
+CLI discovery uses cli::find on a blocking worker and does not start any program or claim
+authentication was checked. Provider errors retain HTTP status and URL-stripped reqwest
+causes so diagnostics can distinguish refused connections, TLS failures and timeouts.
+
+## Markdown export helpers (2026-11-12)
+
+export::markdown preserves turn text and marks interrupted replies before their content,
+so an unfinished code fence cannot hide the marker. Suggested names remove Windows-invalid
+characters and device names, trim dots/whitespace, and cap the complete name at 120 UTF-16
+code units while preserving Unicode scalar boundaries. The library does no file I/O.
+platform::save_file_dialog uses GetSaveFileNameW with call-local UTF-16 buffers, no owner
+HWND or callbacks, a Markdown filter/default extension, overwrite confirmation and
+OFN_NOCHANGEDIR. It runs on the caller's blocking worker and returns a path or cancellation;
+the caller writes the file. The native call has its own modal message loop, so it does not
+block Iced. No COM initialization or application window handle crosses threads.
+API reference: https://learn.microsoft.com/windows/win32/api/commdlg/nf-commdlg-getsavefilenamew
+
+## Self-update fixes (2026-11-12)
+
+Why auto-update looked broken: the check, download and checksum all work against the real
+v0.4.0 release, and so does the silent install. The problem was which copy runs.
+`platform::migrate_autostart` rewrote the HKCU Run value whenever it differed from the
+running exe, so starting a dev build (`target\debug\bloop.exe`) once made it the copy that
+starts at sign-in. That copy holds the single-instance mutex, so the installed copy never runs
+and never updates, and the dev build's version only changes when someone rebuilds it.
+Migration now rewrites only this exe's own pre-`--background` value (`"<exe>"`, compared
+without case) and leaves a value that names another exe alone. The in-app "Start with
+Windows" switch still writes the running exe, because that is an explicit choice.
+
+A failed scheduled check or download used to wait the full six hours. At sign-in the network
+is often not up 30 s after start, so one failure could skip a whole day of checks. Retries now
+come 5 min after a failure and double each time (10, 20, … min) up to the usual six hours,
+and the delay resets after a success. No request is added while things work, and switching
+auto-update off still stops every scheduled check. The only network access is still the
+GitHub Releases check, the asset download and their GitHub redirects.
+
+The installer is started through `update::installer_command`, shared by the app and the dry
+run, so the arguments can't drift. It adds `/LOG=<updates>\install.log`, which makes a
+failed update diagnosable after the fact. Setup is started with `CREATE_BREAKAWAY_FROM_JOB`
+first, so it survives bloop's exit when a launcher put bloop in a kill-on-close job, and as a
+plain child if the job forbids breaking away. `installer/bloop.iss` now waits up to 30 s
+(was 15 s) for the mutex. If setup stops after bloop has quit but before installing anything,
+its new `DeinitializeSetup` reopens the existing copy with `--background`, so a failed update
+no longer leaves the user with no bloop at all.
+
+`/DFixture` builds the same script as a separate app (its own AppId, name, mutex, folder,
+shortcuts and Run value). `examples/update_dry_run.rs` uses it to run a real
+install → check → download → verify → setup → relaunch cycle without touching an installed
+bloop. A normal build compiles the script exactly as before.
+
+## Custom instructions (2026-11-12)
+
+Custom instructions are one global setting, edited on the Model page and saved with
+the existing settings flow. Outer whitespace is trimmed; the text is capped at 2048
+UTF-8 bytes to keep this per-message overhead small. Old configs default to empty.
+The context builder appends a labelled `<instructions>` block after the unchanged
+fixed system message, explicitly describing it as preferences, not permission to use
+tools. Keeping it in the system message gives every provider the same context:
+ChatGPT maps it to developer context, and CLIs retain their existing flattening of
+the system message into a user-labelled turn. The entire system message, including
+the block and its delimiters, counts against the 32 KiB context budget; old whole
+pairs are dropped first, and the current prompt is always retained.
+Save jobs box their config snapshot to keep the queue's enum small as settings grow.
+
+## Context selector and dropdowns (2026-11-12)
+
+`Config.context` stores a global `ContextMode`: Full (the default for old configs),
+Last3, or OnlyMessage. Changing the notch selector applies and persists immediately,
+including the settings draft, without saving pending Model page edits. Each send or
+retry snapshots its turn limit (12, 3, or 0) into `model::context`; existing requests
+are unaffected. The builder still keeps only complete whole pairs, newest first within
+the 32 KiB budget, then emits them in chronological order. The system message, custom
+instructions and current prompt remain in every mode. History stays stored and visible.
+
+Notch dropdowns use 13 px text and [4, 10] padding; settings/setup use 15 px and [10, 14].
+Iced widget 0.14.2 forwards pick-list padding to its overlay menu, so these changes also
+enlarge menu items; `style::menu` controls colours/borders and has no item-padding field.
+The smallest open panel is 480 px with 424 px inside its horizontal padding. The model
+control is bounded to 156 px; the context selector keeps its full labels. The footer wraps
+when controls need more room, including word fallbacks while the icon font is unavailable.
+
+Code-block copy uses the existing Copy/Check glyphs and a tooltip, falling back to words.
+Paste key reads the clipboard only on click and fills the draft without saving a secret;
+late results for a different provider, endpoint or edited profile are ignored. Additional
+retry, cancel, update-restart and setup-restart actions reuse existing glyphs and word
+fallbacks. No dependency, font change, background read or network connection was added.
+
+## Mascot outfits (2026-11-12)
+
+Bloop's hat, eyewear, outfit and body colour are a `Look` saved with the settings
+(`config.rs`, so the library still has no GUI code; unknown or missing parts load as the
+default). `mascot.rs` draws them on the same 24-unit grid as the body. A hat would poke out
+of the canvas, so each hat adds headroom (4–8 units) above the grid and Bloop is drawn a
+little smaller in the same square; the antenna is hidden under any hat. A tinted coat uses a
+fixed dark face so it reads in both themes, and accessory colours are fixed for the same
+reason. The outfit is drawn under the face so a laughing mouth stays visible, the cape before
+the body so it hangs behind. To make Bloop more present, the open notch's header shows it at
+36 px (was 30), an empty chat greets you with a 72 px Bloop, and clicking it makes it laugh.
+Appearance changes apply and save at once, like the rest of that page.
+

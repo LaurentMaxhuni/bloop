@@ -145,6 +145,23 @@ pub fn parse_checksum(text: &str, file_name: &str) -> Option<[u8; 32]> {
     })
 }
 
+/// How a downloaded installer is started: silently, keeping the previous setup choices, and
+/// with `/RELAUNCH=1` so it waits for bloop to quit and then reopens it in the background.
+/// Setup writes `install.log` next to the installer, so a failed update can be diagnosed.
+pub fn installer_command(installer: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(installer);
+    command.args([
+        "/VERYSILENT",
+        "/SUPPRESSMSGBOXES",
+        "/NORESTART",
+        "/RELAUNCH=1",
+    ]);
+    if let Some(dir) = installer.parent() {
+        command.arg(format!("/LOG={}", dir.join("install.log").display()));
+    }
+    command
+}
+
 pub fn sha256_file(path: &Path) -> std::io::Result<[u8; 32]> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
@@ -490,6 +507,23 @@ mod tests {
         assert!(!ok("https://example.com/x"));
         assert!(!ok("https://github.com.evil.io/x"));
         assert!(!ok("https://githubusercontent.com.evil.io/x"));
+    }
+
+    #[test]
+    fn installer_runs_silently_relaunches_and_logs_next_to_itself() {
+        let dir = Path::new(r"C:\data\updates");
+        let command = installer_command(&dir.join("bloop-setup-0.9.0.exe"));
+        let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
+        assert_eq!(
+            args,
+            [
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/RELAUNCH=1",
+                &format!("/LOG={}", dir.join("install.log").display()),
+            ]
+        );
     }
 
     #[test]

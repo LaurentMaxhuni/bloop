@@ -1,6 +1,8 @@
 pub mod chatgpt;
 pub mod cli;
 pub mod config;
+pub mod diagnose;
+pub mod export;
 pub mod launch;
 pub mod math;
 pub mod model;

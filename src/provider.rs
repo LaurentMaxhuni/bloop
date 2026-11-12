@@ -214,7 +214,7 @@ pub async fn chat<F: Future<Output = bool> + Send>(
         let request = client
             .post(format!("{}/{path}", base.as_str().trim_end_matches('/')))
             .json(&body);
-        match crate::secrets::api_key() {
+        match crate::secrets::api_key(&config.endpoint) {
             Some(key) => request.bearer_auth(key),
             None => request,
         }
@@ -306,7 +306,7 @@ pub async fn list_models(config: &Config) -> Result<Vec<String>, Error> {
         .no_proxy()
         .build()?;
     let mut request = client.get(url);
-    if let Some(key) = crate::secrets::api_key() {
+    if let Some(key) = crate::secrets::api_key(&config.endpoint) {
         request = request.bearer_auth(key);
     }
     let response = request.send().await?;
@@ -457,28 +457,34 @@ fn chatgpt_error(status: Option<u16>, body: &Value, request_id: Option<&str>) ->
         }
         _ => "ChatGPT could not complete the request.",
     };
+    let http_status = status;
     let status = status
         .map(|status| format!(" (HTTP {status})"))
         .unwrap_or_default();
     let request = request_id
         .map(|id| format!(" Request ID: {id}."))
         .unwrap_or_default();
-    Error::Protocol(format!("{hint}{status}{request}"))
+    let message = format!("{hint}{status}{request}");
+    match http_status {
+        Some(status) => Error::Http { status, message },
+        None => Error::Protocol(message),
+    }
 }
 
 /// A failed HTTP status, explained for the provider that returned it.
 fn http_error(provider: Provider, status: u16, hint: &str) -> Error {
     if provider == Provider::Unsloth && status == 401 {
-        return Error::Protocol(
-            "Unsloth Studio rejected the key. Copy the key it printed when the model loaded into Settings."
-                .into(),
-        );
+        return Error::Http {
+            status,
+            message: "Unsloth Studio rejected the key. Copy the key it printed when the model loaded into Settings.".into(),
+        };
     }
-    Error::Protocol(
-        format!("Provider returned HTTP {status}. {hint}")
+    Error::Http {
+        status,
+        message: format!("Provider returned HTTP {status}. {hint}")
             .trim_end()
             .into(),
-    )
+    }
 }
 
 /// CLI providers are routed before reaching the HTTP code (Task 5 wires them up).
@@ -560,9 +566,18 @@ mod tests {
 
     #[test]
     fn chatgpt_uses_stateless_responses_with_developer_context() {
-        let body = responses_body("chosen-model", &crate::model::context(&[], "Hello"));
+        let body = responses_body(
+            "chosen-model",
+            &crate::model::context(&[], "Hello", "Be brief.", 12),
+        );
         assert_eq!(body["model"], "chosen-model");
         assert_eq!(body["input"][0]["role"], "developer");
+        assert!(
+            body["input"][0]["content"]
+                .as_str()
+                .unwrap()
+                .ends_with("<instructions>\nBe brief.\n</instructions>")
+        );
         assert_eq!(body["input"][1], json!({"role":"user", "content":"Hello"}));
         assert_eq!(body["store"], false);
         assert_eq!(body["stream"], true);
@@ -604,12 +619,14 @@ const MAX_FRAME: usize = 256 * 1024;
 pub enum Error {
     #[error("{0}")]
     Protocol(String),
+    #[error("{message}")]
+    Http { status: u16, message: String },
     #[error("Provider connection failed: {0}")]
-    Network(String),
+    Network(#[source] reqwest::Error),
 }
 
 impl From<reqwest::Error> for Error {
     fn from(error: reqwest::Error) -> Self {
-        Self::Network(error.without_url().to_string())
+        Self::Network(error.without_url())
     }
 }

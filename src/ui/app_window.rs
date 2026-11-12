@@ -2,7 +2,6 @@
 
 use super::{AppPage, Island, Message, notch_settings};
 use crate::{icons, platform};
-use bloop::secrets;
 use iced::{Element, Length, Size, Task, widget::container, window};
 
 /// Default and minimum size of the app window, in logical pixels.
@@ -34,8 +33,11 @@ impl Island {
         }
         self.page = AppPage::Home;
         self.draft_config = self.config.clone();
+        self.instructions_editor =
+            iced::widget::text_editor::Content::with_text(&self.draft_config.instructions);
         self.key_draft.clear();
-        self.key_status = secrets::key_source();
+        self.profile_edit = super::ProfileEdit::Default;
+        self.refresh_key_status();
         self.autostart = platform::autostart();
         self.autostart_error.clear();
         let (id, open) = window::open(app_settings());
