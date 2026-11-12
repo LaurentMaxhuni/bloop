@@ -118,3 +118,23 @@ certificate (needs a hardware token or cloud HSM, a yearly fee, and would keep l
 Microsoft Artifact Signing (monthly fee; individual identities limited to a few countries).
 Neither signs Inno's generated uninstaller without a local signing tool. Details:
 `docs/code-signing.md`.
+
+## Paced reveal and reply moods (2026-11-12)
+
+Streaming worked end to end, but it didn't look like it. Measured against the real Codex CLI, a
+short reply spent about 5 s thinking and then arrived in bursts over about 1.5 s, several
+tokens per read, so the text seemed to appear all at once. The fix is in the UI, not the
+providers: `Island::reveal` holds how many bytes of the newest reply are on screen. Each
+mascot tick (33 ms) shows at least 3 more characters, or a sixth of the backlog when that is
+larger. That is about 90 characters a second, and a large backlog drains within about a
+second, so the reveal never lags far behind the model. The first characters show as soon as
+they arrive. Stored history and model context always use the full text. With reduced motion
+the reveal is off.
+
+The reaction (happy, laughing or mad) waits until the reveal catches up. `Mood::for_reply`
+picks it with a cheap word check: laughter ("haha", "lol", 😂) in the reply, or a joke
+request in the prompt, means laughing, and a failed or stopped reply means mad. The chat
+draws a small Bloop beside each reply. Only the newest one moves, and only on the ticks the
+notch mascot already runs, so this adds no new timers. Older replies show Bloop asleep, as
+does the newest after 45 s of quiet. The two new moods are Laughing (squeezed eyes, open
+mouth, a bounce that fades) and Mad (slanted brows, frown, a brief tremble, an anger mark).

@@ -35,6 +35,10 @@ Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to
   blocks with a **Copy** button, and LaTeX math (`$…$`, `\(…\)`, `$$…$$`, `\[…\]`) drawn as
   formulas: fractions, roots, sums and integrals with limits, matrices. Links open in your
   browser (web and mail links only).
+- **Bloop replies in person.** A little Bloop sits beside each reply: it thinks while the model
+  works, mouths along as the text types out, then grins, cracks up at a joke, or gets grumpy
+  when a reply fails or you stop it. Older replies doze off. With reduced motion the text
+  appears at once.
 - **App window.** Setup and settings live in a normal 900 × 620 window with Home, Appearance,
   Model, Shortcut & startup and About pages. First launch walks you through setup; after that,
   the notch's settings icon or the tray's **Settings** bring it back. Closing it leaves bloop

@@ -18,6 +18,10 @@ pub enum Mood {
     Sleepy,
     /// Wide-eyed little hop when the cursor arrives.
     Perk,
+    /// Squeezed-shut eyes and a big open mouth: the reply was funny.
+    Laughing,
+    /// Frowning brows and a little anger mark: the reply failed or was stopped.
+    Mad,
 }
 
 impl Mood {
@@ -25,8 +29,45 @@ impl Mood {
     pub fn animated(self) -> bool {
         matches!(
             self,
-            Self::Thinking | Self::Talking | Self::Happy | Self::Oops | Self::Perk
+            Self::Thinking
+                | Self::Talking
+                | Self::Happy
+                | Self::Oops
+                | Self::Perk
+                | Self::Laughing
+                | Self::Mad
         )
+    }
+
+    /// How Bloop feels about a finished reply: mad when it broke off, laughing when it
+    /// was meant to be funny, happy otherwise.
+    pub fn for_reply(prompt: &str, reply: &str, complete: bool) -> Self {
+        if !complete {
+            return Self::Mad;
+        }
+        let words = |text: &str| {
+            text.to_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let laughing = words(reply).iter().any(|w| {
+            w.starts_with("haha") || w.starts_with("hehe") || matches!(w.as_str(), "lol" | "lmao")
+        }) || ['😂', '🤣', '😆', '😄', '😹']
+            .iter()
+            .any(|e| reply.contains(*e));
+        let asked = words(prompt).iter().any(|w| {
+            matches!(
+                w.as_str(),
+                "joke" | "jokes" | "pun" | "puns" | "funny" | "laugh" | "meme" | "roast"
+            )
+        });
+        if laughing || asked {
+            Self::Laughing
+        } else {
+            Self::Happy
+        }
     }
 }
 
@@ -91,6 +132,18 @@ impl<Message> canvas::Program<Message> for Mascot {
             }
             Mood::Oops => {
                 dx = (self.since * TAU * 7.0).sin() * 1.1 * (1.0 - self.since / 0.7).max(0.0);
+            }
+            Mood::Laughing => {
+                // Fast giggly bounce that settles after a couple of seconds.
+                let fade = (1.0 - self.since / 2.4).max(0.0);
+                let shake = (self.since * TAU * 3.2).sin().abs() * fade;
+                dy = -shake * 1.4;
+                stretch = shake * 0.7;
+            }
+            Mood::Mad => {
+                // A huffy tremble, then it just glares.
+                dx = (self.since * TAU * 9.0).sin() * 0.6 * (1.0 - self.since / 0.9).max(0.0);
+                dy = 0.3;
             }
             Mood::Sleepy => dy = 0.6,
             Mood::Perk => {
@@ -163,6 +216,17 @@ impl<Message> canvas::Program<Message> for Mascot {
                     frame.stroke(&arc, line(1.4));
                 }
             }
+            Mood::Laughing => {
+                // Squeezed shut: tight upside-down "v" shapes.
+                for x in eyes {
+                    let squint = Path::new(|b| {
+                        b.move_to(p(x - 1.7, eye_y + 0.9));
+                        b.line_to(p(x, eye_y - 0.9));
+                        b.line_to(p(x + 1.7, eye_y + 0.9));
+                    });
+                    frame.stroke(&squint, line(1.3));
+                }
+            }
             Mood::Oops => {
                 for (x, dir) in [(eyes[0], 1.0), (eyes[1], -1.0)] {
                     let chevron = Path::new(|b| {
@@ -188,7 +252,11 @@ impl<Message> canvas::Program<Message> for Mascot {
                 }
             }
             _ => {
-                let eye_r = if self.mood == Mood::Perk { 2.3 } else { 1.9 };
+                let eye_r = match self.mood {
+                    Mood::Perk => 2.3,
+                    Mood::Mad => 1.6,
+                    _ => 1.9,
+                };
                 for x in eyes {
                     frame.fill(
                         &Path::circle(p(x + look.0, eye_y + look.1), eye_r * u),
@@ -203,8 +271,29 @@ impl<Message> canvas::Program<Message> for Mascot {
             }
         }
 
+        // Mad: brows slanting down toward the middle, and an anger mark by the antenna.
+        if self.mood == Mood::Mad {
+            frame.stroke(&Path::line(p(6.3, 8.9), p(10.5, 10.4)), line(1.3));
+            frame.stroke(&Path::line(p(13.5, 10.4), p(17.7, 8.9)), line(1.3));
+            let mark = Stroke::default()
+                .with_width(0.8 * u)
+                .with_color(self.body)
+                .with_line_cap(LineCap::Round);
+            let (cx, cy) = (19.6, 2.6);
+            for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                let tick = Path::new(|b| {
+                    b.move_to(p(cx + sx * 0.5, cy + sy * 1.4));
+                    b.quadratic_curve_to(
+                        p(cx + sx * 0.5, cy + sy * 0.5),
+                        p(cx + sx * 1.4, cy + sy * 0.5),
+                    );
+                });
+                frame.stroke(&tick, mark);
+            }
+        }
+
         // Blush on happy faces.
-        if self.mood == Mood::Happy {
+        if matches!(self.mood, Mood::Happy | Mood::Laughing) {
             let blush = Color {
                 a: 0.28,
                 ..self.blush.unwrap_or(self.face)
@@ -234,6 +323,28 @@ impl<Message> canvas::Program<Message> for Mascot {
                     b.close();
                 });
                 frame.fill(&grin, self.face);
+            }
+            Mood::Laughing => {
+                // Wide open "D" mouth that flaps with the giggle.
+                let fade = (1.0 - self.since / 2.4).max(0.0);
+                let open = 2.2 + (self.since * TAU * 3.2).sin().abs() * 1.2 * fade;
+                let laugh = Path::new(|b| {
+                    b.move_to(p(9.4, mouth_y - 0.8));
+                    b.line_to(p(14.6, mouth_y - 0.8));
+                    b.quadratic_curve_to(
+                        p(12.0, mouth_y - 0.8 + open * 1.6),
+                        p(9.4, mouth_y - 0.8),
+                    );
+                    b.close();
+                });
+                frame.fill(&laugh, self.face);
+            }
+            Mood::Mad => {
+                let frown = Path::new(|b| {
+                    b.move_to(p(10.0, mouth_y + 0.9));
+                    b.quadratic_curve_to(p(12.0, mouth_y - 0.7), p(14.0, mouth_y + 0.9));
+                });
+                frame.stroke(&frown, line(1.2));
             }
             Mood::Oops => {
                 let wobble = Path::new(|b| {
