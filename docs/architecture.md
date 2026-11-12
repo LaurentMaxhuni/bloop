@@ -250,3 +250,17 @@ the system message into a user-labelled turn. The entire system message, includi
 the block and its delimiters, counts against the 32 KiB context budget; old whole
 pairs are dropped first, and the current prompt is always retained.
 Save jobs box their config snapshot to keep the queue's enum small as settings grow.
+
+## Mascot outfits (2026-11-12)
+
+Bloop's hat, eyewear, outfit and body colour are a `Look` saved with the settings
+(`config.rs`, so the library still has no GUI code; unknown or missing parts load as the
+default). `mascot.rs` draws them on the same 24-unit grid as the body. A hat would poke out
+of the canvas, so each hat adds headroom (4–8 units) above the grid and Bloop is drawn a
+little smaller in the same square; the antenna is hidden under any hat. A tinted coat uses a
+fixed dark face so it reads in both themes, and accessory colours are fixed for the same
+reason. The outfit is drawn under the face so a laughing mouth stays visible, the cape before
+the body so it hangs behind. To make Bloop more present, the open notch's header shows it at
+36 px (was 30), an empty chat greets you with a 72 px Bloop, and clicking it makes it laugh.
+Appearance changes apply and save at once, like the rest of that page.
+

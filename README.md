@@ -58,7 +58,10 @@ Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to
   endpoint, key and model without sending a chat.
 - **Bloop replies in person.** A little Bloop sits beside each reply: it thinks while the model
   works, mouths along as the text types out, then grins, cracks up at a joke, or gets grumpy
-  when a reply fails or you stop it. Older replies doze off. With reduced motion the text
+  when a reply fails or you stop it. Older replies doze off. Click Bloop to make it
+  giggle. **Settings → Appearance → Bloop** dresses it up: a hat (top hat, beanie, cap,
+  crown, party or wizard), shades, glasses or a monocle, a bow tie, scarf, robe or cape, and
+  a body colour. **Surprise me** picks a random outfit. With reduced motion the text
   appears at once.
 - **App window.** Setup and settings live in a normal 900 × 620 window with Home, Appearance,
   Model, Shortcut & startup and About pages. First launch walks you through setup; after that,

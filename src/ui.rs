@@ -18,7 +18,7 @@ use crate::{
 use bloop::{
     chatgpt::{self, AccountStatus},
     config::{
-        Accent, Config, Destination, HOVER_DELAYS_MS, NotchPosition, NotchWidth, Provider,
+        Accent, Config, Destination, HOVER_DELAYS_MS, Look, NotchPosition, NotchWidth, Provider,
         ReduceMotion, ThemeChoice,
     },
     diagnose,
@@ -206,6 +206,12 @@ pub enum Message {
     SetNotchWidth(NotchWidth),
     SetNotchPosition(NotchPosition),
     SetMascot(bool),
+    /// Dress the mascot (Appearance page); applies and saves at once.
+    SetLook(Look),
+    /// A random hat, glasses, outfit and colour.
+    ShuffleLook,
+    /// A click on Bloop: a little giggle.
+    PokeMascot,
     SetHoverDelay(u16),
     /// Coarse clock for the update schedule.
     UpdateTick(Instant),
@@ -566,6 +572,7 @@ impl Island {
             body: t.foreground,
             face: t.background,
             blush: self.config.accent.rgb().map(|_| t.primary),
+            look: self.config.look,
         })
         .width(size)
         .height(size)
@@ -1406,6 +1413,23 @@ impl Island {
                 return self.apply_live(|c| c.reduce_motion = choice);
             }
             Message::SetMascot(on) => return self.apply_live(|c| c.mascot = on),
+            Message::SetLook(look) => {
+                self.react(Mood::Happy, 1.6);
+                return self.apply_live(move |c| c.look = look);
+            }
+            Message::ShuffleLook => {
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos() as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let look = self.config.look.shuffled(seed);
+                return self.update(Message::SetLook(look));
+            }
+            Message::PokeMascot => {
+                if self.request.is_none() {
+                    self.react(Mood::Laughing, 2.4);
+                }
+            }
             Message::SetHoverDelay(ms) => {
                 if !HOVER_DELAYS_MS.contains(&ms) {
                     return Task::none();
@@ -2269,8 +2293,12 @@ impl Island {
     fn panel_content(&self) -> Element<'_, Message> {
         let t = self.tokens();
         let status = self.presence.message().unwrap_or(self.status_line());
+        let poke = button(self.mascot(36.0))
+            .padding(0)
+            .style(style::btn(t, Variant::Bare))
+            .on_press(Message::PokeMascot);
         let header = row![
-            self.mascot(30.0),
+            poke,
             column![
                 text("bloop").size(15).font(MEDIUM),
                 text(status).size(12).color(t.muted_foreground),
@@ -2407,8 +2435,13 @@ impl Island {
                 .on_press(Message::Suggest(prompt))
                 .style(style::btn(t, Variant::Outline))
             };
+            let greeter = button(self.mascot(72.0))
+                .padding(0)
+                .style(style::btn(t, Variant::Bare))
+                .on_press(Message::PokeMascot);
             history = history
-                .push(Space::new().height(24))
+                .push(Space::new().height(8))
+                .push(greeter)
                 .push(text("How can I help?").size(26).font(MEDIUM))
                 .push(
                     text("Ask anything. bloop talks to the model you choose, right here in your notch.")
@@ -3155,6 +3188,22 @@ mod tests {
         assert_eq!(app.turns.len(), 1);
         let _ = app.update(Message::NewChatKey(notch));
         assert!(app.turns.is_empty());
+    }
+
+    #[test]
+    fn dressing_bloop_applies_at_once_and_poking_makes_it_giggle() {
+        let mut app = ready();
+        let look = Look {
+            hat: bloop::config::Hat::TopHat,
+            ..Look::default()
+        };
+        let _ = app.update(Message::SetLook(look));
+        assert_eq!(app.config.look, look);
+        assert_eq!(app.draft_config.look, look);
+        let _ = app.update(Message::ShuffleLook);
+        assert_ne!(app.config.look, look);
+        let _ = app.update(Message::PokeMascot);
+        assert_eq!(app.mood(), Mood::Laughing);
     }
 
     #[test]
