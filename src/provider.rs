@@ -214,7 +214,7 @@ pub async fn chat<F: Future<Output = bool> + Send>(
         let request = client
             .post(format!("{}/{path}", base.as_str().trim_end_matches('/')))
             .json(&body);
-        match crate::secrets::api_key() {
+        match crate::secrets::api_key(&config.endpoint) {
             Some(key) => request.bearer_auth(key),
             None => request,
         }
@@ -306,7 +306,7 @@ pub async fn list_models(config: &Config) -> Result<Vec<String>, Error> {
         .no_proxy()
         .build()?;
     let mut request = client.get(url);
-    if let Some(key) = crate::secrets::api_key() {
+    if let Some(key) = crate::secrets::api_key(&config.endpoint) {
         request = request.bearer_auth(key);
     }
     let response = request.send().await?;

@@ -2,18 +2,23 @@
 //! Appearance applies live; the Model and Shortcut & startup pages keep a Save button.
 
 use super::{Island, Message, UpdateState, field};
+use crate::platform;
 use crate::{
     icons::{self, Icon},
     style::{self, MEDIUM, Variant},
 };
 use bloop::{
-    config::{Accent, HOVER_DELAYS_MS, NotchPosition, NotchWidth, ReduceMotion, ThemeChoice},
+    config::{
+        Accent, Config, HOVER_DELAYS_MS, MAX_PROFILES, NotchPosition, NotchWidth, Profile,
+        ReduceMotion, ThemeChoice,
+    },
     motion::Feel,
     update::Version,
 };
 use iced::{
     Alignment, Element, Length,
-    widget::{Space, button, column, container, row, scrollable, text, toggler},
+    Task,
+    widget::{Space, button, column, container, pick_list, row, scrollable, text, toggler},
 };
 
 /// Sidebar width and the page content's maximum width, in logical pixels.
@@ -24,6 +29,7 @@ const CONTENT_MAX_WIDTH: f32 = 640.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppPage {
     Home,
+    Chats,
     Appearance,
     Model,
     Shortcut,
@@ -31,8 +37,9 @@ pub enum AppPage {
 }
 
 impl AppPage {
-    const ALL: [AppPage; 5] = [
+    const ALL: [AppPage; 6] = [
         AppPage::Home,
+        AppPage::Chats,
         AppPage::Appearance,
         AppPage::Model,
         AppPage::Shortcut,
@@ -42,6 +49,7 @@ impl AppPage {
     pub fn title(self) -> &'static str {
         match self {
             AppPage::Home => "Home",
+            AppPage::Chats => "Chats",
             AppPage::Appearance => "Appearance",
             AppPage::Model => "Model",
             AppPage::Shortcut => "Shortcut & startup",
@@ -56,8 +64,31 @@ impl AppPage {
             AppPage::Appearance => Some(Icon::Palette),
             AppPage::Model => Some(Icon::Cpu),
             AppPage::Shortcut => Some(Icon::SlidersHorizontal),
-            AppPage::About => None,
+            AppPage::Chats | AppPage::About => None,
         }
+    }
+}
+
+/// Which model profile the Model page is editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileEdit {
+    /// The default profile: the provider, endpoint and model new chats use.
+    Default,
+    Existing(u32),
+    /// A profile that Save will add.
+    New,
+}
+
+/// A profile in a pick list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileOption {
+    pub id: u32,
+    pub label: String,
+}
+
+impl std::fmt::Display for ProfileOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
     }
 }
 
@@ -74,6 +105,7 @@ impl Island {
         let t = self.tokens();
         let body = match self.page {
             AppPage::Home => self.home_page(),
+            AppPage::Chats => self.chats_page(),
             AppPage::Appearance => self.appearance_page(),
             AppPage::Model => self.model_page(),
             AppPage::Shortcut => self.shortcut_page(),
@@ -189,6 +221,15 @@ impl Island {
         let mut page = column![
             self.summary_row("Model", self.badge_text(), None, AppPage::Model),
             self.summary_row("Status", self.pill_status(), None, AppPage::Model),
+            self.summary_row(
+                "Chats",
+                match self.chats.len() {
+                    1 => "1 saved chat".into(),
+                    n => format!("{n} saved chats"),
+                },
+                None,
+                AppPage::Chats,
+            ),
             self.summary_row(
                 "Global shortcut",
                 self.config.shortcut.clone(),
@@ -417,20 +458,223 @@ impl Island {
 
     fn model_page(&self) -> Element<'_, Message> {
         let t = self.tokens();
-        column![
-            text("Choose the model bloop talks to.")
+        let mut page = column![
+            text("Choose the model bloop talks to. New chats use the default profile; switch a chat to another profile from the notch.")
                 .size(13)
                 .color(t.muted_foreground),
-            self.model_fields(),
-            text(
-                "Keys are stored in Windows Credential Manager, never in bloop's files. Remote endpoints require HTTPS."
-            )
-            .size(12)
-            .color(t.muted_foreground),
-            self.save_row(),
+            self.profile_picker(),
         ]
-        .spacing(16)
-        .into()
+        .spacing(16);
+        if self.profile_edit != ProfileEdit::Default {
+            page = page.push(field(
+                "Profile name",
+                self.input("Work, Offline, …", &self.profile_name, Message::ProfileName),
+            ));
+        }
+        page.push(self.model_fields())
+            .push(self.connection_check())
+            .push(
+                text(
+                    "Keys are stored in Windows Credential Manager, never in bloop's files, and are only sent to the server they were saved for. Remote endpoints require HTTPS."
+                )
+                .size(12)
+                .color(t.muted_foreground),
+            )
+            .push(self.save_row())
+            .into()
+    }
+
+    /// Test connection and what it found.
+    fn connection_check(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let mut check = column![
+            row![
+                self.button(
+                    if self.testing.is_some() {
+                        "Testing…"
+                    } else {
+                        "Test connection"
+                    },
+                    Variant::Outline,
+                )
+                .on_press_maybe(self.testing.is_none().then_some(Message::TestConnection)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+        ]
+        .spacing(6);
+        if let Some(report) = &self.connection {
+            check = check.push(text(&report.summary).size(13).color(if report.ok {
+                t.foreground
+            } else {
+                t.destructive
+            }));
+            if let Some(fix) = &report.fix {
+                check = check.push(text(fix).size(12).color(t.muted_foreground));
+            }
+        }
+        if !self.key_draft.trim().is_empty() {
+            check = check.push(
+                text("Save first to test with the key you pasted.")
+                    .size(12)
+                    .color(t.muted_foreground),
+            );
+        }
+        check.into()
+    }
+
+    /// Profile options for pick lists: the default first, then the saved ones.
+    pub(super) fn profile_options(&self) -> Vec<ProfileOption> {
+        std::iter::once(0)
+            .chain(self.config.profiles.iter().map(|p| p.id))
+            .filter_map(|id| {
+                let config = self.config.with_profile(id)?;
+                Some(ProfileOption {
+                    id,
+                    label: format!(
+                        "{} — {}",
+                        self.config.profile_name(id)?,
+                        self.describe_model(&config, 0)
+                    ),
+                })
+            })
+            .collect()
+    }
+
+    fn profile_picker(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let options = self.profile_options();
+        let selected = match self.profile_edit {
+            ProfileEdit::Default => options.first().cloned(),
+            ProfileEdit::Existing(id) => options.iter().find(|o| o.id == id).cloned(),
+            ProfileEdit::New => None,
+        };
+        let full = self.config.profiles.len() >= MAX_PROFILES;
+        let mut actions = row![
+            pick_list(options, selected, |option| Message::EditProfile(option.id))
+                .placeholder("New profile")
+                .padding([8, 12])
+                .text_size(14)
+                .width(Length::Fill)
+                .style(style::select(t))
+                .menu_style(style::menu(t)),
+            self.button("New profile", Variant::Outline).on_press_maybe(
+                (!full && self.profile_edit != ProfileEdit::New).then_some(Message::NewProfile)
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        if matches!(self.profile_edit, ProfileEdit::Existing(_)) {
+            actions = actions.push(
+                self.button("Delete", Variant::Ghost)
+                    .on_press(Message::DeleteProfile),
+            );
+        }
+        field("Profile", actions)
+    }
+
+    /// Loads profile `id` into the Model page's fields.
+    pub(super) fn edit_profile(&mut self, id: u32) {
+        let Some(config) = self.config.with_profile(id) else {
+            return;
+        };
+        self.draft_config.provider = config.provider;
+        self.draft_config.endpoint = config.endpoint;
+        self.draft_config.model = config.model;
+        self.profile_edit = if id == 0 {
+            ProfileEdit::Default
+        } else {
+            ProfileEdit::Existing(id)
+        };
+        self.profile_name = self.config.profile_name(id).unwrap_or_default().into();
+        self.status.clear();
+        self.forget_connection_test();
+        self.refresh_key_status();
+    }
+
+    /// Starts a new profile from the fields as they are.
+    pub(super) fn new_profile(&mut self) {
+        if self.config.profiles.len() >= MAX_PROFILES {
+            self.status = format!("Keep at most {MAX_PROFILES} saved profiles.");
+            return;
+        }
+        self.profile_edit = ProfileEdit::New;
+        self.profile_name = "New profile".into();
+        self.status.clear();
+    }
+
+    pub(super) fn delete_profile(&mut self) -> Task<Message> {
+        let ProfileEdit::Existing(id) = self.profile_edit else {
+            return Task::none();
+        };
+        self.config.profiles.retain(|p| p.id != id);
+        self.draft_config.profiles.retain(|p| p.id != id);
+        self.edit_profile(0);
+        self.persist()
+    }
+
+    /// The config Save would store: the drafts, with the profile being edited written into
+    /// its place and the default model left alone. Checks everything first.
+    pub(super) fn settings_to_save(&self) -> Result<Config, String> {
+        let mut config = self.draft_config.clone();
+        config.profiles = self.config.profiles.clone();
+        let id = match self.profile_edit {
+            ProfileEdit::Default => None,
+            ProfileEdit::Existing(id) => Some(id),
+            ProfileEdit::New => Some(self.config.next_profile_id()),
+        };
+        if let Some(id) = id {
+            let profile = Profile {
+                id,
+                name: self.profile_name.trim().to_owned(),
+                provider: self.draft_config.provider,
+                endpoint: self.draft_config.endpoint.trim().to_owned(),
+                model: self.draft_config.model.trim().to_owned(),
+            };
+            profile.validate()?;
+            if config
+                .profiles
+                .iter()
+                .any(|p| p.id != id && p.name.eq_ignore_ascii_case(&profile.name))
+                || profile.name.eq_ignore_ascii_case("default")
+            {
+                return Err("Another profile already has that name.".into());
+            }
+            config.provider = self.config.provider;
+            config.endpoint = self.config.endpoint.clone();
+            config.model = self.config.model.clone();
+            match config.profiles.iter_mut().find(|p| p.id == id) {
+                Some(existing) => *existing = profile,
+                None => config.profiles.push(profile),
+            }
+        }
+        config.validate()?;
+        platform::validate_shortcut(&config.shortcut)?;
+        let ask = config.ask_shortcut.trim();
+        if !ask.is_empty() {
+            platform::validate_shortcut(ask)?;
+            if ask.eq_ignore_ascii_case(config.shortcut.trim()) {
+                return Err("The two shortcuts need to be different.".into());
+            }
+        }
+        Ok(config)
+    }
+
+    /// After Save: a new profile becomes the one being edited, and the fields keep showing it.
+    pub(super) fn saved_profile(&mut self) {
+        if self.profile_edit == ProfileEdit::New
+            && let Some(id) = self.config.profiles.iter().map(|p| p.id).max()
+        {
+            self.profile_edit = ProfileEdit::Existing(id);
+        }
+        let id = match self.profile_edit {
+            ProfileEdit::Existing(id) => id,
+            _ => 0,
+        };
+        self.draft_config = self
+            .config
+            .with_profile(id)
+            .unwrap_or_else(|| self.config.clone());
     }
 
     fn shortcut_page(&self) -> Element<'_, Message> {
@@ -441,6 +685,17 @@ impl Island {
                 self.input("Ctrl+Alt+B", &self.draft_config.shortcut, Message::Shortcut),
             ),
             text("Opens and closes the notch from anywhere.")
+                .size(12)
+                .color(t.muted_foreground),
+            field(
+                "Ask about clipboard",
+                self.input(
+                    "Ctrl+Alt+Shift+A",
+                    &self.draft_config.ask_shortcut,
+                    Message::AskShortcut,
+                ),
+            ),
+            text("Copy some text, press this, and ask about it: the notch opens with the text attached. Leave it empty to turn it off.")
                 .size(12)
                 .color(t.muted_foreground),
         ]

@@ -1,9 +1,11 @@
 mod app_window;
+mod chats;
 mod dashboard;
 mod onboarding;
 mod rich;
 
-pub use dashboard::AppPage;
+pub use chats::ChatAction;
+pub use dashboard::{AppPage, ProfileEdit};
 
 use crate::{
     icons::{self, Icon},
@@ -14,12 +16,13 @@ use crate::{
 };
 use bloop::{
     chatgpt::{self, AccountStatus},
+    diagnose,
     config::{
-        Accent, Config, HOVER_DELAYS_MS, NotchPosition, NotchWidth, Provider, ReduceMotion,
-        ThemeChoice,
+        Accent, Config, Destination, HOVER_DELAYS_MS, NotchPosition, NotchWidth, Provider,
+        ReduceMotion, ThemeChoice,
     },
     launch::{Launch, Startup, startup},
-    model::{self, MAX_PROMPT, MAX_TURNS, Turn},
+    model::{self, Chat, MAX_PROMPT, MAX_TURNS, Turn},
     motion::{Feel, SizeSpring},
     onboarding::{self as setup, Choice, Detection, Onboarding},
     provider::{self, ChatGptModel, StreamEvent},
@@ -89,7 +92,7 @@ pub fn notch_settings() -> window::Settings {
 #[derive(Debug, Clone)]
 pub enum Message {
     Window(Option<window::Id>),
-    Loaded(Result<(Config, Vec<Turn>), String>),
+    Loaded(Result<storage::Loaded, String>),
     Saved(Result<(), String>),
     Platform(platform::Event),
     /// Shortcut-like toggle: opens from anywhere, closes when open.
@@ -144,9 +147,25 @@ pub enum Message {
     Shortcut(String),
     SaveSettings,
     Theme,
+    /// Start a fresh chat; the current one stays in the chat list.
     NewChat,
-    ConfirmClear,
-    KeepChat,
+    /// Switch the chat's model profile (a chat with history starts a new chat instead).
+    PickProfile(u32),
+    /// Attach the clipboard's text to the next prompt, opening the notch.
+    AskClipboard,
+    Clipboard(Option<String>),
+    RemoveAttachment,
+    /// Show the chat list in the app window.
+    ShowChats,
+    Chat(ChatAction),
+    EditProfile(u32),
+    NewProfile,
+    DeleteProfile,
+    ProfileName(String),
+    AskShortcut(String),
+    /// Check the Model page's provider, endpoint and model without sending a chat.
+    TestConnection,
+    Tested(u64, diagnose::Report),
     Quit,
     QuitWithoutSaving,
     Escape(window::Id),
@@ -219,7 +238,29 @@ pub struct Island {
     presence: Presence,
     /// The dashboard page showing in the app window.
     page: AppPage,
-    confirming_clear: bool,
+    /// The chat in the notch; its turns are `turns`.
+    chat: Chat,
+    /// Saved chats, newest first (the current one once it has turns).
+    chats: Vec<Chat>,
+    /// Clipboard text for the next prompt, and whether it was cut to fit.
+    attachment: Option<(String, bool)>,
+    chat_query: String,
+    /// Search results; `None` lists every chat.
+    chat_hits: Option<Vec<(Chat, String)>>,
+    search_id: u64,
+    renaming: Option<(i64, String)>,
+    confirm_delete: Option<i64>,
+    /// The current chat to delete once the save in flight finishes.
+    delete_after_save: Option<i64>,
+    chats_notice: String,
+    /// Which model profile the Model page edits.
+    profile_edit: ProfileEdit,
+    profile_name: String,
+    /// The last Test connection result for the fields as they are; cleared when they change.
+    connection: Option<diagnose::Report>,
+    /// A Test connection is running; its id, so a stale answer is ignored.
+    testing: Option<u64>,
+    test_id: u64,
     /// Drawn notch size; the OS window stays at `canvas_size` and never animates.
     spring: SizeSpring,
     /// Previous frame time while the spring moves.
@@ -302,7 +343,24 @@ impl Island {
             loading: true,
             presence: Presence::new(),
             page: AppPage::Home,
-            confirming_clear: false,
+            chat: Chat {
+                id: model::new_chat_id(0),
+                ..Chat::default()
+            },
+            chats: Vec::new(),
+            attachment: None,
+            chat_query: String::new(),
+            chat_hits: None,
+            search_id: 0,
+            renaming: None,
+            confirm_delete: None,
+            delete_after_save: None,
+            chats_notice: String::new(),
+            profile_edit: ProfileEdit::Default,
+            profile_name: String::new(),
+            connection: None,
+            testing: None,
+            test_id: 0,
             spring: SizeSpring::new(SLIVER.width, SLIVER.height),
             last_frame: None,
             region: None,
@@ -351,9 +409,13 @@ impl Island {
                 Task::perform(
                     async move {
                         let path = load_path?;
-                        tokio::task::spawn_blocking(move || storage::load(&path))
-                            .await
-                            .map_err(|e| e.to_string())?
+                        tokio::task::spawn_blocking(move || {
+                            let loaded = storage::load(&path)?;
+                            secrets::migrate_legacy_key(&loaded.config.endpoint);
+                            Ok(loaded)
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
                     },
                     Message::Loaded,
                 ),
@@ -586,10 +648,17 @@ impl Island {
             Message::Loaded(result) => {
                 self.loading = false;
                 match result {
-                    Ok((config, turns)) => {
-                        self.config = config.clone();
-                        self.draft_config = config;
-                        self.turns = turns;
+                    Ok(loaded) => {
+                        self.config = loaded.config.clone();
+                        self.draft_config = loaded.config;
+                        self.chats = loaded.chats;
+                        match loaded.current {
+                            Some((chat, turns)) => {
+                                self.chat = chat;
+                                self.turns = turns;
+                            }
+                            None => self.chat.id = model::new_chat_id(0),
+                        }
                         self.sync_replies();
                     }
                     Err(error) => {
@@ -598,9 +667,7 @@ impl Island {
                             format!("Storage unavailable; changes will not be saved: {error}");
                     }
                 }
-                if let Some(controller) = &self.controller {
-                    controller.shortcut(self.config.shortcut.clone());
-                }
+                self.apply_shortcuts();
                 self.presence
                     .set_hover_delay(Duration::from_millis(self.config.hover_delay_ms.into()));
                 let ready = self
@@ -632,6 +699,9 @@ impl Island {
                     self.save_again = false;
                     return self.persist();
                 }
+                if let Some(id) = self.delete_after_save.take() {
+                    return self.delete_chat(id);
+                }
                 if self.quitting {
                     if !failed {
                         return iced::exit();
@@ -644,8 +714,8 @@ impl Island {
             }
             Message::Platform(event) => match event {
                 platform::Event::Ready(controller) => {
-                    controller.shortcut(self.config.shortcut.clone());
                     self.controller = Some(controller);
+                    self.apply_shortcuts();
                 }
                 platform::Event::Toggle => return self.update(Message::Toggle),
                 platform::Event::Settings => return self.update(Message::OpenWindow),
@@ -747,11 +817,18 @@ impl Island {
                 if self.loading
                     || self.quitting
                     || self.request.is_some()
-                    || self.input.trim().is_empty()
+                    || (self.input.trim().is_empty() && self.attachment.is_none())
                 {
                     return Task::none();
                 }
-                let prompt = self.input.trim().to_owned();
+                let prompt = match &self.attachment {
+                    Some((text, _)) => model::with_attachment(&self.input, text),
+                    None => self.input.trim().to_owned(),
+                };
+                if prompt.len() > MAX_PROMPT {
+                    self.status = "Your question and the clipboard text are too long together (8 KB at most). Shorten the question or remove the clipboard text.".into();
+                    return Task::none();
+                }
                 return self.send_prompt(prompt, self.editing);
             }
             Message::Retry => {
@@ -813,6 +890,7 @@ impl Island {
                         presence = Task::batch([presence, failed]);
                     }
                 }
+                self.touch_chat();
                 let update = self.peek_update_if_pending();
                 return Task::batch([self.persist(), self.scroll(), presence, update]);
             }
@@ -851,9 +929,18 @@ impl Island {
                 } else {
                     provider.default_endpoint().into()
                 };
+                self.forget_connection_test();
+                self.refresh_key_status();
             }
-            Message::Endpoint(value) => self.draft_config.endpoint = value,
-            Message::Model(value) => self.draft_config.model = value,
+            Message::Endpoint(value) => {
+                self.draft_config.endpoint = value;
+                self.forget_connection_test();
+                self.refresh_key_status();
+            }
+            Message::Model(value) => {
+                self.draft_config.model = value;
+                self.forget_connection_test();
+            }
             Message::ChatGptLoaded(result) => {
                 self.chatgpt_busy = false;
                 match result {
@@ -955,21 +1042,30 @@ impl Island {
                     self.react(Mood::Oops, 1.2);
                     return Task::none();
                 }
+                let config = match self.settings_to_save() {
+                    Ok(config) => config,
+                    Err(error) => {
+                        self.status = error;
+                        self.react(Mood::Oops, 1.2);
+                        return Task::none();
+                    }
+                };
                 if !self.key_draft.trim().is_empty() {
-                    if let Err(error) = secrets::set_api_key(Some(&self.key_draft)) {
+                    if let Err(error) =
+                        secrets::set_api_key(&self.draft_config.endpoint, Some(&self.key_draft))
+                    {
                         self.status = error;
                         self.react(Mood::Oops, 1.2);
                         return Task::none();
                     }
                     self.key_draft.clear();
-                    self.key_status = secrets::key_source();
+                    self.refresh_key_status();
                 }
-                self.config = self.draft_config.clone();
+                self.config = config;
+                self.saved_profile();
                 self.react(Mood::Happy, 1.2);
                 self.status.clear();
-                if let Some(controller) = &self.controller {
-                    controller.shortcut(self.config.shortcut.clone());
-                }
+                self.apply_shortcuts();
                 return self.persist();
             }
             Message::Theme => {
@@ -987,21 +1083,77 @@ impl Island {
             }
             Message::NewChat => {
                 if self.request.is_none() && !self.loading {
-                    self.confirming_clear = true;
+                    let profile = self.usable_profile(self.chat.profile);
+                    self.start_chat(profile);
+                    return widget::operation::focus("prompt");
                 }
             }
-            Message::KeepChat => self.confirming_clear = false,
-            Message::ConfirmClear => {
-                if self.request.is_none() && !self.loading {
-                    if !self.confirming_clear {
-                        return Task::none();
-                    }
-                    self.confirming_clear = false;
-                    self.editing = false;
-                    self.turns.clear();
-                    self.finish_reveal();
+            Message::PickProfile(id) => {
+                if self.request.is_some() || self.loading || id == self.chat.profile {
+                    return Task::none();
+                }
+                if self.turns.is_empty() {
+                    self.chat.profile = id;
+                    self.chat.destination.clear();
                     self.status.clear();
-                    return self.persist();
+                } else {
+                    // A chat keeps its model, so its history never moves to another one.
+                    self.start_chat(id);
+                }
+                return widget::operation::focus("prompt");
+            }
+            Message::AskClipboard => {
+                if self.window.is_none() {
+                    return Task::none();
+                }
+                let read = iced::clipboard::read().map(Message::Clipboard);
+                if self.is_open() {
+                    return read;
+                }
+                return Task::batch([self.present(Event::Shortcut), read]);
+            }
+            Message::Clipboard(content) => {
+                match content.filter(|text| !text.trim().is_empty()) {
+                    Some(text) => {
+                        self.attachment = Some(model::clip_attachment(&text));
+                        self.status.clear();
+                    }
+                    None => self.status = "The clipboard has no text to attach.".into(),
+                }
+                return widget::operation::focus("prompt");
+            }
+            Message::RemoveAttachment => self.attachment = None,
+            Message::ShowChats => {
+                self.page = AppPage::Chats;
+                let window = self.open_app_window();
+                self.page = AppPage::Chats;
+                return window;
+            }
+            Message::Chat(action) => return self.chat_action(action),
+            Message::EditProfile(id) => self.edit_profile(id),
+            Message::NewProfile => self.new_profile(),
+            Message::DeleteProfile => return self.delete_profile(),
+            Message::ProfileName(name) => {
+                if name.chars().count() <= 40 {
+                    self.profile_name = name;
+                }
+            }
+            Message::AskShortcut(value) => self.draft_config.ask_shortcut = value,
+            Message::TestConnection => {
+                self.test_id += 1;
+                let id = self.test_id;
+                self.testing = Some(id);
+                self.connection = None;
+                let config = self.draft_config.clone();
+                return Task::perform(
+                    async move { diagnose::test_connection(&config).await },
+                    move |report| Message::Tested(id, report),
+                );
+            }
+            Message::Tested(id, report) => {
+                if self.testing == Some(id) {
+                    self.testing = None;
+                    self.connection = Some(report);
                 }
             }
             Message::Quit => {
@@ -1040,9 +1192,12 @@ impl Island {
                     self.detection = Detection::Checking;
                     if !self.key_draft.trim().is_empty() {
                         // A key pasted for Unsloth is needed before it will list models.
-                        let _ = secrets::set_api_key(Some(&self.key_draft));
+                        let _ = secrets::set_api_key(
+                            Provider::Unsloth.default_endpoint(),
+                            Some(&self.key_draft),
+                        );
                         self.key_draft.clear();
-                        self.key_status = secrets::key_source();
+                        self.refresh_key_status();
                     }
                     return Task::perform(setup::detect(), Message::Detected);
                 }
@@ -1066,11 +1221,11 @@ impl Island {
             Message::PickChoice(choice) => self.apply_choice(&choice),
             Message::ApiKey(value) => self.key_draft = value,
             Message::RemoveKey => {
-                if let Err(error) = secrets::set_api_key(None) {
+                if let Err(error) = secrets::set_api_key(&self.draft_config.endpoint, None) {
                     self.status = error;
                 }
                 self.key_draft.clear();
-                self.key_status = secrets::key_source();
+                self.refresh_key_status();
             }
             Message::SetLight(light) => {
                 self.config.theme = if light {
@@ -1208,7 +1363,8 @@ impl Island {
         self.autostart = platform::autostart();
         self.autostart_error.clear();
         self.key_draft.clear();
-        self.key_status = secrets::key_source();
+        self.profile_edit = ProfileEdit::Default;
+        self.refresh_key_status();
         Task::batch([window, self.update(Message::Detect)])
     }
 
@@ -1217,7 +1373,9 @@ impl Island {
         self.onboarding = None;
         if !self.key_draft.trim().is_empty() {
             // Finishing never blocks; a failed save shows in Settings.
-            if let Err(error) = secrets::set_api_key(Some(&self.key_draft)) {
+            if let Err(error) =
+                secrets::set_api_key(&self.draft_config.endpoint, Some(&self.key_draft))
+            {
                 self.status = error;
             }
             self.key_draft.clear();
@@ -1230,9 +1388,7 @@ impl Island {
             .is_ok()
         {
             self.config = self.draft_config.clone();
-            if let Some(controller) = &self.controller {
-                controller.shortcut(self.config.shortcut.clone());
-            }
+            self.apply_shortcuts();
         }
         self.config.theme = theme;
         self.config.onboarded = true;
@@ -1247,36 +1403,126 @@ impl Island {
         Task::batch([save, notch, close, peek])
     }
 
-    /// Where replies come from, shown under the prompt.
+    /// Where replies come from, shown under the prompt: Local or Cloud, the profile's name
+    /// when it isn't the default, then the provider and model.
     fn badge_text(&self) -> String {
-        let model = self.config.model.trim();
-        let source = if self.config.provider == Provider::ChatGpt && self.chatgpt.plan_enabled {
-            "Using ChatGPT plan".into()
-        } else if self.config.provider.is_cli() || self.config.provider == Provider::ChatGpt {
-            self.config.provider.to_string()
-        } else if bloop::config::validate_endpoint(&self.config.endpoint)
-            .is_ok_and(|u| u.scheme() == "http")
-        {
-            "Local".into()
-        } else {
-            "Endpoint".into()
-        };
-        if model.is_empty() {
-            source
-        } else {
-            format!("{source} · {model}")
+        match self.config.with_profile(self.chat.profile) {
+            Some(config) => self.describe_model(&config, self.chat.profile),
+            None => "Profile removed".into(),
         }
+    }
+
+    /// "Local · qwen3:4b", "Cloud · ChatGPT · gpt-5", "Work · Cloud · Codex".
+    fn describe_model(&self, config: &Config, profile: u32) -> String {
+        let mut parts = Vec::new();
+        if profile != 0
+            && let Some(name) = self.config.profile_name(profile)
+        {
+            parts.push(name.to_owned());
+        }
+        let destination = config.destination();
+        parts.push(destination.label().to_owned());
+        match config.provider {
+            Provider::ChatGpt if self.chatgpt.plan_enabled => parts.push("ChatGPT plan".into()),
+            provider if provider.is_cli() || provider == Provider::ChatGpt => {
+                parts.push(provider.to_string());
+            }
+            _ if destination != Destination::Local => parts.push(destination.describe()),
+            _ => {}
+        }
+        let model = config.model.trim();
+        if !model.is_empty() {
+            parts.push(model.to_owned());
+        }
+        parts.join(" · ")
+    }
+
+    /// `id` when that profile still exists, else the default.
+    fn usable_profile(&self, id: u32) -> u32 {
+        if self.config.profile_name(id).is_some() {
+            id
+        } else {
+            0
+        }
+    }
+
+    /// Replaces the notch's chat with a new, empty one on `profile`. The old chat was saved
+    /// with its last reply, so nothing is lost.
+    fn start_chat(&mut self, profile: u32) {
+        let newest = self
+            .chats
+            .iter()
+            .map(|c| c.id)
+            .max()
+            .unwrap_or(0)
+            .max(self.chat.id);
+        self.chat = Chat {
+            id: model::new_chat_id(newest),
+            profile,
+            ..Chat::default()
+        };
+        self.turns.clear();
+        self.replies.clear();
+        self.finish_reveal();
+        self.editing = false;
+        self.input.clear();
+        self.status.clear();
+    }
+
+    /// Puts the current chat at the top of the chat list once it has turns.
+    fn touch_chat(&mut self) {
+        self.chat.updated = model::unix_seconds();
+        self.chats.retain(|c| c.id != self.chat.id);
+        if !self.turns.is_empty() {
+            self.chats.insert(0, self.chat.clone());
+        }
+    }
+
+    /// Registers both global shortcuts with the platform thread.
+    fn apply_shortcuts(&self) {
+        if let Some(controller) = &self.controller {
+            controller.shortcut(self.config.shortcut.clone());
+            controller.ask_shortcut(self.config.ask_shortcut.trim().to_owned());
+        }
+    }
+
+    fn forget_connection_test(&mut self) {
+        self.connection = None;
+        self.testing = None;
+    }
+
+    fn refresh_key_status(&mut self) {
+        self.key_status = secrets::key_source(&self.draft_config.endpoint);
     }
 
     /// Sends `prompt` as a new turn. With `replace_last`, the last turn is dropped first
     /// (Retry, Edit & resend), so it is neither shown twice nor sent back as context.
     fn send_prompt(&mut self, prompt: String, replace_last: bool) -> Task<Message> {
-        if let Err(error) = self.config.validate() {
+        let Some(config) = self.config.with_profile(self.chat.profile) else {
+            self.status =
+                "This chat's model profile was deleted. Start a new chat to keep going.".into();
+            return Task::none();
+        };
+        if let Err(error) = config.validate() {
             self.status = error;
             self.react(Mood::Oops, 1.2);
             return Task::none();
         }
-        if self.config.provider == Provider::ChatGpt {
+        let destination = config.destination();
+        if !self.turns.is_empty()
+            && !self.chat.destination.is_empty()
+            && self.chat.destination != destination.key()
+        {
+            let before = Destination::from_key(&self.chat.destination);
+            self.status = format!(
+                "This chat's history went to {}, and bloop won't send it to {}. Start a new chat to use this model.",
+                before.describe(),
+                destination.describe()
+            );
+            self.react(Mood::Oops, 1.2);
+            return Task::none();
+        }
+        if config.provider == Provider::ChatGpt {
             if self.chatgpt_busy {
                 self.status = "Finish connecting to ChatGPT before sending a message.".into();
                 return Task::none();
@@ -1292,6 +1538,13 @@ impl Island {
             self.replies.truncate(self.turns.len());
         }
         self.editing = false;
+        self.attachment = None;
+        if self.turns.is_empty() {
+            self.chat.destination = destination.key();
+        }
+        if self.chat.title.is_empty() {
+            self.chat.title = model::title_for(&prompt);
+        }
         let messages = model::context(&self.turns, &prompt);
         self.turns.push(Turn {
             user: prompt,
@@ -1308,9 +1561,9 @@ impl Island {
         self.sync_replies();
         self.input.clear();
         self.status.clear();
+        self.touch_chat();
         self.request_id += 1;
         let id = self.request_id;
-        let config = self.config.clone();
         let stream = iced::stream::channel(16, async move |mut output| {
             let result = provider::chat(&config, &messages, |event| {
                 let mut sender = output.clone();
@@ -1403,10 +1656,12 @@ impl Island {
             return Task::none();
         };
         self.saving = true;
-        let (config, turns) = (self.config.clone(), self.turns.clone());
+        let (config, chat, turns) = (self.config.clone(), self.chat.clone(), self.turns.clone());
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || storage::save(&path, &config, &turns))
+                tokio::task::spawn_blocking(move || {
+                    storage::save(&path, &config, Some((&chat, &turns)))
+                })
                     .await
                     .map_err(|e| e.to_string())?
             },
@@ -1617,7 +1872,7 @@ impl Island {
         }
         let path = path.clone();
         if let (Some(db), false) = (&self.db_path, self.storage_disabled)
-            && let Err(error) = storage::save(db, &self.config, &self.turns)
+            && let Err(error) = storage::save(db, &self.config, Some((&self.chat, &self.turns)))
         {
             self.update_state =
                 UpdateState::Failed(format!("Couldn't save before updating: {error}"));
@@ -2104,30 +2359,6 @@ impl Island {
                 .style(style::scroll(t))
         ]
         .spacing(10);
-        if self.confirming_clear {
-            body = body.push(
-                container(
-                    column![
-                        text("Clear this conversation?").size(14).font(MEDIUM),
-                        text("Your saved history will be removed from this device.")
-                            .size(13)
-                            .color(t.muted_foreground),
-                        row![
-                            Space::new().width(Length::Fill),
-                            self.button("Keep chat", Variant::Outline)
-                                .on_press(Message::KeepChat),
-                            self.button("Clear", Variant::Destructive)
-                                .on_press(Message::ConfirmClear),
-                        ]
-                        .spacing(8),
-                    ]
-                    .spacing(6),
-                )
-                .padding(14)
-                .width(Length::Fill)
-                .style(style::card(t, t.background)),
-            );
-        }
         for warning in [&self.storage_warning, &self.desktop_warning, &self.status] {
             if !warning.is_empty() {
                 body = body.push(
@@ -2137,6 +2368,9 @@ impl Island {
                         .style(style::card(t, t.background)),
                 );
             }
+        }
+        if let Some(card) = self.attachment_card() {
+            body = body.push(card);
         }
         if self.editing {
             body = body.push(
@@ -2163,7 +2397,8 @@ impl Island {
                 .on_press(Message::Cancel)
         } else {
             self.button("Send", Variant::Primary).on_press_maybe(
-                (!self.loading && !self.input.trim().is_empty()).then_some(Message::Send),
+                (!self.loading && (!self.input.trim().is_empty() || self.attachment.is_some()))
+                    .then_some(Message::Send),
             )
         };
         let active = !self.input.is_empty();
@@ -2185,19 +2420,81 @@ impl Island {
                     ..Default::default()
                 }),
         );
-        body.push(
-            row![
-                container(text(self.badge_text()).size(11))
-                    .padding([2, 8])
-                    .style(style::badge(t)),
-                Space::new().width(Length::Fill),
-                self.button("Clear chat", Variant::Ghost).on_press_maybe(
-                    (self.request.is_none() && !self.turns.is_empty()).then_some(Message::NewChat)
-                ),
-            ]
-            .align_y(Alignment::Center),
+        let idle = self.request.is_none() && !self.loading;
+        let mut footer = row![self.model_switcher(), Space::new().width(Length::Fill)]
+            .spacing(2)
+            .align_y(Alignment::Center);
+        if self.attachment.is_none() {
+            footer = footer.push(self.small_button("Paste clipboard", Message::AskClipboard));
+        }
+        footer = footer.push(self.small_button("All chats", Message::ShowChats));
+        if idle && !self.turns.is_empty() {
+            footer = footer.push(self.small_button("New chat", Message::NewChat));
+        }
+        body.push(footer).into()
+    }
+
+    /// The chat's model under the prompt; a menu of profiles once any are saved.
+    fn model_switcher(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        if self.config.profiles.is_empty() {
+            return container(text(self.badge_text()).size(11))
+                .padding([2, 8])
+                .style(style::badge(t))
+                .into();
+        }
+        let options = self.profile_options();
+        let selected = options.iter().find(|o| o.id == self.chat.profile).cloned();
+        pick_list(options, selected, |option| Message::PickProfile(option.id))
+            .placeholder("Profile removed")
+            .text_size(11)
+            .padding([2, 8])
+            .style(style::select(t))
+            .menu_style(style::menu(t))
+            .into()
+    }
+
+    /// The clipboard text waiting to go with the next prompt, and where it will go.
+    fn attachment_card(&self) -> Option<Element<'_, Message>> {
+        let t = self.tokens();
+        let (text_value, cut) = self.attachment.as_ref()?;
+        let size = if text_value.len() < 1024 {
+            format!("{} bytes", text_value.len())
+        } else {
+            format!("{:.1} KB", text_value.len() as f32 / 1024.0)
+        };
+        let heading = if *cut {
+            format!("Clipboard text · {size} (cut to fit)")
+        } else {
+            format!("Clipboard text · {size}")
+        };
+        let preview: String = text_value
+            .lines()
+            .take(3)
+            .map(|line| model::clip_chars(line, 80))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(
+            container(
+                column![
+                    row![
+                        text(heading).size(12).font(MEDIUM),
+                        Space::new().width(Length::Fill),
+                        self.small_button("Remove", Message::RemoveAttachment),
+                    ]
+                    .align_y(Alignment::Center),
+                    text(preview).size(12).color(t.muted_foreground),
+                    text(format!("Sends with your question to {}", self.badge_text()))
+                        .size(11)
+                        .color(t.muted_foreground),
+                ]
+                .spacing(4),
+            )
+            .padding([8, 12])
+            .width(Length::Fill)
+            .style(style::card(t, t.background))
+            .into(),
         )
-        .into()
     }
 
     /// Copy under every finished reply; Retry and Edit under the last one too.
@@ -2782,30 +3079,143 @@ mod tests {
         assert!(app.turns.is_empty());
     }
 
+    fn loaded(config: Config) -> Message {
+        Message::Loaded(Ok(storage::Loaded {
+            config,
+            ..Default::default()
+        }))
+    }
+
     #[test]
-    fn clearing_saved_chat_requires_confirmation() {
+    fn new_chat_keeps_the_old_one_in_the_list() {
         let mut app = ready();
-        app.turns.push(Turn {
-            user: "keep".into(),
-            assistant: "saved".into(),
-            complete: true,
-        });
-        let _ = app.update(Message::ConfirmClear);
-        assert_eq!(app.turns.len(), 1);
+        exchange(&mut app, "keep me", "saved");
+        let old = app.chat.id;
+        assert_eq!(app.chats[0].id, old);
+        assert_eq!(app.chats[0].title, "keep me");
         let _ = app.update(Message::NewChat);
-        assert_eq!(app.turns.len(), 1);
-        let _ = app.update(Message::KeepChat);
-        assert!(!app.confirming_clear);
-        let _ = app.update(Message::NewChat);
-        let _ = app.update(Message::ConfirmClear);
         assert!(app.turns.is_empty());
+        assert_ne!(app.chat.id, old);
+        assert_eq!(app.chats.len(), 1, "an empty chat isn't listed");
+        exchange(&mut app, "second", "ok");
+        assert_eq!(app.chats.len(), 2);
+        assert_eq!(app.chats[0].id, app.chat.id, "newest first");
+    }
+
+    fn with_cloud_profile(app: &mut Island) -> u32 {
+        let id = app.config.next_profile_id();
+        app.config.profiles.push(bloop::config::Profile {
+            id,
+            name: "Cloud".into(),
+            provider: Provider::OpenAi,
+            endpoint: "https://api.example.com/v1".into(),
+            model: "big".into(),
+        });
+        id
+    }
+
+    #[test]
+    fn switching_profile_with_history_starts_a_new_chat() {
+        let mut app = ready();
+        let cloud = with_cloud_profile(&mut app);
+        let _ = app.update(Message::PickProfile(cloud));
+        assert_eq!(app.chat.profile, cloud, "an empty chat just switches");
+        let _ = app.update(Message::PickProfile(0));
+        exchange(&mut app, "local secret", "ok");
+        assert_eq!(app.chat.destination, "local");
+        let local_chat = app.chat.id;
+        let _ = app.update(Message::PickProfile(cloud));
+        assert_ne!(app.chat.id, local_chat);
+        assert!(app.turns.is_empty());
+        assert_eq!(app.chat.profile, cloud);
+    }
+
+    #[test]
+    fn local_history_is_never_sent_to_a_changed_cloud_default() {
+        let mut app = ready();
+        exchange(&mut app, "local secret", "ok");
+        app.config.provider = Provider::OpenAi;
+        app.config.endpoint = "https://api.example.com/v1".into();
+        app.input = "next".into();
+        let _ = app.update(Message::Send);
+        assert!(app.request.is_none());
+        assert_eq!(app.turns.len(), 1);
+        assert!(app.status.contains("api.example.com"), "{}", app.status);
+        // Retry would resend the local prompt to the cloud too.
+        let _ = app.update(Message::Retry);
+        assert!(app.request.is_none());
+        // A new chat may use it.
+        let _ = app.update(Message::NewChat);
+        app.input = "fresh".into();
+        let _task = app.update(Message::Send);
+        assert!(app.request.is_some());
+        assert_eq!(app.chat.destination, "cloud:https://api.example.com");
+    }
+
+    #[test]
+    fn deleted_profile_blocks_sending_until_a_new_chat() {
+        let mut app = ready();
+        let cloud = with_cloud_profile(&mut app);
+        let _ = app.update(Message::PickProfile(cloud));
+        app.config.profiles.clear();
+        app.input = "hi".into();
+        let _ = app.update(Message::Send);
+        assert!(app.request.is_none());
+        assert!(app.status.contains("deleted"));
+        let _ = app.update(Message::NewChat);
+        assert_eq!(app.chat.profile, 0);
+    }
+
+    #[test]
+    fn clipboard_text_goes_with_the_next_prompt_once() {
+        let mut app = ready();
+        let _ = app.update(Message::Clipboard(Some("   ".into())));
+        assert!(app.attachment.is_none());
+        assert!(!app.status.is_empty());
+        let _ = app.update(Message::Clipboard(Some("Error 0x80070005".into())));
+        assert!(app.attachment.is_some());
+        let _task = app.update(Message::Send);
+        assert!(app.request.is_some(), "an attachment alone can be sent");
+        assert!(app.turns[0].user.starts_with("Explain this."));
+        assert!(app.turns[0].user.contains("Error 0x80070005"));
+        assert!(app.attachment.is_none());
+        assert_eq!(app.chat.title, "Explain this.");
+    }
+
+    #[test]
+    fn too_long_question_with_clipboard_is_refused() {
+        let mut app = ready();
+        let _ = app.update(Message::Clipboard(Some("x".repeat(6000))));
+        app.input = "q".repeat(3000);
+        let _ = app.update(Message::Send);
+        assert!(app.request.is_none());
+        assert!(app.attachment.is_some(), "kept so the user can shorten the question");
+    }
+
+    #[test]
+    fn saving_a_new_profile_keeps_the_default_model() {
+        let mut app = ready();
+        let default_model = app.config.model.clone();
+        let _ = app.update(Message::NewProfile);
+        let _ = app.update(Message::ProfileName("Work".into()));
+        let _ = app.update(Message::Model("other:1b".into()));
+        let _ = app.update(Message::SaveSettings);
+        assert_eq!(app.config.model, default_model);
+        assert_eq!(app.config.profiles.len(), 1);
+        assert_eq!(app.config.profiles[0].model, "other:1b");
+        assert_eq!(app.profile_edit, ProfileEdit::Existing(app.config.profiles[0].id));
+        let _ = app.update(Message::EditProfile(0));
+        assert_eq!(app.draft_config.model, default_model);
+        let _ = app.update(Message::EditProfile(app.config.profiles[0].id));
+        let _ = app.update(Message::DeleteProfile);
+        assert!(app.config.profiles.is_empty());
     }
 
     fn first_launch() -> Island {
         let mut app = ready();
         // A real first launch has no notch yet; setup runs in the app window.
         app.window = None;
-        let _ = app.update(Message::Loaded(Ok((Config::default(), Vec::new()))));
+        let _ = app.update(loaded(Config::default()));
         app
     }
 
@@ -2881,7 +3291,7 @@ mod tests {
     #[test]
     fn background_first_launch_still_onboards() {
         let mut app = Island::new(Launch::Background).0;
-        let _ = app.update(Message::Loaded(Ok((Config::default(), vec![]))));
+        let _ = app.update(loaded(Config::default()));
         assert!(app.onboarding.is_some());
         assert!(app.app_window.is_some());
     }
@@ -2893,7 +3303,7 @@ mod tests {
             onboarded: true,
             ..Config::default()
         };
-        let _ = app.update(Message::Loaded(Ok((config, Vec::new()))));
+        let _ = app.update(loaded(config));
         assert!(app.onboarding.is_none());
     }
 
@@ -2985,13 +3395,10 @@ mod tests {
             !app.icon_font_requested,
             "no window yet, so no renderer to load into"
         );
-        let _ = app.update(Message::Loaded(Ok((
-            Config {
-                onboarded: true,
-                ..Config::default()
-            },
-            Vec::new(),
-        ))));
+        let _ = app.update(loaded(Config {
+            onboarded: true,
+            ..Config::default()
+        }));
         assert!(app.icon_font_requested);
         let _ = app.update(Message::OpenWindow);
         assert!(app.icon_font_requested);
@@ -3328,13 +3735,13 @@ mod tests {
     }
 
     fn loaded_onboarded() -> Message {
-        Message::Loaded(Ok((
-            Config {
+        Message::Loaded(Ok(storage::Loaded {
+            config: Config {
                 onboarded: true,
                 ..Config::default()
             },
-            vec![],
-        )))
+            ..Default::default()
+        }))
     }
 
     #[test]

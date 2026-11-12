@@ -204,6 +204,70 @@ pub struct Config {
     /// Look for new versions on GitHub every six hours.
     pub auto_update: bool,
     pub hover_delay_ms: u16,
+    /// Global shortcut that opens the notch with the clipboard's text attached; empty = off.
+    pub ask_shortcut: String,
+    /// Saved model profiles besides the default (provider, endpoint and model above).
+    pub profiles: Vec<Profile>,
+}
+
+/// A named provider, endpoint and model to switch to from the notch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Profile {
+    /// Never 0: that id means the default profile.
+    pub id: u32,
+    pub name: String,
+    pub provider: Provider,
+    pub endpoint: String,
+    pub model: String,
+}
+
+pub const MAX_PROFILES: usize = 8;
+
+/// Where a chat's messages go. Context collected for one destination is never sent to
+/// another, so a chat keeps the destination of its first message.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Destination {
+    /// A model server on this computer (loopback endpoint).
+    Local,
+    /// Anything else, named by provider or endpoint origin.
+    Cloud(String),
+}
+
+impl Destination {
+    /// Stable text form saved with a chat: "local" or "cloud:<name>".
+    pub fn key(&self) -> String {
+        match self {
+            Destination::Local => "local".into(),
+            Destination::Cloud(name) => format!("cloud:{name}"),
+        }
+    }
+
+    /// Reads `key()`'s form back; anything unknown counts as cloud.
+    pub fn from_key(key: &str) -> Destination {
+        match key.strip_prefix("cloud:") {
+            _ if key == "local" => Destination::Local,
+            Some(name) => Destination::Cloud(name.into()),
+            None => Destination::Cloud(key.into()),
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Destination::Local => "Local",
+            Destination::Cloud(_) => "Cloud",
+        }
+    }
+
+    /// Who receives the chat, for messages: "this computer", "ChatGPT", a host name.
+    pub fn describe(&self) -> String {
+        match self {
+            Destination::Local => "this computer".into(),
+            Destination::Cloud(name) => name
+                .split_once("://")
+                .map_or(name.as_str(), |(_, host)| host)
+                .to_owned(),
+        }
+    }
 }
 
 /// The saved shape, which may still carry the old `light` flag instead of `theme`.
@@ -233,6 +297,8 @@ struct ConfigFields {
     mascot: bool,
     hover_delay_ms: u16,
     auto_update: bool,
+    ask_shortcut: String,
+    profiles: Vec<Profile>,
 }
 
 impl Default for ConfigFields {
@@ -252,6 +318,8 @@ impl Default for ConfigFields {
             mascot: c.mascot,
             auto_update: c.auto_update,
             hover_delay_ms: c.hover_delay_ms,
+            ask_shortcut: c.ask_shortcut,
+            profiles: c.profiles,
         }
     }
 }
@@ -281,6 +349,8 @@ impl From<StoredConfig> for Config {
                 .iter()
                 .min_by_key(|&&ms| ms.abs_diff(f.hover_delay_ms))
                 .unwrap_or(&150),
+            ask_shortcut: f.ask_shortcut,
+            profiles: f.profiles,
         }
     }
 }
@@ -302,6 +372,8 @@ impl Default for Config {
             mascot: true,
             auto_update: true,
             hover_delay_ms: 150,
+            ask_shortcut: "Ctrl+Alt+Shift+A".into(),
+            profiles: Vec::new(),
         }
     }
 }
@@ -326,35 +398,120 @@ pub fn validate_endpoint(value: &str) -> Result<reqwest::Url, String> {
     Ok(url)
 }
 
-impl Config {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.provider.is_cli() {
-            // The model becomes a CLI argument, so it may never look like a flag or contain spaces.
-            let model = self.model.trim();
-            if model.len() > 200 {
-                return Err("Model must contain at most 200 bytes.".into());
-            }
-            if model.starts_with('-')
-                || !model
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "._:/-".contains(c))
-            {
-                return Err("Model may contain only letters, digits and . _ : / -".into());
-            }
-        } else if self.provider == Provider::ChatGpt {
-            if self.model.len() > 200 {
-                return Err("Model must contain at most 200 bytes.".into());
-            }
-        } else {
-            validate_endpoint(&self.endpoint)?;
-            if self.model.trim().is_empty() || self.model.len() > 200 {
-                return Err("Model must contain 1–200 bytes.".into());
+/// Checks one provider, endpoint and model combination.
+pub fn validate_model(provider: Provider, endpoint: &str, model: &str) -> Result<(), String> {
+    if provider.is_cli() {
+        // The model becomes a CLI argument, so it may never look like a flag or contain spaces.
+        let model = model.trim();
+        if model.len() > 200 {
+            return Err("Model must contain at most 200 bytes.".into());
+        }
+        if model.starts_with('-')
+            || !model
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._:/-".contains(c))
+        {
+            return Err("Model may contain only letters, digits and . _ : / -".into());
+        }
+    } else if provider == Provider::ChatGpt {
+        if model.len() > 200 {
+            return Err("Model must contain at most 200 bytes.".into());
+        }
+    } else {
+        validate_endpoint(endpoint)?;
+        if model.trim().is_empty() || model.len() > 200 {
+            return Err("Model must contain 1–200 bytes.".into());
+        }
+    }
+    Ok(())
+}
+
+/// Where messages for `provider` at `endpoint` end up.
+pub fn destination(provider: Provider, endpoint: &str) -> Destination {
+    match provider {
+        Provider::ClaudeCode => Destination::Cloud("Claude Code".into()),
+        Provider::Codex => Destination::Cloud("Codex".into()),
+        Provider::ChatGpt => Destination::Cloud("ChatGPT".into()),
+        Provider::Ollama | Provider::OpenAi | Provider::Unsloth => {
+            match validate_endpoint(endpoint) {
+                Ok(url) if url.scheme() == "http" => Destination::Local,
+                Ok(url) => Destination::Cloud(url.origin().ascii_serialization()),
+                // Invalid endpoints never send; name them so they never match a real one.
+                Err(_) => Destination::Cloud(format!("invalid:{endpoint}")),
             }
         }
+    }
+}
+
+impl Profile {
+    pub fn validate(&self) -> Result<(), String> {
+        let name = self.name.trim();
+        if name.is_empty() || name.chars().count() > 40 {
+            return Err("Give the profile a name of 1–40 characters.".into());
+        }
+        if self.id == 0 {
+            return Err("Profile id 0 is reserved for the default.".into());
+        }
+        validate_model(self.provider, &self.endpoint, &self.model)
+    }
+}
+
+impl Config {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_model(self.provider, &self.endpoint, &self.model)?;
         if self.shortcut.trim().is_empty() || self.shortcut.len() > 100 {
             return Err("Enter a global shortcut, such as Ctrl+Alt+B.".into());
         }
+        if self.ask_shortcut.len() > 100 {
+            return Err("The clipboard shortcut is too long.".into());
+        }
+        if self.profiles.len() > MAX_PROFILES {
+            return Err(format!("Keep at most {MAX_PROFILES} saved profiles."));
+        }
+        let mut ids = std::collections::HashSet::new();
+        for profile in &self.profiles {
+            profile.validate()?;
+            if !ids.insert(profile.id) {
+                return Err("Two profiles share an id.".into());
+            }
+        }
         Ok(())
+    }
+
+    /// Where this config's default model sends messages.
+    pub fn destination(&self) -> Destination {
+        destination(self.provider, &self.endpoint)
+    }
+
+    /// This config with profile `id`'s provider, endpoint and model swapped in; 0 is the
+    /// default. `None` when the profile no longer exists.
+    pub fn with_profile(&self, id: u32) -> Option<Config> {
+        if id == 0 {
+            return Some(self.clone());
+        }
+        let profile = self.profiles.iter().find(|p| p.id == id)?;
+        Some(Config {
+            provider: profile.provider,
+            endpoint: profile.endpoint.clone(),
+            model: profile.model.clone(),
+            ..self.clone()
+        })
+    }
+
+    /// The display name of profile `id`.
+    pub fn profile_name(&self, id: u32) -> Option<&str> {
+        if id == 0 {
+            return Some("Default");
+        }
+        self.profiles
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.name.as_str())
+    }
+
+    /// An id no saved profile uses yet.
+    pub fn next_profile_id(&self) -> u32 {
+        self.profiles.iter().map(|p| p.id).max().unwrap_or(0) + 1
     }
 }
 
@@ -503,5 +660,56 @@ mod tests {
             "http://127.0.0.1:8888/v1"
         );
         assert_eq!(Provider::ALL.len(), 6);
+    }
+
+    #[test]
+    fn destinations_split_local_from_cloud() {
+        use super::{Destination, Provider, destination};
+        assert_eq!(
+            destination(Provider::Ollama, "http://127.0.0.1:11434"),
+            Destination::Local
+        );
+        assert_eq!(
+            destination(Provider::OpenAi, "https://api.example.com/v1"),
+            Destination::Cloud("https://api.example.com".into())
+        );
+        assert_eq!(destination(Provider::Codex, "").key(), "cloud:Codex");
+        assert_ne!(
+            destination(Provider::OpenAi, "https://a.example.com/v1"),
+            destination(Provider::OpenAi, "https://b.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn profiles_validate_and_swap_in() {
+        use super::{Config, Profile, Provider};
+        let mut config = Config::default();
+        let work = Profile {
+            id: config.next_profile_id(),
+            name: "Work".into(),
+            provider: Provider::ChatGpt,
+            endpoint: String::new(),
+            model: String::new(),
+        };
+        config.profiles.push(work.clone());
+        assert!(config.validate().is_ok());
+        let swapped = config.with_profile(work.id).unwrap();
+        assert_eq!(swapped.provider, Provider::ChatGpt);
+        assert_eq!(swapped.shortcut, config.shortcut);
+        assert!(config.with_profile(99).is_none());
+        assert_eq!(config.profile_name(0), Some("Default"));
+
+        config.profiles.push(work);
+        assert!(config.validate().is_err(), "duplicate ids");
+        config.profiles.pop();
+        config.profiles[0].name = " ".into();
+        assert!(config.validate().is_err(), "blank name");
+    }
+
+    #[test]
+    fn old_config_has_no_profiles_and_the_default_ask_shortcut() {
+        let c: super::Config = serde_json::from_str("{}").unwrap();
+        assert!(c.profiles.is_empty());
+        assert_eq!(c.ask_shortcut, "Ctrl+Alt+Shift+A");
     }
 }

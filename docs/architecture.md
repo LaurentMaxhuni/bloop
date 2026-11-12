@@ -138,3 +138,36 @@ draws a small Bloop beside each reply. Only the newest one moves, and only on th
 notch mascot already runs, so this adds no new timers. Older replies show Bloop asleep, as
 does the newest after 45 s of quiet. The two new moods are Laughing (squeezed eyes, open
 mouth, a bounce that fades) and Mad (slanted brows, frown, a brief tremble, an anger mark).
+
+## Chats, model profiles and clipboard ask (2026-11-12)
+
+- **Chats replace the single history.** A `chats` table holds one row per conversation
+  (title, profile, destination, last change, turns as JSON). On first load the old
+  `state.history` becomes one chat in a single transaction and is emptied, so the
+  migration runs once. Only the chat in the notch is written by the normal save (together
+  with the settings, in one transaction); rename, delete and search touch other chats
+  directly. A chat without turns is never written, so "New chat" costs nothing. Chat ids
+  are creation times in milliseconds, assigned in the UI, so a save never needs a round
+  trip to learn its id. Deleting the chat in the notch while its save is in flight waits
+  for that save, so the save cannot bring the row back.
+- **A chat keeps its destination.** Each chat records where its first message went:
+  `local` (a loopback endpoint) or `cloud:<provider or origin>`. bloop refuses to send a
+  chat's history anywhere else, including Retry, which would resend an old prompt. Changing
+  the default model or a profile's endpoint therefore can't move local context to a cloud
+  service; the user starts a new chat instead. Switching profile in the notch does exactly
+  that when the chat already has turns.
+- **Profiles** are extra named provider/endpoint/model sets in the config (at most 8); the
+  existing provider, endpoint and model stay the default profile, so older configs load
+  unchanged. Sending swaps the chat's profile into a copy of the config, so the provider
+  code didn't change.
+- **API keys follow the endpoint.** Saved keys are keyed by endpoint origin in Credential
+  Manager (`bloop/api-key/<origin>`), so a profile for one server never sends the key
+  saved for another. The old single key moves to the endpoint configured at first start.
+  `BLOOP_API_KEY` still applies to every endpoint, as before.
+- **Clipboard ask** is a second global hotkey (default Ctrl+Alt+Shift+A, empty turns it
+  off). It reads clipboard text only when pressed, attaches up to 6 KiB below the
+  question in a code fence longer than any backtick run inside it, and shows the text and
+  the destination before anything is sent. No image capture yet: many supported models
+  can't read images, so a screen-region feature should go through local OCR first.
+- **Markdown export** writes a chat through the standard Windows Save dialog; nothing is
+  written without the user picking a file.

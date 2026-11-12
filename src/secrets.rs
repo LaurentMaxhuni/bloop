@@ -8,30 +8,60 @@ pub enum KeySource {
     None,
 }
 
-const TARGET: &str = "bloop/api-key";
+/// Where keys were saved before they were tied to an endpoint.
+const LEGACY_TARGET: &str = "bloop/api-key";
 const MAX_KEY: usize = 4096;
 
-/// `BLOOP_API_KEY` if set, else the saved key.
-pub fn api_key() -> Option<String> {
+/// Saved keys belong to one endpoint origin (scheme, host and port), so a model profile
+/// pointing at another server never receives a key saved for this one.
+fn target(endpoint: &str) -> Option<String> {
+    let url = crate::config::validate_endpoint(endpoint).ok()?;
+    Some(format!(
+        "bloop/api-key/{}",
+        url.origin().ascii_serialization()
+    ))
+}
+
+fn environment_key() -> Option<String> {
     std::env::var("BLOOP_API_KEY")
         .ok()
         .filter(|k| !k.trim().is_empty())
-        .or_else(|| read(TARGET))
 }
 
-pub fn key_source() -> KeySource {
-    if std::env::var("BLOOP_API_KEY").is_ok_and(|k| !k.trim().is_empty()) {
+/// `BLOOP_API_KEY` if set, else the key saved for `endpoint`'s origin.
+pub fn api_key(endpoint: &str) -> Option<String> {
+    environment_key().or_else(|| target(endpoint).and_then(|t| read(&t)))
+}
+
+pub fn key_source(endpoint: &str) -> KeySource {
+    if environment_key().is_some() {
         KeySource::Environment
-    } else if read(TARGET).is_some() {
+    } else if target(endpoint).and_then(|t| read(&t)).is_some() {
         KeySource::Saved
     } else {
         KeySource::None
     }
 }
 
-/// Saves the key, or removes it for `None` / a blank key.
-pub fn set_api_key(key: Option<&str>) -> Result<(), String> {
-    write(TARGET, key)
+/// Saves the key for `endpoint`'s origin, or removes it for `None` / a blank key.
+pub fn set_api_key(endpoint: &str, key: Option<&str>) -> Result<(), String> {
+    let target = target(endpoint).ok_or("Enter a valid endpoint before saving a key.")?;
+    write(&target, key)
+}
+
+/// Moves a key saved by an older bloop (one key for every endpoint) to `endpoint`, the
+/// endpoint it was used with. Does nothing once moved or when that origin has its own key.
+pub fn migrate_legacy_key(endpoint: &str) {
+    let Some(legacy) = read(LEGACY_TARGET) else {
+        return;
+    };
+    let Some(target) = target(endpoint) else {
+        return;
+    };
+    if read(&target).is_none() && write(&target, Some(&legacy)).is_err() {
+        return;
+    }
+    let _ = write(LEGACY_TARGET, None);
 }
 
 /// DPAPI handles OAuth sessions larger than a Credential Manager entry and binds them to
@@ -202,6 +232,29 @@ mod tests {
         write(TARGET, None).unwrap();
         assert_eq!(read(TARGET), None);
         write(TARGET, None).unwrap();
+    }
+
+    #[test]
+    fn keys_are_per_origin() {
+        assert_eq!(
+            target("https://api.example.com/v1").as_deref(),
+            Some("bloop/api-key/https://api.example.com")
+        );
+        assert_eq!(
+            target("https://api.example.com/other"),
+            target("https://api.example.com/v1"),
+            "same server, same key"
+        );
+        assert_ne!(
+            target("https://api.example.com/v1"),
+            target("https://evil.example.net/v1")
+        );
+        assert_ne!(
+            target("http://127.0.0.1:8080/v1"),
+            target("http://127.0.0.1:8888/v1")
+        );
+        assert_eq!(target("not a url"), None);
+        assert!(set_api_key("not a url", Some("sk")).is_err());
     }
 
     #[test]
