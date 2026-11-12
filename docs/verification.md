@@ -308,3 +308,27 @@ cancellation/error branch and worker-thread ownership were reviewed against Micr
 API documentation. The dialog was not opened; save/cancel/overwrite interactions and
 non-Windows compilation remain unverified. No bloop executable was launched.
 Passed: cargo fmt, cargo clippy --all-targets -- -D warnings, and cargo test (normal Windows session): 220 passed, four existing live-network/CLI tests ignored.
+
+## v1.1–v1.3: reply actions, profiles, clipboard ask, chats (2026-11-12)
+
+Passed on the branch `feat/v1.1-v1.3`: `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo test` (245 passed, 4 live CLI tests
+ignored as usual).
+
+Covered by tests: Retry and Edit & resend replace the last turn and are ignored while
+streaming; New chat keeps the old chat listed; switching profile in a chat with history
+starts a new chat; a chat's local history isn't sent after the default changes to a cloud
+endpoint (Send and Retry); a deleted profile blocks sending; chats imported from the old
+single history are never sent; clipboard text is fenced, capped, sent once, refused when
+the whole prompt is too long and dropped on chat change or a late read; keys are stored
+per endpoint origin and a typed key is dropped when the server or profile changes; the
+storage queue keeps the outgoing chat's save ahead of a chat load, a delete removes that
+chat's queued saves and runs after the save in flight, and Quit waits for queued jobs;
+storage migration, listing, search, rename and delete against real SQLite files; relative
+dates. Codex reviewed the branch and found seven problems (all fixed, with tests above); a
+second Codex review of the fixes stopped at its usage limit before reporting.
+
+Not verified: none of the new UI was looked at or clicked in a running bloop, because the
+installed copy was running and a dev build would only signal it. Not exercised: the Save
+dialog, the second global hotkey on the desktop, Test connection against real servers,
+moving across monitors with different scaling, and the migration on a real 0.4 database.
