@@ -3950,6 +3950,27 @@ mod tests {
     }
 
     #[test]
+    fn a_deleted_profiles_id_is_never_reused() {
+        let mut app = ready();
+        let first = with_cloud_profile(&mut app);
+        let _ = app.update(Message::EditProfile(first));
+        let _ = app.update(Message::DeleteProfile(first));
+        let _ = app.update(Message::DeleteProfileConfirm);
+        assert!(app.config.profiles.is_empty());
+        // A chat still pointing at the deleted id finds nothing, not a new profile.
+        let _ = app.update(Message::NewProfile);
+        let _ = app.update(Message::ProfileName("Later".into()));
+        let _ = app.update(Message::SaveSettings);
+        let later = app.config.profiles[0].id;
+        assert_ne!(later, first);
+        assert!(app.config.with_profile(first).is_none());
+        // The counter survives a save and reload.
+        let back: Config =
+            serde_json::from_str(&serde_json::to_string(&app.config).unwrap()).unwrap();
+        assert!(back.next_profile_id() > later);
+    }
+
+    #[test]
     fn saving_a_new_profile_keeps_the_default_model() {
         let mut app = ready();
         let default_model = app.config.model.clone();

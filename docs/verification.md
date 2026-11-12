@@ -490,3 +490,14 @@ Not checked: the Appearance page's Bloop section, the Model page (custom instruc
 key, bigger dropdowns) and the open notch (context selector, header and greeting Bloop,
 prompt recall, Ctrl+N). Synthetic mouse clicks and hover didn't reach the window, and
 AGENTS.md says not to drive the desktop, so these need a person.
+
+## Profile ids are never reused (2026-11-12)
+
+Review finding on PR #7: deleting the highest-numbered profile let the next new profile take
+its id, so chats that kept the old id would quietly continue on the new profile's model.
+`Config.last_profile_id` now records the highest id ever handed out (raised on create and on
+delete, and never below a saved profile's id on load), and `next_profile_id` counts from it.
+`a_deleted_profiles_id_is_never_reused` covers delete → create → reload. Full checks pass
+(104 library, 141 app, integration suites). Limitation: a config saved by 0.5.0 or older
+after deleting its top profile has no record of that id; the first delete with this build
+starts recording.
