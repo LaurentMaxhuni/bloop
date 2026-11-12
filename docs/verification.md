@@ -276,3 +276,12 @@ No bloop executable was launched. Actual monitor selection, focus ordering and c
 movement remain unverified on screen; test both directions between differently scaled
 monitors, with the foreground window on each monitor and with a bloop window foreground.
 All three gates passed. cargo test required the normal Windows session: the sandbox could not access Credential Manager for two existing secrets tests. Real-CLI and live-GitHub tests remain ignored.
+
+## Independent clipboard shortcut (2026-11-12)
+
+Unit coverage checks distinct Toggle/Ask routing, disabling Ask without affecting Toggle,
+invalid syntax, duplicate bindings in either direction, idempotent registration and
+preserving the old binding after registration failure. Both shortcuts reuse validate_shortcut.
+No desktop hotkeys were registered in these tests; Windows registration and actual key
+presses remain unverified. UI integration is intentionally just an empty Event::Ask arm.
+Passed: cargo fmt, cargo clippy --all-targets -- -D warnings, and cargo test (normal Windows session; existing live tests ignored).

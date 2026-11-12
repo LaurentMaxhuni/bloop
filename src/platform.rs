@@ -37,6 +37,7 @@ pub fn show_fatal(message: &str) {
 pub enum Event {
     Ready(Controller),
     Toggle,
+    Ask,
     Settings,
     Quit,
     Warning(String),
@@ -61,9 +62,19 @@ struct ThreadState {
 #[cfg(windows)]
 enum Command {
     Shortcut(String),
+    AskShortcut(String),
 }
 
 impl Controller {
+    /// Empty disables the clipboard shortcut. The UI wires this up separately.
+    #[allow(dead_code)]
+    pub fn ask_shortcut(&self, value: String) {
+        #[cfg(windows)]
+        self.send(Command::AskShortcut(value));
+        #[cfg(not(windows))]
+        let _ = value;
+    }
+
     pub fn shortcut(&self, value: String) {
         #[cfg(windows)]
         self.send(Command::Shortcut(value));
@@ -167,13 +178,67 @@ pub fn events() -> impl iced::futures::Stream<Item = Event> {
 const WAKE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 42;
 
 #[cfg(windows)]
+#[derive(Default)]
+struct Shortcuts([Option<global_hotkey::hotkey::HotKey>; 2]);
+
+#[cfg(windows)]
+impl Shortcuts {
+    fn event(&self, id: u32) -> Option<Event> {
+        if self.0[0].is_some_and(|key| key.id() == id) {
+            Some(Event::Toggle)
+        } else if self.0[1].is_some_and(|key| key.id() == id) {
+            Some(Event::Ask)
+        } else {
+            None
+        }
+    }
+
+    fn apply(
+        &mut self,
+        slot: usize,
+        value: &str,
+        mut register: impl FnMut(bool, global_hotkey::hotkey::HotKey) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let next = if slot == 1 && value.is_empty() {
+            None
+        } else {
+            validate_shortcut(value)?;
+            Some(
+                value
+                    .parse::<global_hotkey::hotkey::HotKey>()
+                    .map_err(|e| e.to_string())?,
+            )
+        };
+        if next == self.0[slot] {
+            return Ok(());
+        }
+        if next.is_some() && next == self.0[1 - slot] {
+            return Err("This key combination is already used by the other bloop shortcut.".into());
+        }
+        if let Some(key) = next {
+            register(true, key)?;
+        }
+        if let Some(old) = self.0[slot]
+            && let Err(error) = register(false, old)
+        {
+            if let Some(key) = next {
+                let _ = register(false, key);
+            }
+            return Err(error);
+        }
+        self.0[slot] = next;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
 fn run(
     sender: tokio::sync::mpsc::UnboundedSender<Event>,
     commands: std::sync::mpsc::Sender<Command>,
     inbox: std::sync::mpsc::Receiver<Command>,
     state: std::sync::Arc<ThreadState>,
 ) -> Result<(), String> {
-    use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
+    use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
     use tray_icon::{
         MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
         menu::{Menu, MenuEvent, MenuItem},
@@ -207,9 +272,13 @@ fn run(
         .map_err(|e| e.to_string())?;
     let manager = GlobalHotKeyManager::new().map_err(|e| e.to_string())?;
     let hotkey_sender = sender.clone();
+    let shortcuts = std::sync::Arc::new(std::sync::Mutex::new(Shortcuts::default()));
+    let hotkey_shortcuts = shortcuts.clone();
     GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-        if event.state == HotKeyState::Pressed {
-            let _ = hotkey_sender.send(Event::Toggle);
+        if event.state == HotKeyState::Pressed
+            && let Some(action) = hotkey_shortcuts.lock().unwrap().event(event.id)
+        {
+            let _ = hotkey_sender.send(action);
         }
     }));
     let menu = Menu::new();
@@ -269,7 +338,6 @@ fn run(
         .with_tooltip("bloop · your local AI notch")
         .build()
         .map_err(|e| e.to_string())?;
-    let mut current: Option<HotKey> = None;
     loop {
         if state.stopping.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(());
@@ -284,31 +352,22 @@ fn run(
         }
         if msg.message == WAKE {
             for command in inbox.try_iter() {
-                match command {
-                    Command::Shortcut(value) => {
-                        let result =
-                            value
-                                .parse::<HotKey>()
-                                .map_err(|e| e.to_string())
-                                .and_then(|hotkey| {
-                                    if current == Some(hotkey) {
-                                        return Ok(());
-                                    }
-                                    manager.register(hotkey).map_err(|e| e.to_string())?;
-                                    if let Some(old) = current {
-                                        let _ = manager.unregister(old);
-                                    }
-                                    current = Some(hotkey);
-                                    Ok(())
-                                });
-                        let _ = sender.send(match result {
-                            Ok(()) => Event::ShortcutApplied,
-                            Err(error) => {
-                                Event::Warning(format!("Global shortcut unavailable: {error}"))
-                            }
-                        });
+                let (slot, value, label) = match command {
+                    Command::Shortcut(value) => (0, value, "Global shortcut"),
+                    Command::AskShortcut(value) => (1, value, "Ask about clipboard shortcut"),
+                };
+                let result = shortcuts.lock().unwrap().apply(slot, &value, |add, key| {
+                    if add {
+                        manager.register(key)
+                    } else {
+                        manager.unregister(key)
                     }
-                }
+                    .map_err(|e| e.to_string())
+                });
+                let _ = sender.send(match result {
+                    Ok(()) => Event::ShortcutApplied,
+                    Err(error) => Event::Warning(format!("{label} unavailable: {error}")),
+                });
             }
         } else {
             // SAFETY: MSG was initialized by a successful GetMessageW on this thread.
@@ -1068,6 +1127,44 @@ pub fn launch_installer(path: &std::path::Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn shortcuts_are_independent_and_keep_old_binding_on_failure() {
+        use super::*;
+        let mut shortcuts = Shortcuts::default();
+        let mut registered = Vec::new();
+        let mut change = |add, key| {
+            if add {
+                registered.push(key);
+            } else {
+                registered.retain(|k| *k != key);
+            }
+            Ok(())
+        };
+        shortcuts.apply(0, "Ctrl+Alt+B", &mut change).unwrap();
+        shortcuts.apply(1, "Ctrl+Alt+C", &mut change).unwrap();
+        let [Some(toggle), Some(ask)] = shortcuts.0 else {
+            panic!("both registered")
+        };
+        assert!(matches!(shortcuts.event(toggle.id()), Some(Event::Toggle)));
+        assert!(matches!(shortcuts.event(ask.id()), Some(Event::Ask)));
+        assert!(shortcuts.apply(1, "Ctrl+Alt+B", &mut change).is_err());
+        assert!(shortcuts.apply(0, "Ctrl+Alt+C", &mut change).is_err());
+        assert!(shortcuts.apply(1, "not a shortcut", &mut change).is_err());
+        assert!(
+            shortcuts
+                .apply(1, "Ctrl+Alt+D", |_, _| Err("occupied".into()))
+                .is_err()
+        );
+        assert_eq!(shortcuts.0, [Some(toggle), Some(ask)]);
+        shortcuts.apply(1, "", &mut change).unwrap();
+        assert!(shortcuts.event(ask.id()).is_none());
+        assert!(matches!(shortcuts.event(toggle.id()), Some(Event::Toggle)));
+        shortcuts.apply(1, "", &mut change).unwrap();
+        shortcuts.apply(0, "Ctrl+Alt+B", &mut change).unwrap();
+        assert_eq!(registered, [toggle]);
+    }
+
     #[test]
     fn placement_uses_physical_origin_and_target_scale() {
         use super::*;

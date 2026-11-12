@@ -640,6 +640,7 @@ impl Island {
                     self.controller = Some(controller);
                 }
                 platform::Event::Toggle => return self.update(Message::Toggle),
+                platform::Event::Ask => {}
                 platform::Event::Settings => return self.update(Message::OpenWindow),
                 platform::Event::Quit => return self.update(Message::Quit),
                 platform::Event::Warning(error) => self.desktop_warning = error,
