@@ -191,6 +191,8 @@ pub struct Config {
     pub provider: Provider,
     pub endpoint: String,
     pub model: String,
+    /// Global reply preferences, sent with every message across all profiles.
+    pub instructions: String,
     pub shortcut: String,
     pub theme: ThemeChoice,
     /// First-launch setup finished; old configs without it load as false.
@@ -224,6 +226,7 @@ pub struct Profile {
 }
 
 pub const MAX_PROFILES: usize = 8;
+pub const MAX_INSTRUCTIONS: usize = 2048;
 
 /// The name shown for profile 0, the provider, endpoint and model kept at the top level.
 pub const MAIN_PROFILE: &str = "Main";
@@ -292,6 +295,7 @@ struct ConfigFields {
     provider: Provider,
     endpoint: String,
     model: String,
+    instructions: String,
     shortcut: String,
     onboarded: bool,
     accent: Accent,
@@ -314,6 +318,7 @@ impl Default for ConfigFields {
             provider: c.provider,
             endpoint: c.endpoint,
             model: c.model,
+            instructions: c.instructions,
             shortcut: c.shortcut,
             onboarded: c.onboarded,
             accent: c.accent,
@@ -338,6 +343,7 @@ impl From<StoredConfig> for Config {
             provider: f.provider,
             endpoint: f.endpoint,
             model: f.model,
+            instructions: f.instructions.trim().to_owned(),
             shortcut: f.shortcut,
             theme: stored.theme.unwrap_or(match stored.light {
                 Some(true) => ThemeChoice::Light,
@@ -374,6 +380,7 @@ impl Default for Config {
             provider: Provider::Ollama,
             endpoint: "http://127.0.0.1:11434".into(),
             model: "qwen3:4b".into(),
+            instructions: String::new(),
             shortcut: "Ctrl+Alt+B".into(),
             theme: ThemeChoice::Dark,
             onboarded: false,
@@ -473,6 +480,11 @@ impl Profile {
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
         validate_model(self.provider, &self.endpoint, &self.model)?;
+        if self.instructions.trim().len() > MAX_INSTRUCTIONS {
+            return Err(format!(
+                "Custom instructions must contain at most {MAX_INSTRUCTIONS} bytes."
+            ));
+        }
         if self.shortcut.trim().is_empty() || self.shortcut.len() > 100 {
             return Err("Enter a global shortcut, such as Ctrl+Alt+B.".into());
         }
@@ -543,6 +555,49 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_instructions_default_and_round_trip() {
+        let old: super::Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(serde_json::to_value(old).unwrap()["instructions"], "");
+        let config: super::Config = serde_json::from_value(serde_json::json!({
+            "instructions": "  I write Rust.\nKeep replies short.  "
+        }))
+        .unwrap();
+        let back: super::Config =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(back).unwrap()["instructions"],
+            "I write Rust.\nKeep replies short."
+        );
+    }
+
+    #[test]
+    fn custom_instructions_limit_counts_trimmed_utf8_bytes() {
+        let config = |instructions: String| -> super::Config {
+            serde_json::from_value(serde_json::json!({"instructions": instructions})).unwrap()
+        };
+        assert!(
+            config(format!("  {}\n", "é".repeat(1024)))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            super::Config {
+                instructions: format!("  {}\n", "é".repeat(1024)),
+                ..super::Config::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        let error = config(format!("{}a", "é".repeat(1024)))
+            .validate()
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Custom instructions must contain at most 2048 bytes."
+        );
+    }
+
     #[test]
     fn plaintext_remote_endpoint_is_rejected() {
         assert!(super::validate_endpoint("http://example.com:11434").is_err());

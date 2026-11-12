@@ -1242,6 +1242,22 @@ mod tests {
     }
 
     #[test]
+    fn flatten_preserves_system_instructions_as_a_user_turn() {
+        let messages = crate::model::context(&[], "hello", "Be brief.");
+        let prompt = flatten_with(&messages, "abc");
+        assert!(prompt.contains(&format!(
+            "<turn-abc role=\"user\">\n{}\n</turn-abc>",
+            messages[0].content
+        )));
+        assert!(prompt.contains("<instructions>\nBe brief.\n</instructions>"));
+        assert!(
+            prompt
+                .trim_end()
+                .ends_with("<turn-abc role=\"user\">\nhello\n</turn-abc>")
+        );
+    }
+
+    #[test]
     fn flatten_delimits_turns() {
         let messages = [
             ChatMessage {

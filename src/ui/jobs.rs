@@ -16,7 +16,7 @@ use iced::Task;
 pub enum Job {
     /// Settings, and the given chat when it has turns.
     Save {
-        config: Config,
+        config: Box<Config>,
         chat: Option<(Chat, Vec<Turn>)>,
     },
     Rename(i64, String),

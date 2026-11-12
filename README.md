@@ -26,6 +26,8 @@ Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to
 
 ## Use
 
+- **Custom instructions.** On the Model page, tell Bloop about yourself or how to reply,
+  then Save. Up to 2048 bytes are sent with every message, across all model profiles.
 - **Sliver → pill → panel.** At rest bloop is a 120 × 5 px sliver at the top centre of the
   screen. Rest the mouse on it to pop out the pill, then click the pill or press
   **Ctrl+Alt+B** (configurable) to open the chat. Click anywhere else to close it. Escape stops

@@ -236,3 +236,17 @@ OFN_NOCHANGEDIR. It runs on the caller's blocking worker and returns a path or c
 the caller writes the file. The native call has its own modal message loop, so it does not
 block Iced. No COM initialization or application window handle crosses threads.
 API reference: https://learn.microsoft.com/windows/win32/api/commdlg/nf-commdlg-getsavefilenamew
+
+## Custom instructions (2026-11-12)
+
+Custom instructions are one global setting, edited on the Model page and saved with
+the existing settings flow. Outer whitespace is trimmed; the text is capped at 2048
+UTF-8 bytes to keep this per-message overhead small. Old configs default to empty.
+The context builder appends a labelled `<instructions>` block after the unchanged
+fixed system message, explicitly describing it as preferences, not permission to use
+tools. Keeping it in the system message gives every provider the same context:
+ChatGPT maps it to developer context, and CLIs retain their existing flattening of
+the system message into a user-labelled turn. The entire system message, including
+the block and its delimiters, counts against the 32 KiB context budget; old whole
+pairs are dropped first, and the current prompt is always retained.
+Save jobs box their config snapshot to keep the queue's enum small as settings grow.

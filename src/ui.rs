@@ -36,7 +36,7 @@ use iced::{
     futures::SinkExt,
     widget::{
         self, Space, button, canvas, column, container, pick_list, row, scrollable, stack, text,
-        text_input,
+        text_editor, text_input,
     },
     window,
 };
@@ -138,6 +138,7 @@ pub enum Message {
     Provider(Provider),
     Endpoint(String),
     Model(String),
+    Instructions(text_editor::Action),
     ChatGptLoaded(Result<AccountStatus, String>),
     ChatGptSignIn(bool),
     ChatGptCancel,
@@ -232,6 +233,7 @@ pub enum UpdateState {
 pub struct Island {
     config: Config,
     draft_config: Config,
+    instructions_editor: text_editor::Content,
     turns: Vec<Turn>,
     /// Parsed assistant replies, one per turn (see `sync_replies`).
     replies: Vec<rich::Reply>,
@@ -351,6 +353,7 @@ impl Island {
         let state = Self {
             config: Config::default(),
             draft_config: Config::default(),
+            instructions_editor: text_editor::Content::new(),
             turns: Vec::new(),
             replies: Vec::new(),
             reveal: None,
@@ -713,6 +716,8 @@ impl Island {
                     Ok(loaded) => {
                         self.config = loaded.config.clone();
                         self.draft_config = loaded.config;
+                        self.instructions_editor =
+                            text_editor::Content::with_text(&self.draft_config.instructions);
                         self.chats = loaded.chats;
                         match loaded.current {
                             Some((chat, turns)) => {
@@ -1088,6 +1093,13 @@ impl Island {
             Message::ChatGptSignIn(_) | Message::ChatGptSignOut | Message::ChatGptRefreshModels => {
             }
             Message::Shortcut(value) => self.draft_config.shortcut = value,
+            Message::Instructions(action) => {
+                let edited = action.is_edit();
+                self.instructions_editor.perform(action);
+                if edited {
+                    self.draft_config.instructions = self.instructions_editor.text();
+                }
+            }
             Message::SaveSettings => {
                 if self.loading {
                     return Task::none();
@@ -1435,6 +1447,7 @@ impl Island {
         let window = self.open_app_window();
         self.onboarding = Some(Onboarding::new());
         self.draft_config = self.config.clone();
+        self.instructions_editor = text_editor::Content::with_text(&self.draft_config.instructions);
         self.autostart = platform::autostart();
         self.autostart_error.clear();
         self.key_draft.clear();
@@ -1468,6 +1481,7 @@ impl Island {
         self.config.theme = theme;
         self.config.onboarded = true;
         self.draft_config = self.config.clone();
+        self.instructions_editor = text_editor::Content::with_text(&self.draft_config.instructions);
         self.status.clear();
         self.page = AppPage::Home;
         self.react(Mood::Happy, 1.2);
@@ -1629,7 +1643,7 @@ impl Island {
         if self.chat.title.is_empty() {
             self.chat.title = model::title_for(&prompt);
         }
-        let messages = model::context(&self.turns, &prompt);
+        let messages = model::context(&self.turns, &prompt, &config.instructions);
         self.turns.push(Turn {
             user: prompt,
             assistant: String::new(),
@@ -1753,7 +1767,7 @@ impl Island {
         }
         let chat = (!self.turns.is_empty()).then(|| (self.chat.clone(), self.turns.clone()));
         self.queue(jobs::Job::Save {
-            config: self.config.clone(),
+            config: Box::new(self.config.clone()),
             chat,
         })
     }
@@ -3523,6 +3537,75 @@ mod tests {
         let _ = app.update(Message::ApiKey("sk-a".into()));
         let _ = app.update(Message::EditProfile(0));
         assert!(app.key_draft.is_empty());
+    }
+
+    #[test]
+    fn custom_instructions_save_globally_and_trim() {
+        let mut app = ready();
+        let cloud = with_cloud_profile(&mut app);
+        let _ = app.update(Message::Instructions(text_editor::Action::Edit(
+            text_editor::Edit::Paste(std::sync::Arc::new("  I write Rust.\nBe brief.  ".into())),
+        )));
+        let _ = app.update(Message::EditProfile(cloud));
+        assert!(app.config.instructions.is_empty(), "edits wait for Save");
+        let _ = app.update(Message::SaveSettings);
+        assert_eq!(app.config.instructions, "I write Rust.\nBe brief.");
+        assert_eq!(
+            app.config.with_profile(0).unwrap().instructions,
+            app.config.with_profile(cloud).unwrap().instructions
+        );
+        assert_eq!(app.draft_config.instructions, app.config.instructions);
+        assert_eq!(app.instructions_editor.text(), app.config.instructions);
+        let _ = app.update(Message::Instructions(text_editor::Action::SelectAll));
+        let _ = app.update(Message::Instructions(text_editor::Action::Edit(
+            text_editor::Edit::Backspace,
+        )));
+        let _ = app.update(Message::SaveSettings);
+        assert!(
+            app.config.instructions.is_empty(),
+            "instructions can be cleared"
+        );
+    }
+
+    #[test]
+    fn custom_instructions_over_limit_leave_saved_settings_alone() {
+        let mut app = ready();
+        let _ = app.update(Message::Instructions(text_editor::Action::Edit(
+            text_editor::Edit::Paste(std::sync::Arc::new("é".repeat(1025))),
+        )));
+        let _ = app.update(Message::SaveSettings);
+        assert!(app.config.instructions.is_empty());
+        assert!(app.status.contains("2048 bytes"));
+        assert_eq!(
+            app.draft_config.instructions.len(),
+            2050,
+            "keep the draft for correction"
+        );
+    }
+
+    #[test]
+    fn custom_instructions_editor_loads_and_reopening_discards_unsaved_edits() {
+        let mut app = ready();
+        let config = Config {
+            instructions: "I write Rust.\nBe brief.".into(),
+            onboarded: true,
+            ..Config::default()
+        };
+        let _ = app.update(Message::Loaded(Ok(storage::Loaded {
+            config,
+            chats: Vec::new(),
+            current: None,
+        })));
+        assert_eq!(app.instructions_editor.text(), "I write Rust.\nBe brief.");
+        let _ = app.update(Message::Instructions(text_editor::Action::SelectAll));
+        let _ = app.update(Message::Instructions(text_editor::Action::Edit(
+            text_editor::Edit::Insert('x'),
+        )));
+        assert_eq!(app.draft_config.instructions, "x");
+        app.app_window = None;
+        let _ = app.update(Message::OpenWindow);
+        assert_eq!(app.instructions_editor.text(), "I write Rust.\nBe brief.");
+        assert_eq!(app.draft_config.instructions, app.config.instructions);
     }
 
     #[test]
