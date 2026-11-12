@@ -821,6 +821,9 @@ impl Island {
         };
         self.config.profiles.retain(|p| p.id != id);
         self.draft_config.profiles.retain(|p| p.id != id);
+        // Its id stays used: chats that kept it must not reach a later profile.
+        self.config.last_profile_id = self.config.last_profile_id.max(id);
+        self.draft_config.last_profile_id = self.config.last_profile_id;
         if self.config.default_profile == id {
             self.config.default_profile = 0;
         }
@@ -854,6 +857,12 @@ impl Island {
             ProfileEdit::Existing(id) => Some(id),
             ProfileEdit::New => Some(self.config.next_profile_id()),
         };
+        config.last_profile_id = self.config.last_profile_id;
+        if self.profile_edit == ProfileEdit::New
+            && let Some(id) = id
+        {
+            config.last_profile_id = config.last_profile_id.max(id);
+        }
         if let Some(id) = id {
             let profile = Profile {
                 id,

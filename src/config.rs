@@ -246,6 +246,9 @@ pub struct Config {
     pub profiles: Vec<Profile>,
     /// The profile new chats start on: 0 is the main one, else a saved profile's id.
     pub default_profile: u32,
+    /// The highest profile id ever handed out. Ids are never reused, so a chat that kept a
+    /// deleted profile's id can't land on a newer, unrelated profile.
+    pub last_profile_id: u32,
 }
 
 /// A named provider, endpoint and model to switch to from the notch.
@@ -345,6 +348,7 @@ struct ConfigFields {
     ask_shortcut: String,
     profiles: Vec<Profile>,
     default_profile: u32,
+    last_profile_id: u32,
 }
 
 impl Default for ConfigFields {
@@ -370,6 +374,7 @@ impl Default for ConfigFields {
             ask_shortcut: c.ask_shortcut,
             profiles: c.profiles,
             default_profile: c.default_profile,
+            last_profile_id: c.last_profile_id,
         }
     }
 }
@@ -409,6 +414,12 @@ impl From<StoredConfig> for Config {
             } else {
                 0
             },
+            // Never below a saved profile's id, even if the counter was edited by hand.
+            last_profile_id: f
+                .profiles
+                .iter()
+                .map(|p| p.id)
+                .fold(f.last_profile_id, u32::max),
             profiles: f.profiles,
         }
     }
@@ -437,6 +448,7 @@ impl Default for Config {
             ask_shortcut: "Ctrl+Alt+Shift+A".into(),
             profiles: Vec::new(),
             default_profile: 0,
+            last_profile_id: 0,
         }
     }
 }
@@ -589,9 +601,15 @@ impl Config {
         }
     }
 
-    /// An id no saved profile uses yet.
+    /// An id no profile has ever used, saved or deleted.
     pub fn next_profile_id(&self) -> u32 {
-        self.profiles.iter().map(|p| p.id).max().unwrap_or(0) + 1
+        self.profiles
+            .iter()
+            .map(|p| p.id)
+            .max()
+            .unwrap_or(0)
+            .max(self.last_profile_id)
+            + 1
     }
 }
 
