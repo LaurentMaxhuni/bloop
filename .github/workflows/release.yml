@@ -1,0 +1,174 @@
+name: Release
+
+# Builds bloop and its installer on GitHub's Windows runners, so every release binary is an
+# automated build of this repository (what SignPath Foundation needs before it will sign).
+# - Pull requests and manual runs: check, build and upload the unsigned installer as an artifact.
+# - Tags `v<version>` (pushed by installer/release.ps1): the same, plus SignPath signing when it
+#   is configured, then publish the GitHub release that running copies update to.
+# Signing setup: docs/code-signing.md.
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "installer/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "tests/**"
+      - "examples/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write # publish the release (tags only)
+      actions: read # SignPath reads the uploaded build artifacts
+    env:
+      CARGO_TERM_COLOR: never
+      # Sign only releases, and only once the SignPath project exists (docs/code-signing.md).
+      SIGN: ${{ github.ref_type == 'tag' && secrets.SIGNPATH_API_TOKEN != '' && vars.SIGNPATH_ORGANIZATION_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the annotated tag carries the release notes
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content Cargo.toml -Raw
+          if ($manifest -notmatch '(?ms)^\[package\].*?^version\s*=\s*"([^"]+)"') { throw 'No version in Cargo.toml.' }
+          $version = $Matches[1]
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match Cargo.toml version $version."
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+
+      - name: Build bloop.exe
+        run: cargo build --release --locked
+
+      - name: Upload bloop.exe for signing
+        id: unsigned-exe
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bloop-exe-unsigned
+          path: target/release/bloop.exe
+          if-no-files-found: error
+
+      - name: Sign bloop.exe
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'bloop' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: exe
+          github-artifact-id: ${{ steps.unsigned-exe.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-exe
+
+      - name: Use the signed bloop.exe
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: |
+          Copy-Item signed-exe/bloop.exe target/release/bloop.exe -Force
+          $status = (Get-AuthenticodeSignature target/release/bloop.exe).Status
+          if ($status -ne 'Valid') { throw "bloop.exe signature is $status." }
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build the installer
+        shell: pwsh
+        run: ./installer/build.ps1 -SkipCargo
+
+      - name: Upload the installer for signing
+        id: unsigned-installer
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bloop-installer-unsigned
+          path: dist/bloop-setup-${{ steps.version.outputs.version }}.exe
+          if-no-files-found: error
+
+      - name: Sign the installer
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'bloop' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.unsigned-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-installer
+
+      - name: Use the signed installer
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: |
+          $name = "bloop-setup-${{ steps.version.outputs.version }}.exe"
+          Copy-Item "signed-installer/$name" "dist/$name" -Force
+          $status = (Get-AuthenticodeSignature "dist/$name").Status
+          if ($status -ne 'Valid') { throw "$name signature is $status." }
+
+      - name: Write the checksum
+        shell: pwsh
+        run: |
+          $name = "bloop-setup-${{ steps.version.outputs.version }}.exe"
+          $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          # sha256sum format with an LF ending, as the updater expects: "<hex>  <file name>"
+          [System.IO.File]::WriteAllText("$PWD/dist/$name.sha256", "$hash  $name`n")
+          "$name $hash"
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: bloop-setup-${{ steps.version.outputs.version }}
+          path: |
+            dist/bloop-setup-${{ steps.version.outputs.version }}.exe
+            dist/bloop-setup-${{ steps.version.outputs.version }}.exe.sha256
+          if-no-files-found: error
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $name = "bloop-setup-${{ steps.version.outputs.version }}.exe"
+          $notes = (git tag -l --format='%(contents)' $tag) -join "`n"
+          if (-not $notes.Trim()) { $notes = "bloop ${{ steps.version.outputs.version }}" }
+          $signed = if ($env:SIGN -eq 'true') { 'This release is signed.' } else { 'This release is not code-signed yet: if SmartScreen warns, choose More info, then Run anyway.' }
+          $notes += "`n`n$signed Built by GitHub Actions from this tag. [Code signing policy](https://laurentmaxhuni.github.io/bloop/code-signing.html)"
+          Set-Content -Path notes.md -Value $notes -Encoding utf8
+          gh release create $tag "dist/$name" "dist/$name.sha256" --verify-tag --title "bloop ${{ steps.version.outputs.version }}" --notes-file notes.md

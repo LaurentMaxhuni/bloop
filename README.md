@@ -16,9 +16,10 @@ bloop is chat-only. It can't run commands, read files or control your computer.
 
 Download `bloop-setup-<version>.exe` from the latest release and run it. It installs for your
 user only (no admin prompt) into `%LOCALAPPDATA%\Programs\bloop`, adds a Start Menu entry, and
-can start bloop when you sign in. The installer isn't code-signed yet, so Windows SmartScreen
-says "unknown publisher": choose **More info → Run anyway**. Uninstall from Windows
-Settings › Apps; it asks before deleting your chats and settings.
+can start bloop when you sign in. The installer isn't code-signed yet (an application to
+SignPath Foundation is pending; see the [code signing policy](https://laurentmaxhuni.github.io/bloop/code-signing.html)),
+so Windows SmartScreen says "unknown publisher": choose **More info → Run anyway**. Uninstall
+from Windows Settings › Apps; it asks before deleting your chats and settings.
 
 Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to talk to (see
 [Models](#models)). bloop doesn't download or start a model for you.
@@ -121,9 +122,15 @@ Only one bloop runs at a time, so quit the installed copy before launching a dev
   `powershell -ExecutionPolicy Bypass -File installer\build.ps1`. It writes
   `dist\bloop-setup-<version>.exe` (version from `Cargo.toml`); `installer\make-art.ps1` redraws
   the icon and wizard art.
-- **Update:** bump `version` in `Cargo.toml`, commit, then with the GitHub CLI signed in run
+- **Update:** bump `version` in `Cargo.toml` and merge it to `main`. Then, on an up-to-date
+  `main` with the GitHub CLI signed in, run
   `powershell -ExecutionPolicy Bypass -File installer\release.ps1 -Notes "What changed"`. It
-  builds the installer, writes its SHA-256 and publishes release `v<version>`.
+  pushes the tag `v<version>`, and `.github/workflows/release.yml` builds `bloop.exe` and the
+  installer on GitHub Actions, signs them once SignPath is set up, writes the SHA-256 and
+  publishes the release. `-Local` builds and publishes from your PC instead (always unsigned).
+  Signing setup: [docs/code-signing.md](docs/code-signing.md).
+- **CI:** the same workflow checks (fmt, clippy, tests) and builds an unsigned installer for
+  pull requests that touch code or the installer; download it from the run's artifacts.
 - **Website:** the landing page is `site/`, published to GitHub Pages by
   `.github/workflows/pages.yml` on pushes to `main`. Preview it with
   `python -m http.server -d site`.

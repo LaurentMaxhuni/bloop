@@ -106,3 +106,15 @@ window (finishing or closing it brings up the notch; unfinished setup resumes ne
 a manual launch opens notch and window; `--background` (the HKCU Run value and the update
 relaunch) opens the notch only. A second launch signals the named event `Local\bloop-open`
 and exits; the running copy opens or focuses the window. `bloop-app` stays the installer mutex.
+
+Release builds and signing (2026-11-11): releases are built by `.github/workflows/release.yml` on
+GitHub's Windows runners from a pushed `v<version>` tag (`installer/release.ps1` creates it), not
+on a personal PC, because SignPath Foundation (free certificates for open-source projects) signs
+only automated builds of the public repository. The workflow signs `bloop.exe` before Inno Setup
+packages it, then signs the installer; both steps are skipped until the SignPath secret and
+variable exist, so unsigned releases keep working meanwhile. `build.rs` generates the version
+resource from `Cargo.toml` for SignPath's product-name check. Alternatives: a purchased OV
+certificate (needs a hardware token or cloud HSM, a yearly fee, and would keep local builds) and
+Microsoft Artifact Signing (monthly fee; individual identities limited to a few countries).
+Neither signs Inno's generated uninstaller without a local signing tool. Details:
+`docs/code-signing.md`.
