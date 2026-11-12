@@ -167,6 +167,21 @@ mouth, a bounce that fades) and Mad (slanted brows, frown, a brief tremble, an a
   existing provider, endpoint and model stay the default profile, so older configs load
   unchanged. Sending swaps the chat's profile into a copy of the config, so the provider
   code didn't change.
+- **Default profile (2026-11-12).** `default_profile` names the profile new chats start
+  on (0, the built-in one, unless the user stars another). The built-in profile is shown
+  as "Main" rather than "Default", because the default can now be any profile. The star
+  applies and saves at once, like Appearance, and never touches unsaved Model page edits;
+  Save keeps the stored value. Deleting the starred profile hands the star back to Main,
+  and a saved file naming a missing profile loads with Main as the default. New chat now
+  starts on the default instead of the current chat's profile, so the star means one
+  thing everywhere. Deleting a profile asks first, as deleting a chat does.
+- **Icons over long labels (2026-11-12).** Frequent actions (send, stop, copy, retry,
+  edit, new chat, chat list, profile and chat row actions, page links on Home) are Lucide
+  icons with a tooltip; they show their word until the icon font loads, as the header
+  already did. Confirmations (Keep/Delete), Save, sign-in and setup keep text, where a
+  wrong guess costs more. The font subset grew to 27 glyphs (10 KB); a test reads the
+  font's cmap so a code point missing from the subset fails the build instead of drawing
+  a box.
 - **API keys follow the endpoint.** Saved keys are keyed by endpoint origin in Credential
   Manager (`bloop/api-key/<origin>`), so a profile for one server never sends the key
   saved for another. The old single key moves to the endpoint configured at first start.

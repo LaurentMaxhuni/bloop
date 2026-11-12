@@ -165,7 +165,12 @@ pub enum Message {
     Chat(ChatAction),
     EditProfile(u32),
     NewProfile,
-    DeleteProfile,
+    /// Ask before deleting a saved profile.
+    DeleteProfile(u32),
+    DeleteProfileConfirm,
+    DeleteProfileCancel,
+    /// Make a profile the one new chats start on; applies and saves at once.
+    SetDefaultProfile(u32),
     ProfileName(String),
     AskShortcut(String),
     /// Check the Model page's provider, endpoint and model without sending a chat.
@@ -265,6 +270,8 @@ pub struct Island {
     /// Which model profile the Model page edits.
     profile_edit: ProfileEdit,
     profile_name: String,
+    /// The saved profile waiting for a yes before it's deleted.
+    confirm_profile_delete: Option<u32>,
     /// The last Test connection result for the fields as they are; cleared when they change.
     connection: Option<diagnose::Report>,
     /// A Test connection is running; its id, so a stale answer is ignored.
@@ -368,6 +375,7 @@ impl Island {
             chats_notice: String::new(),
             profile_edit: ProfileEdit::Default,
             profile_name: String::new(),
+            confirm_profile_delete: None,
             connection: None,
             testing: None,
             test_id: 0,
@@ -662,7 +670,10 @@ impl Island {
                                 self.chat = chat;
                                 self.turns = turns;
                             }
-                            None => self.chat.id = model::new_chat_id(0),
+                            None => {
+                                self.chat.id = model::new_chat_id(0);
+                                self.chat.profile = self.config.default_profile();
+                            }
                         }
                         self.sync_replies();
                     }
@@ -1075,8 +1086,7 @@ impl Island {
             }
             Message::NewChat => {
                 if self.request.is_none() && !self.loading {
-                    let profile = self.usable_profile(self.chat.profile);
-                    self.start_chat(profile);
+                    self.start_chat(self.config.default_profile());
                     return widget::operation::focus("prompt");
                 }
             }
@@ -1127,7 +1137,10 @@ impl Island {
             Message::Chat(action) => return self.chat_action(action),
             Message::EditProfile(id) => self.edit_profile(id),
             Message::NewProfile => self.new_profile(),
-            Message::DeleteProfile => return self.delete_profile(),
+            Message::DeleteProfile(id) => self.confirm_profile_delete = Some(id),
+            Message::DeleteProfileCancel => self.confirm_profile_delete = None,
+            Message::DeleteProfileConfirm => return self.delete_profile(),
+            Message::SetDefaultProfile(id) => return self.set_default_profile(id),
             Message::ProfileName(name) => {
                 if name.chars().count() <= 40 {
                     self.profile_name = name;
@@ -1404,20 +1417,21 @@ impl Island {
         Task::batch([save, notch, close, peek])
     }
 
-    /// Where replies come from, shown under the prompt: Local or Cloud, the profile's name
-    /// when it isn't the default, then the provider and model.
+    /// Where replies come from, shown under the prompt: the profile's name once more than
+    /// one exists, Local or Cloud, then the provider and model.
     fn badge_text(&self) -> String {
         match self.config.with_profile(self.chat.profile) {
-            Some(config) => self.describe_model(&config, self.chat.profile),
+            Some(config) => self.describe_model(&config, Some(self.chat.profile)),
             None => "Profile removed".into(),
         }
     }
 
-    /// "Local · qwen3:4b", "Cloud · ChatGPT · gpt-5", "Work · Cloud · Codex".
-    fn describe_model(&self, config: &Config, profile: u32) -> String {
+    /// "Local · qwen3:4b", "Cloud · ChatGPT · gpt-5", "Work · Cloud · Codex". `profile`
+    /// `None` leaves the name out.
+    fn describe_model(&self, config: &Config, profile: Option<u32>) -> String {
         let mut parts = Vec::new();
-        if profile != 0
-            && let Some(name) = self.config.profile_name(profile)
+        if !self.config.profiles.is_empty()
+            && let Some(name) = profile.and_then(|id| self.config.profile_name(id))
         {
             parts.push(name.to_owned());
         }
@@ -1443,7 +1457,7 @@ impl Island {
         if self.config.profile_name(id).is_some() {
             id
         } else {
-            0
+            self.config.default_profile()
         }
     }
 
@@ -1640,8 +1654,13 @@ impl Island {
                         row![
                             note("Saved in Windows Credential Manager"),
                             Space::new().width(Length::Fill),
-                            self.button("Remove key", Variant::Ghost)
-                                .on_press(Message::RemoveKey),
+                            self.icon_action(
+                                Icon::Trash,
+                                "Remove key",
+                                "Remove the saved key",
+                                Variant::Ghost,
+                                Some(Message::RemoveKey),
+                            ),
                         ]
                         .align_y(Alignment::Center),
                     );
@@ -2034,6 +2053,19 @@ impl Island {
         tip: &'a str,
         message: Message,
     ) -> Element<'a, Message> {
+        self.icon_action(icon, word, tip, Variant::Ghost, Some(message))
+    }
+
+    /// A button showing `icon` with `tip` on hover, or `word` until the icon font loads.
+    /// `None` shows it disabled.
+    fn icon_action<'a>(
+        &self,
+        icon: Icon,
+        word: &'a str,
+        tip: &'a str,
+        variant: Variant,
+        message: Option<Message>,
+    ) -> Element<'a, Message> {
         let t = self.tokens();
         let (label, padding): (Element<'a, Message>, [u16; 2]) = if self.icons_ready {
             (
@@ -2048,10 +2080,20 @@ impl Island {
         };
         let button = button(label)
             .padding(padding)
-            .style(style::btn(t, Variant::Ghost))
-            .on_press(message);
+            .style(style::btn(t, variant))
+            .on_press_maybe(message);
+        self.tip(button, tip)
+    }
+
+    /// `content` with `tip` shown below it on hover.
+    fn tip<'a>(
+        &self,
+        content: impl Into<Element<'a, Message>>,
+        tip: &'a str,
+    ) -> Element<'a, Message> {
+        let t = self.tokens();
         widget::tooltip(
-            button,
+            content,
             container(text(tip).size(12))
                 .padding([4, 8])
                 .style(style::card(t, t.background)),
@@ -2393,7 +2435,7 @@ impl Island {
                         .size(12)
                         .color(t.muted_foreground),
                     Space::new().width(Length::Fill),
-                    self.small_button("Cancel", Message::CancelEdit),
+                    self.small_button(Icon::X, "Cancel", "Stop editing", Message::CancelEdit),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
@@ -2407,10 +2449,19 @@ impl Island {
             .on_submit(Message::Send)
             .style(style::bare_input(t));
         let action = if self.request.is_some() {
-            self.button("Stop", Variant::Secondary)
-                .on_press(Message::Cancel)
+            self.icon_action(
+                Icon::Square,
+                "Stop",
+                "Stop the reply",
+                Variant::Secondary,
+                Some(Message::Cancel),
+            )
         } else {
-            self.button("Send", Variant::Primary).on_press_maybe(
+            self.icon_action(
+                Icon::ArrowUp,
+                "Send",
+                "Send",
+                Variant::Primary,
                 (!self.loading && (!self.input.trim().is_empty() || self.attachment.is_some()))
                     .then_some(Message::Send),
             )
@@ -2439,11 +2490,26 @@ impl Island {
             .spacing(2)
             .align_y(Alignment::Center);
         if self.attachment.is_none() {
-            footer = footer.push(self.small_button("Paste clipboard", Message::AskClipboard));
+            footer = footer.push(self.small_button(
+                Icon::ClipboardPaste,
+                "Paste clipboard",
+                "Ask about the clipboard",
+                Message::AskClipboard,
+            ));
         }
-        footer = footer.push(self.small_button("All chats", Message::ShowChats));
+        footer = footer.push(self.small_button(
+            Icon::MessagesSquare,
+            "All chats",
+            "All chats",
+            Message::ShowChats,
+        ));
         if idle && !self.turns.is_empty() {
-            footer = footer.push(self.small_button("New chat", Message::NewChat));
+            footer = footer.push(self.small_button(
+                Icon::MessageSquarePlus,
+                "New chat",
+                "New chat",
+                Message::NewChat,
+            ));
         }
         body.push(footer).into()
     }
@@ -2494,7 +2560,7 @@ impl Island {
                     row![
                         text(heading).size(12).font(MEDIUM),
                         Space::new().width(Length::Fill),
-                        self.small_button("Remove", Message::RemoveAttachment),
+                        self.small_button(Icon::X, "Remove", "Remove", Message::RemoveAttachment),
                     ]
                     .align_y(Alignment::Center),
                     text(preview).size(12).color(t.muted_foreground),
@@ -2521,27 +2587,57 @@ impl Island {
         let mut actions = row![].spacing(2).align_y(Alignment::Center);
         if !turn.assistant.is_empty() {
             let copied = self.copied.as_deref() == Some(turn.assistant.as_str());
-            actions = actions.push(self.small_button(
-                if copied { "Copied" } else { "Copy" },
-                Message::CopyCode(turn.assistant.clone()),
-            ));
+            actions = actions.push(if copied {
+                self.small_button(
+                    Icon::Check,
+                    "Copied",
+                    "Copied",
+                    Message::CopyCode(turn.assistant.clone()),
+                )
+            } else {
+                self.small_button(
+                    Icon::Copy,
+                    "Copy",
+                    "Copy reply",
+                    Message::CopyCode(turn.assistant.clone()),
+                )
+            });
         }
         if last && !self.loading {
             actions = actions
-                .push(self.small_button("Retry", Message::Retry))
-                .push(self.small_button("Edit", Message::EditLast));
+                .push(self.small_button(Icon::RotateCcw, "Retry", "Retry", Message::Retry))
+                .push(self.small_button(
+                    Icon::Pencil,
+                    "Edit",
+                    "Edit your message",
+                    Message::EditLast,
+                ));
         }
         Some(actions.into())
     }
 
-    /// A quiet text button for actions under replies.
-    fn small_button<'a>(&self, label: &'a str, message: Message) -> Element<'a, Message> {
+    /// A quiet icon button for actions under replies and the prompt, `word` until the icon
+    /// font loads, with `tip` on hover.
+    fn small_button<'a>(
+        &self,
+        icon: Icon,
+        word: &'a str,
+        tip: &'a str,
+        message: Message,
+    ) -> Element<'a, Message> {
         let t = self.tokens();
-        button(text(label).size(12).color(t.muted_foreground))
-            .padding([2, 8])
+        let label = if self.icons_ready {
+            text(icon.codepoint().to_string())
+                .font(icons::FONT)
+                .size(13)
+        } else {
+            text(word).size(12)
+        };
+        let button = button(label.color(t.muted_foreground))
+            .padding(if self.icons_ready { [3, 6] } else { [2, 8] })
             .style(style::btn(t, Variant::Ghost))
-            .on_press(message)
-            .into()
+            .on_press(message);
+        self.tip(button, tip)
     }
 
     /// Provider, endpoint and model fields, shared by Settings and setup.
@@ -2680,8 +2776,13 @@ impl Island {
                         .width(Length::Fill)
                         .style(style::select(t))
                         .menu_style(style::menu(t)),
-                    self.button("Refresh models", Variant::Outline)
-                        .on_press_maybe(enabled.then_some(Message::ChatGptRefreshModels)),
+                    self.icon_action(
+                        Icon::RefreshCw,
+                        "Refresh models",
+                        "Refresh the model list",
+                        Variant::Outline,
+                        enabled.then_some(Message::ChatGptRefreshModels),
+                    ),
                 ]
                 .align_y(Alignment::Center)
                 .spacing(8),
@@ -3327,9 +3428,67 @@ mod tests {
         );
         let _ = app.update(Message::EditProfile(0));
         assert_eq!(app.draft_config.model, default_model);
-        let _ = app.update(Message::EditProfile(app.config.profiles[0].id));
-        let _ = app.update(Message::DeleteProfile);
+        let id = app.config.profiles[0].id;
+        let _ = app.update(Message::EditProfile(id));
+        let _ = app.update(Message::DeleteProfile(id));
+        assert_eq!(app.config.profiles.len(), 1, "deleting waits for a yes");
+        let _ = app.update(Message::DeleteProfileCancel);
+        let _ = app.update(Message::DeleteProfileConfirm);
+        assert_eq!(app.config.profiles.len(), 1, "Keep cancels it");
+        let _ = app.update(Message::DeleteProfile(id));
+        let _ = app.update(Message::DeleteProfileConfirm);
         assert!(app.config.profiles.is_empty());
+        assert_eq!(app.profile_edit, ProfileEdit::Default);
+    }
+
+    #[test]
+    fn the_starred_profile_starts_new_chats() {
+        let mut app = ready();
+        let cloud = with_cloud_profile(&mut app);
+        app.draft_config.profiles = app.config.profiles.clone();
+        let _ = app.update(Message::SetDefaultProfile(cloud));
+        assert_eq!(app.config.default_profile, cloud);
+        assert_eq!(app.draft_config.default_profile, cloud);
+        exchange(&mut app, "hi", "ok");
+        let _ = app.update(Message::NewChat);
+        assert_eq!(app.chat.profile, cloud);
+
+        // Saving other Model page edits keeps the star where it is.
+        let _ = app.update(Message::EditProfile(0));
+        let _ = app.update(Message::Model("other:1b".into()));
+        let _ = app.update(Message::SaveSettings);
+        assert_eq!(app.config.default_profile, cloud);
+        assert_eq!(app.config.model, "other:1b");
+
+        // Deleting the default hands the star back to the main profile.
+        let _ = app.update(Message::DeleteProfile(cloud));
+        let _ = app.update(Message::DeleteProfileConfirm);
+        assert_eq!(app.config.default_profile, 0);
+        assert!(app.config.validate().is_ok());
+        let _ = app.update(Message::SetDefaultProfile(cloud));
+        assert_eq!(
+            app.config.default_profile, 0,
+            "a missing profile can't be starred"
+        );
+    }
+
+    #[test]
+    fn deleting_another_profile_keeps_the_one_being_edited() {
+        let mut app = ready();
+        let cloud = with_cloud_profile(&mut app);
+        let other = app.config.next_profile_id();
+        app.config.profiles.push(bloop::config::Profile {
+            id: other,
+            name: "Other".into(),
+            provider: Provider::Codex,
+            endpoint: String::new(),
+            model: String::new(),
+        });
+        let _ = app.update(Message::EditProfile(cloud));
+        let _ = app.update(Message::DeleteProfile(other));
+        let _ = app.update(Message::DeleteProfileConfirm);
+        assert_eq!(app.profile_edit, ProfileEdit::Existing(cloud));
+        assert_eq!(app.draft_config.model, "big");
     }
 
     fn first_launch() -> Island {
@@ -3590,8 +3749,8 @@ mod tests {
     #[test]
     fn dashboard_pages_have_titles_and_subset_icons() {
         assert_eq!(AppPage::Shortcut.title(), "Shortcut & startup");
-        assert_eq!(AppPage::Home.icon(), Some(Icon::Sparkles));
-        assert_eq!(AppPage::About.icon(), None);
+        assert_eq!(AppPage::Home.icon(), Icon::Sparkles);
+        assert_eq!(AppPage::About.icon(), Icon::Info);
     }
 
     #[test]

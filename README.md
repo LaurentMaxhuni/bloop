@@ -46,6 +46,8 @@ Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to
   page in the app window: search, open in the notch, rename, export to Markdown, or delete.
 - **Model profiles.** Save extra providers or models as named profiles on the Model page
   (for example a local model and a cloud one) and switch from the menu under the prompt.
+  Each profile row has a star (new chats start on the starred one), a pencil to edit it and
+  a bin to delete it; the built-in **Main** profile can be edited but not deleted.
   The label there says **Local** or **Cloud**. A chat stays where its first message went:
   bloop won't send a local chat's history to a cloud model, so switching profile in a chat
   that has messages starts a new chat. **Test connection** on the Model page checks the

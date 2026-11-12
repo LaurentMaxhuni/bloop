@@ -332,3 +332,18 @@ Not verified: none of the new UI was looked at or clicked in a running bloop, be
 installed copy was running and a dev build would only signal it. Not exercised: the Save
 dialog, the second global hotkey on the desktop, Test connection against real servers,
 moving across monitors with different scaling, and the migration on a real 0.4 database.
+
+## Icon buttons and default profile (2026-11-12)
+
+Passed: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
+(249 passed, 4 ignored as usual), built in a separate target directory because a running
+debug bloop held `target/debug`.
+
+Covered by tests: every `Icon` has a glyph in the subset font (and a left-out one
+doesn't); the star makes a profile the default, New chat starts on it, Save leaves it
+alone, deleting it returns the star to Main, and a missing id can't be starred; a profile
+is deleted only after Delete is confirmed, Keep cancels; deleting another profile leaves
+the one being edited open; `default_profile` round-trips and a dangling one loads as 0.
+
+Not verified: the new icons, tooltips and profile rows weren't looked at in a running
+bloop, because a debug copy was running and a second one would only signal it.

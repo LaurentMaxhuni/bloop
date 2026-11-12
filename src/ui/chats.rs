@@ -3,6 +3,7 @@
 
 use super::{Island, Message, jobs::Job};
 use crate::{
+    icons::Icon,
     platform,
     presence::Event,
     style::{self, MEDIUM, Variant},
@@ -305,10 +306,20 @@ impl Island {
                 ))
                 .id("rename")
                 .on_submit(Message::Chat(ChatAction::RenameSave)),
-                self.button("Save", Variant::Primary)
-                    .on_press(Message::Chat(ChatAction::RenameSave)),
-                self.button("Cancel", Variant::Ghost)
-                    .on_press(Message::Chat(ChatAction::RenameCancel)),
+                self.icon_action(
+                    Icon::Check,
+                    "Save",
+                    "Save name",
+                    Variant::Primary,
+                    Some(Message::Chat(ChatAction::RenameSave)),
+                ),
+                self.icon_action(
+                    Icon::X,
+                    "Cancel",
+                    "Cancel",
+                    Variant::Ghost,
+                    Some(Message::Chat(ChatAction::RenameCancel)),
+                ),
             ]
             .spacing(6)
             .align_y(Alignment::Center)
@@ -363,15 +374,35 @@ impl Island {
             let idle = self.request.is_none();
             card = card.push(
                 row![
-                    self.button("Open", Variant::Outline)
-                        .on_press_maybe(idle.then_some(Message::Chat(ChatAction::Open(chat.id)))),
-                    self.button("Rename", Variant::Ghost)
-                        .on_press(Message::Chat(ChatAction::Rename(chat.id))),
-                    self.button("Export", Variant::Ghost)
-                        .on_press(Message::Chat(ChatAction::Export(chat.id))),
+                    self.icon_action(
+                        Icon::FolderOpen,
+                        "Open",
+                        "Open in the notch",
+                        Variant::Outline,
+                        idle.then_some(Message::Chat(ChatAction::Open(chat.id))),
+                    ),
+                    self.icon_action(
+                        Icon::Pencil,
+                        "Rename",
+                        "Rename",
+                        Variant::Ghost,
+                        Some(Message::Chat(ChatAction::Rename(chat.id))),
+                    ),
+                    self.icon_action(
+                        Icon::Download,
+                        "Export",
+                        "Export as Markdown",
+                        Variant::Ghost,
+                        Some(Message::Chat(ChatAction::Export(chat.id))),
+                    ),
                     Space::new().width(Length::Fill),
-                    self.button("Delete", Variant::Ghost)
-                        .on_press(Message::Chat(ChatAction::Delete(chat.id))),
+                    self.icon_action(
+                        Icon::Trash,
+                        "Delete",
+                        "Delete",
+                        Variant::Ghost,
+                        Some(Message::Chat(ChatAction::Delete(chat.id))),
+                    ),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),

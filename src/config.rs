@@ -206,14 +206,16 @@ pub struct Config {
     pub hover_delay_ms: u16,
     /// Global shortcut that opens the notch with the clipboard's text attached; empty = off.
     pub ask_shortcut: String,
-    /// Saved model profiles besides the default (provider, endpoint and model above).
+    /// Saved model profiles besides the main one (provider, endpoint and model above).
     pub profiles: Vec<Profile>,
+    /// The profile new chats start on: 0 is the main one, else a saved profile's id.
+    pub default_profile: u32,
 }
 
 /// A named provider, endpoint and model to switch to from the notch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
-    /// Never 0: that id means the default profile.
+    /// Never 0: that id means the main profile.
     pub id: u32,
     pub name: String,
     pub provider: Provider,
@@ -222,6 +224,9 @@ pub struct Profile {
 }
 
 pub const MAX_PROFILES: usize = 8;
+
+/// The name shown for profile 0, the provider, endpoint and model kept at the top level.
+pub const MAIN_PROFILE: &str = "Main";
 
 /// Where a chat's messages go. Context collected for one destination is never sent to
 /// another, so a chat keeps the destination of its first message.
@@ -299,6 +304,7 @@ struct ConfigFields {
     auto_update: bool,
     ask_shortcut: String,
     profiles: Vec<Profile>,
+    default_profile: u32,
 }
 
 impl Default for ConfigFields {
@@ -320,6 +326,7 @@ impl Default for ConfigFields {
             hover_delay_ms: c.hover_delay_ms,
             ask_shortcut: c.ask_shortcut,
             profiles: c.profiles,
+            default_profile: c.default_profile,
         }
     }
 }
@@ -350,6 +357,12 @@ impl From<StoredConfig> for Config {
                 .min_by_key(|&&ms| ms.abs_diff(f.hover_delay_ms))
                 .unwrap_or(&150),
             ask_shortcut: f.ask_shortcut,
+            // A hand-edited default that names no saved profile falls back to the main one.
+            default_profile: if f.profiles.iter().any(|p| p.id == f.default_profile) {
+                f.default_profile
+            } else {
+                0
+            },
             profiles: f.profiles,
         }
     }
@@ -374,6 +387,7 @@ impl Default for Config {
             hover_delay_ms: 150,
             ask_shortcut: "Ctrl+Alt+Shift+A".into(),
             profiles: Vec::new(),
+            default_profile: 0,
         }
     }
 }
@@ -450,7 +464,7 @@ impl Profile {
             return Err("Give the profile a name of 1–40 characters.".into());
         }
         if self.id == 0 {
-            return Err("Profile id 0 is reserved for the default.".into());
+            return Err("Profile id 0 is reserved for the main profile.".into());
         }
         validate_model(self.provider, &self.endpoint, &self.model)
     }
@@ -475,6 +489,9 @@ impl Config {
                 return Err("Two profiles share an id.".into());
             }
         }
+        if self.default_profile != 0 && !ids.contains(&self.default_profile) {
+            return Err("The default profile no longer exists.".into());
+        }
         Ok(())
     }
 
@@ -484,7 +501,7 @@ impl Config {
     }
 
     /// This config with profile `id`'s provider, endpoint and model swapped in; 0 is the
-    /// default. `None` when the profile no longer exists.
+    /// main profile. `None` when the profile no longer exists.
     pub fn with_profile(&self, id: u32) -> Option<Config> {
         if id == 0 {
             return Some(self.clone());
@@ -501,12 +518,21 @@ impl Config {
     /// The display name of profile `id`.
     pub fn profile_name(&self, id: u32) -> Option<&str> {
         if id == 0 {
-            return Some("Default");
+            return Some(MAIN_PROFILE);
         }
         self.profiles
             .iter()
             .find(|p| p.id == id)
             .map(|p| p.name.as_str())
+    }
+
+    /// The profile new chats start on, falling back to the main one.
+    pub fn default_profile(&self) -> u32 {
+        if self.profile_name(self.default_profile).is_some() {
+            self.default_profile
+        } else {
+            0
+        }
     }
 
     /// An id no saved profile uses yet.
@@ -697,7 +723,7 @@ mod tests {
         assert_eq!(swapped.provider, Provider::ChatGpt);
         assert_eq!(swapped.shortcut, config.shortcut);
         assert!(config.with_profile(99).is_none());
-        assert_eq!(config.profile_name(0), Some("Default"));
+        assert_eq!(config.profile_name(0), Some("Main"));
 
         config.profiles.push(work);
         assert!(config.validate().is_err(), "duplicate ids");
@@ -711,5 +737,41 @@ mod tests {
         let c: super::Config = serde_json::from_str("{}").unwrap();
         assert!(c.profiles.is_empty());
         assert_eq!(c.ask_shortcut, "Ctrl+Alt+Shift+A");
+        assert_eq!(c.default_profile, 0);
+    }
+
+    #[test]
+    fn default_profile_must_name_a_saved_profile() {
+        use super::{Config, Profile, Provider};
+        let mut config = Config::default();
+        config.profiles.push(Profile {
+            id: 3,
+            name: "Work".into(),
+            provider: Provider::Codex,
+            endpoint: String::new(),
+            model: String::new(),
+        });
+        config.default_profile = 3;
+        assert!(config.validate().is_ok());
+        assert_eq!(config.default_profile(), 3);
+        config.default_profile = 4;
+        assert!(config.validate().is_err());
+        assert_eq!(
+            config.default_profile(),
+            0,
+            "falls back to the main profile"
+        );
+
+        // A saved file naming a missing profile loads with the main one as default.
+        let json = serde_json::json!({ "default_profile": 9 }).to_string();
+        let loaded: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.default_profile, 0);
+        let json = serde_json::to_string(&config.clone()).unwrap();
+        let mut back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.default_profile, 0, "4 isn't saved");
+        back.default_profile = 3;
+        let json = serde_json::to_string(&back).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.default_profile, 3);
     }
 }

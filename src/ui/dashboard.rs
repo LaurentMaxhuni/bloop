@@ -9,15 +9,15 @@ use crate::{
 };
 use bloop::{
     config::{
-        Accent, Config, HOVER_DELAYS_MS, MAX_PROFILES, NotchPosition, NotchWidth, Profile,
-        ReduceMotion, ThemeChoice,
+        Accent, Config, HOVER_DELAYS_MS, MAIN_PROFILE, MAX_PROFILES, NotchPosition, NotchWidth,
+        Profile, ReduceMotion, ThemeChoice,
     },
     motion::Feel,
     update::Version,
 };
 use iced::{
     Alignment, Element, Length, Task,
-    widget::{Space, button, column, container, pick_list, row, scrollable, text, toggler},
+    widget::{Space, button, column, container, row, scrollable, text, toggler},
 };
 
 /// Sidebar width and the page content's maximum width, in logical pixels.
@@ -56,14 +56,15 @@ impl AppPage {
         }
     }
 
-    /// Sidebar glyph from the icon subset; About has a word label only.
-    pub fn icon(self) -> Option<Icon> {
+    /// Sidebar glyph from the icon subset.
+    pub fn icon(self) -> Icon {
         match self {
-            AppPage::Home => Some(Icon::Sparkles),
-            AppPage::Appearance => Some(Icon::Palette),
-            AppPage::Model => Some(Icon::Cpu),
-            AppPage::Shortcut => Some(Icon::SlidersHorizontal),
-            AppPage::Chats | AppPage::About => None,
+            AppPage::Home => Icon::Sparkles,
+            AppPage::Chats => Icon::MessagesSquare,
+            AppPage::Appearance => Icon::Palette,
+            AppPage::Model => Icon::Cpu,
+            AppPage::Shortcut => Icon::SlidersHorizontal,
+            AppPage::About => Icon::Info,
         }
     }
 }
@@ -134,12 +135,13 @@ impl Island {
         let items = AppPage::ALL
             .iter()
             .fold(column![].spacing(4), |items, &page| {
-                let glyph: Element<'_, Message> = match page.icon() {
-                    Some(icon) if self.icons_ready => text(icon.codepoint().to_string())
+                let glyph: Element<'_, Message> = if self.icons_ready {
+                    text(page.icon().codepoint().to_string())
                         .font(icons::FONT)
                         .size(16)
-                        .into(),
-                    _ => Space::new().width(16).into(),
+                        .into()
+                } else {
+                    Space::new().width(16).into()
                 };
                 items.push(
                     button(
@@ -193,10 +195,13 @@ impl Island {
         if let Some(extra) = extra {
             line = line.push(extra);
         }
-        line = line.push(
-            self.button(page.title(), Variant::Outline)
-                .on_press(Message::ShowPage(page)),
-        );
+        line = line.push(self.icon_action(
+            Icon::ChevronRight,
+            page.title(),
+            page.title(),
+            Variant::Ghost,
+            Some(Message::ShowPage(page)),
+        ));
         container(line)
             .padding([12, 14])
             .width(Length::Fill)
@@ -458,10 +463,19 @@ impl Island {
     fn model_page(&self) -> Element<'_, Message> {
         let t = self.tokens();
         let mut page = column![
-            text("Choose the model bloop talks to. New chats use the default profile; switch a chat to another profile from the notch.")
+            text("Choose the model bloop talks to. New chats start on the starred profile; switch a chat to another one from the notch.")
                 .size(13)
                 .color(t.muted_foreground),
-            self.profile_picker(),
+            self.profile_list(),
+            text(match self.profile_edit {
+                ProfileEdit::New => "New profile".to_owned(),
+                _ => format!(
+                    "Editing {}",
+                    self.config.profile_name(self.editing_id()).unwrap_or_default()
+                ),
+            })
+            .size(16)
+            .font(MEDIUM),
         ]
         .spacing(16);
         if self.profile_edit != ProfileEdit::Default {
@@ -488,15 +502,20 @@ impl Island {
         let t = self.tokens();
         let mut check = column![
             row![
-                self.button(
-                    if self.testing.is_some() {
-                        "Testing…"
-                    } else {
-                        "Test connection"
-                    },
+                self.icon_action(
+                    Icon::Plug,
+                    "Test connection",
+                    "Test connection",
                     Variant::Outline,
-                )
-                .on_press_maybe(self.testing.is_none().then_some(Message::TestConnection)),
+                    self.testing.is_none().then_some(Message::TestConnection),
+                ),
+                text(if self.testing.is_some() {
+                    "Testing…"
+                } else {
+                    ""
+                })
+                .size(13)
+                .color(t.muted_foreground),
             ]
             .spacing(8)
             .align_y(Alignment::Center)
@@ -533,43 +552,131 @@ impl Island {
                     label: format!(
                         "{} — {}",
                         self.config.profile_name(id)?,
-                        self.describe_model(&config, 0)
+                        self.describe_model(&config, None)
                     ),
                 })
             })
             .collect()
     }
 
-    fn profile_picker(&self) -> Element<'_, Message> {
-        let t = self.tokens();
-        let options = self.profile_options();
-        let selected = match self.profile_edit {
-            ProfileEdit::Default => options.first().cloned(),
-            ProfileEdit::Existing(id) => options.iter().find(|o| o.id == id).cloned(),
-            ProfileEdit::New => None,
-        };
-        let full = self.config.profiles.len() >= MAX_PROFILES;
-        let mut actions = row![
-            pick_list(options, selected, |option| Message::EditProfile(option.id))
-                .placeholder("New profile")
-                .padding([8, 12])
-                .text_size(14)
-                .width(Length::Fill)
-                .style(style::select(t))
-                .menu_style(style::menu(t)),
-            self.button("New profile", Variant::Outline).on_press_maybe(
-                (!full && self.profile_edit != ProfileEdit::New).then_some(Message::NewProfile)
-            ),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
-        if matches!(self.profile_edit, ProfileEdit::Existing(_)) {
-            actions = actions.push(
-                self.button("Delete", Variant::Ghost)
-                    .on_press(Message::DeleteProfile),
-            );
+    /// The id the Model page is editing; a new profile has none yet, so it reads as 0.
+    fn editing_id(&self) -> u32 {
+        match self.profile_edit {
+            ProfileEdit::Existing(id) => id,
+            _ => 0,
         }
-        field("Profile", actions)
+    }
+
+    /// Every profile as a row: a star that makes it the default, its name and model, and
+    /// icons to edit and delete it. The main profile can't be deleted.
+    fn profile_list(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let default = self.config.default_profile();
+        let mut list = column![].spacing(6);
+        for id in std::iter::once(0).chain(self.config.profiles.iter().map(|p| p.id)) {
+            let (Some(name), Some(config)) =
+                (self.config.profile_name(id), self.config.with_profile(id))
+            else {
+                continue;
+            };
+            let editing = match self.profile_edit {
+                ProfileEdit::Default => id == 0,
+                ProfileEdit::Existing(edit) => edit == id,
+                ProfileEdit::New => false,
+            };
+            let star: Element<'_, Message> = if id == default {
+                self.tip(
+                    container(self.glyph(Icon::Star, "Default", t.primary)).padding([7, 9]),
+                    "New chats start here",
+                )
+            } else {
+                self.icon_action(
+                    Icon::Star,
+                    "Make default",
+                    "Make default",
+                    Variant::Ghost,
+                    Some(Message::SetDefaultProfile(id)),
+                )
+            };
+            let mut line = row![
+                star,
+                column![
+                    text(name).size(14).font(MEDIUM),
+                    text(self.describe_model(&config, None))
+                        .size(12)
+                        .color(t.muted_foreground),
+                ]
+                .spacing(2)
+                .width(Length::Fill),
+                self.icon_action(
+                    Icon::Pencil,
+                    "Edit",
+                    "Edit",
+                    if editing {
+                        Variant::Secondary
+                    } else {
+                        Variant::Ghost
+                    },
+                    (!editing).then_some(Message::EditProfile(id)),
+                ),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            if id != 0 {
+                line = line.push(self.icon_action(
+                    Icon::Trash,
+                    "Delete",
+                    "Delete",
+                    Variant::Ghost,
+                    Some(Message::DeleteProfile(id)),
+                ));
+            }
+            let mut card = column![line].spacing(8);
+            if self.confirm_profile_delete == Some(id) {
+                card = card.push(
+                    row![
+                        text(format!("Delete {name}? Chats that use it can't continue."))
+                            .size(13)
+                            .width(Length::Fill),
+                        self.button("Keep", Variant::Outline)
+                            .on_press(Message::DeleteProfileCancel),
+                        self.button("Delete", Variant::Destructive)
+                            .on_press(Message::DeleteProfileConfirm),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            }
+            list = list.push(container(card).padding([6, 10]).width(Length::Fill).style(
+                style::card(t, if editing { t.secondary } else { t.background }),
+            ));
+        }
+        let full = self.config.profiles.len() >= MAX_PROFILES;
+        let add = self.icon_action(
+            Icon::Plus,
+            "New profile",
+            if full {
+                "Profile limit reached"
+            } else {
+                "New profile from these settings"
+            },
+            Variant::Outline,
+            (!full && self.profile_edit != ProfileEdit::New).then_some(Message::NewProfile),
+        );
+        field("Profiles", list.push(add))
+    }
+
+    /// An icon in the icon font, or `word` until it loads.
+    fn glyph<'a>(&self, icon: Icon, word: &'a str, color: iced::Color) -> Element<'a, Message> {
+        if self.icons_ready {
+            text(icon.codepoint().to_string())
+                .font(icons::FONT)
+                .size(16)
+                .color(color)
+                .into()
+        } else {
+            text(word).size(13).font(MEDIUM).color(color).into()
+        }
     }
 
     /// Loads profile `id` into the Model page's fields.
@@ -603,13 +710,32 @@ impl Island {
         self.status.clear();
     }
 
+    /// Deletes the profile waiting for confirmation. If it was the default, the main
+    /// profile becomes the default again.
     pub(super) fn delete_profile(&mut self) -> Task<Message> {
-        let ProfileEdit::Existing(id) = self.profile_edit else {
+        let Some(id) = self.confirm_profile_delete.take() else {
             return Task::none();
         };
         self.config.profiles.retain(|p| p.id != id);
         self.draft_config.profiles.retain(|p| p.id != id);
-        self.edit_profile(0);
+        if self.config.default_profile == id {
+            self.config.default_profile = 0;
+        }
+        self.draft_config.default_profile = self.config.default_profile;
+        if self.profile_edit == ProfileEdit::Existing(id) {
+            self.edit_profile(0);
+        }
+        self.persist()
+    }
+
+    /// Stars profile `id` for new chats and saves at once, like the Appearance settings.
+    /// Unsaved edits on the Model page stay unsaved.
+    pub(super) fn set_default_profile(&mut self, id: u32) -> Task<Message> {
+        if self.config.profile_name(id).is_none() {
+            return Task::none();
+        }
+        self.config.default_profile = id;
+        self.draft_config.default_profile = id;
         self.persist()
     }
 
@@ -618,6 +744,7 @@ impl Island {
     pub(super) fn settings_to_save(&self) -> Result<Config, String> {
         let mut config = self.draft_config.clone();
         config.profiles = self.config.profiles.clone();
+        config.default_profile = self.config.default_profile;
         let id = match self.profile_edit {
             ProfileEdit::Default => None,
             ProfileEdit::Existing(id) => Some(id),
@@ -636,7 +763,7 @@ impl Island {
                 .profiles
                 .iter()
                 .any(|p| p.id != id && p.name.eq_ignore_ascii_case(&profile.name))
-                || profile.name.eq_ignore_ascii_case("default")
+                || profile.name.eq_ignore_ascii_case(MAIN_PROFILE)
             {
                 return Err("Another profile already has that name.".into());
             }
@@ -715,11 +842,14 @@ impl Island {
             self.update_state,
             UpdateState::Checking | UpdateState::Downloading(..)
         );
-        let mut actions =
-            row![self.button("Check now", Variant::Outline).on_press_maybe(
-                (!busy && !ready).then_some(Message::CheckUpdates { manual: true })
-            ),]
-            .spacing(8);
+        let mut actions = row![self.icon_action(
+            Icon::RefreshCw,
+            "Check now",
+            "Check for updates now",
+            Variant::Outline,
+            (!busy && !ready).then_some(Message::CheckUpdates { manual: true }),
+        )]
+        .spacing(8);
         if ready {
             actions = actions.push(
                 self.button("Restart to update", Variant::Primary)
