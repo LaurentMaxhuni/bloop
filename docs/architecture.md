@@ -151,3 +151,15 @@ our exact requested rectangle after that handler returns. There is no timer or p
 Initial window settings retain the existing primary_position logical-coordinate helper.
 See Microsoft's SetWindowPos documentation:
 https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setwindowpos
+
+## Connection diagnostics (2026-11-12)
+
+The library's diagnose::test_connection returns a Report and has a ten-second overall
+budget. HTTP providers reuse the existing bounded model-list GET (three seconds), without
+sending chat content. ChatGPT first reads account/plan status and lists models only when
+plan usage is enabled; at most one existing token-refresh request precedes that GET.
+The refresh remains cancellation-safe and may finish persisting rotated credentials after
+the diagnostic deadline. No new endpoint or background request is introduced.
+CLI discovery uses cli::find on a blocking worker and does not start any program or claim
+authentication was checked. Provider errors retain HTTP status and URL-stripped reqwest
+causes so diagnostics can distinguish refused connections, TLS failures and timeouts.

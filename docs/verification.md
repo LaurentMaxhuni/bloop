@@ -285,3 +285,15 @@ preserving the old binding after registration failure. Both shortcuts reuse vali
 No desktop hotkeys were registered in these tests; Windows registration and actual key
 presses remain unverified. UI integration is intentionally just an empty Event::Ask arm.
 Passed: cargo fmt, cargo clippy --all-targets -- -D warnings, and cargo test (normal Windows session; existing live tests ignored).
+
+## Connection diagnostics (2026-11-12)
+
+Loopback tests cover Ollama/OpenAI/Unsloth model-list success, missing and empty models,
+401/403, 404, refused port, a silent server timeout, a TLS certificate alert, malformed
+JSON, and invalid URLs. Requests are body-free GETs to api/tags or v1/models, with no chat.
+Model suggestions stop at five. Unit checks cover CLI path/missing reports and ChatGPT's
+signed-out/plan-disabled gates. Live ChatGPT authentication/model access and real CLI
+sign-in were not exercised. CLI hints follow the vendors' installation documentation:
+https://support.claude.com/en/articles/14554922-claude-code-user-faq
+https://github.com/openai/codex/blob/main/README.md
+Passed: cargo fmt, cargo clippy --all-targets -- -D warnings, and cargo test (normal Windows session). All eight loopback diagnostics passed; the silent-server check returned in about three seconds.
