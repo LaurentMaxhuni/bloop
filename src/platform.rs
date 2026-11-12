@@ -112,6 +112,62 @@ pub fn validate_shortcut(value: &str) -> Result<(), String> {
     }
 }
 
+/// Show a native Markdown Save dialog. Call from a blocking worker, not Iced's
+/// event loop. No borrowed HWND or COM apartment is needed; all buffers are local.
+/// Only selects a path: the caller is responsible for writing the transcript.
+#[allow(dead_code)] // UI integration is owned by the companion branch.
+pub fn save_file_dialog(suggested_name: &str) -> Result<Option<std::path::PathBuf>, String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        use windows::{
+            Win32::UI::Controls::Dialogs::{
+                CommDlgExtendedError, GetSaveFileNameW, OFN_EXPLORER, OFN_NOCHANGEDIR,
+                OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+            },
+            core::{PCWSTR, PWSTR, w},
+        };
+        let suggested = wide(&bloop::export::file_name(suggested_name));
+        let mut path = vec![0u16; 32_768];
+        path[..suggested.len()].copy_from_slice(&suggested);
+        let filter: Vec<u16> = "Markdown (*.md)\0*.md\0\0".encode_utf16().collect();
+        let mut dialog = OPENFILENAMEW {
+            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+            lpstrFilter: PCWSTR(filter.as_ptr()),
+            nFilterIndex: 1,
+            lpstrFile: PWSTR(path.as_mut_ptr()),
+            nMaxFile: path.len() as u32,
+            lpstrTitle: w!("Export chat as Markdown"),
+            lpstrDefExt: w!("md"),
+            Flags: OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST,
+            ..Default::default()
+        };
+        // SAFETY: dialog's size is correct; writable path and double-NUL filter
+        // buffers stay alive for this synchronous call, with no hooks or owner HWND.
+        if unsafe { GetSaveFileNameW(&mut dialog).as_bool() } {
+            let length = path
+                .iter()
+                .position(|c| *c == 0)
+                .ok_or("Windows returned an unterminated save path.")?;
+            return Ok(Some(std::ffi::OsString::from_wide(&path[..length]).into()));
+        }
+        // SAFETY: reads this calling thread's dialog error immediately after failure.
+        let error = unsafe { CommDlgExtendedError() }.0;
+        if error == 0 {
+            Ok(None)
+        } else {
+            Err(format!(
+                "Could not open the Save dialog (Windows dialog error 0x{error:04X})."
+            ))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = suggested_name;
+        Err("The Save dialog is only available on Windows.".into())
+    }
+}
+
 pub fn events() -> impl iced::futures::Stream<Item = Event> {
     iced::stream::channel(16, async |mut output| {
         #[cfg(windows)]

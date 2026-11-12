@@ -297,3 +297,14 @@ sign-in were not exercised. CLI hints follow the vendors' installation documenta
 https://support.claude.com/en/articles/14554922-claude-code-user-faq
 https://github.com/openai/codex/blob/main/README.md
 Passed: cargo fmt, cargo clippy --all-targets -- -D warnings, and cargo test (normal Windows session). All eight loopback diagnostics passed; the silent-server check returned in about three seconds.
+
+## Markdown export helpers (2026-11-12)
+
+Unit tests cover transcript order, preserved Markdown/Unicode, interrupted and empty replies,
+empty titles, invalid filename characters, case-insensitive device names (including those
+with extensions and superscript digits), extension normalization and UTF-16 length bounds.
+The Windows Save-dialog API compiles with its added windows crate feature. Its buffers,
+cancellation/error branch and worker-thread ownership were reviewed against Microsoft's
+API documentation. The dialog was not opened; save/cancel/overwrite interactions and
+non-Windows compilation remain unverified. No bloop executable was launched.
+Passed: cargo fmt, cargo clippy --all-targets -- -D warnings, and cargo test (normal Windows session): 220 passed, four existing live-network/CLI tests ignored.

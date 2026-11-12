@@ -163,3 +163,16 @@ the diagnostic deadline. No new endpoint or background request is introduced.
 CLI discovery uses cli::find on a blocking worker and does not start any program or claim
 authentication was checked. Provider errors retain HTTP status and URL-stripped reqwest
 causes so diagnostics can distinguish refused connections, TLS failures and timeouts.
+
+## Markdown export helpers (2026-11-12)
+
+export::markdown preserves turn text and marks interrupted replies before their content,
+so an unfinished code fence cannot hide the marker. Suggested names remove Windows-invalid
+characters and device names, trim dots/whitespace, and cap the complete name at 120 UTF-16
+code units while preserving Unicode scalar boundaries. The library does no file I/O.
+platform::save_file_dialog uses GetSaveFileNameW with call-local UTF-16 buffers, no owner
+HWND or callbacks, a Markdown filter/default extension, overwrite confirmation and
+OFN_NOCHANGEDIR. It runs on the caller's blocking worker and returns a path or cancellation;
+the caller writes the file. The native call has its own modal message loop, so it does not
+block Iced. No COM initialization or application window handle crosses threads.
+API reference: https://learn.microsoft.com/windows/win32/api/commdlg/nf-commdlg-getsavefilenamew
