@@ -235,6 +235,8 @@ pub struct Config {
     pub notch_width: NotchWidth,
     pub notch_position: NotchPosition,
     pub mascot: bool,
+    /// The mascot's hat, glasses, outfit and colour.
+    pub look: Look,
     /// Look for new versions on GitHub every six hours.
     pub auto_update: bool,
     pub hover_delay_ms: u16,
@@ -337,6 +339,7 @@ struct ConfigFields {
     notch_width: NotchWidth,
     notch_position: NotchPosition,
     mascot: bool,
+    look: Look,
     hover_delay_ms: u16,
     auto_update: bool,
     ask_shortcut: String,
@@ -361,6 +364,7 @@ impl Default for ConfigFields {
             notch_width: c.notch_width,
             notch_position: c.notch_position,
             mascot: c.mascot,
+            look: c.look,
             auto_update: c.auto_update,
             hover_delay_ms: c.hover_delay_ms,
             ask_shortcut: c.ask_shortcut,
@@ -391,6 +395,7 @@ impl From<StoredConfig> for Config {
             notch_width: f.notch_width,
             notch_position: f.notch_position,
             mascot: f.mascot,
+            look: f.look,
             auto_update: f.auto_update,
             // Hand-edited or future values snap to the nearest choice instead of failing to load.
             hover_delay_ms: *HOVER_DELAYS_MS
@@ -426,6 +431,7 @@ impl Default for Config {
             notch_width: NotchWidth::M,
             notch_position: NotchPosition::Centre,
             mascot: true,
+            look: Look::default(),
             auto_update: true,
             hover_delay_ms: 150,
             ask_shortcut: "Ctrl+Alt+Shift+A".into(),
@@ -589,6 +595,110 @@ impl Config {
     }
 }
 
+macro_rules! choice {
+    ($(#[$meta:meta])* $name:ident { $($variant:ident => $label:literal),+ $(,)? }) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+        pub enum $name {
+            #[default]
+            $($variant),+
+        }
+
+        impl $name {
+            pub const ALL: &'static [$name] = &[$($name::$variant),+];
+
+            pub fn label(self) -> &'static str {
+                match self {
+                    $($name::$variant => $label),+
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.label())
+            }
+        }
+    };
+}
+
+choice!(
+    /// Something on Bloop's head; any hat hides the antenna.
+    Hat {
+        None => "None",
+        TopHat => "Top hat",
+        Beanie => "Beanie",
+        Cap => "Cap",
+        Crown => "Crown",
+        Party => "Party",
+        Wizard => "Wizard",
+    }
+);
+
+choice!(
+    /// Something over Bloop's eyes.
+    Eyewear {
+        None => "None",
+        Sunglasses => "Shades",
+        Round => "Glasses",
+        Monocle => "Monocle",
+    }
+);
+
+choice!(
+    /// Something Bloop wears below the face.
+    Outfit {
+        None => "None",
+        BowTie => "Bow tie",
+        Scarf => "Scarf",
+        Robe => "Robe",
+        Cape => "Cape",
+    }
+);
+
+choice!(
+    /// Bloop's body colour; Classic follows the theme's text colour.
+    Coat {
+        Classic => "Classic",
+        Mint => "Mint",
+        Peach => "Peach",
+        Lilac => "Lilac",
+        Sky => "Sky",
+        Lemon => "Lemon",
+    }
+);
+
+/// How Bloop is dressed. Saved with the settings; anything unknown loads as the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Look {
+    pub hat: Hat,
+    pub eyewear: Eyewear,
+    pub outfit: Outfit,
+    pub coat: Coat,
+}
+
+impl Look {
+    /// A random outfit that differs from `self`, seeded by the caller (no extra dependency).
+    pub fn shuffled(self, seed: u64) -> Look {
+        let pick = |n: usize, shift: u32| ((seed >> shift) as usize) % n;
+        let next = Look {
+            hat: Hat::ALL[pick(Hat::ALL.len(), 0)],
+            eyewear: Eyewear::ALL[pick(Eyewear::ALL.len(), 8)],
+            outfit: Outfit::ALL[pick(Outfit::ALL.len(), 16)],
+            coat: Coat::ALL[pick(Coat::ALL.len(), 24)],
+        };
+        if next == self {
+            Look {
+                hat: Hat::ALL[(pick(Hat::ALL.len(), 0) + 1) % Hat::ALL.len()],
+                ..next
+            }
+        } else {
+            next
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -605,6 +715,40 @@ mod tests {
             let back: Config =
                 serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
             assert_eq!(back.context, mode);
+        }
+    }
+
+    #[test]
+    fn mascot_look_round_trips_and_unknown_parts_fall_back() {
+        use super::{Coat, Eyewear, Hat, Look, Outfit};
+        let old: super::Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.look, Look::default());
+        let look = Look {
+            hat: Hat::Wizard,
+            eyewear: Eyewear::Sunglasses,
+            outfit: Outfit::Robe,
+            coat: Coat::Lilac,
+        };
+        let config = super::Config {
+            look,
+            ..super::Config::default()
+        };
+        let back: super::Config =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(back.look, look);
+        let partial: super::Config = serde_json::from_str(r#"{"look": {"hat": "Crown"}}"#).unwrap();
+        assert_eq!(partial.look.hat, Hat::Crown);
+        assert_eq!(partial.look.outfit, Outfit::None);
+    }
+
+    #[test]
+    fn shuffled_look_always_changes() {
+        use super::Look;
+        let mut look = Look::default();
+        for seed in 0..500u64 {
+            let next = look.shuffled(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            assert_ne!(next, look);
+            look = next;
         }
     }
 

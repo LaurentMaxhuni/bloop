@@ -273,3 +273,17 @@ Paste key reads the clipboard only on click and fills the draft without saving a
 late results for a different provider, endpoint or edited profile are ignored. Additional
 retry, cancel, update-restart and setup-restart actions reuse existing glyphs and word
 fallbacks. No dependency, font change, background read or network connection was added.
+
+## Mascot outfits (2026-11-12)
+
+Bloop's hat, eyewear, outfit and body colour are a `Look` saved with the settings
+(`config.rs`, so the library still has no GUI code; unknown or missing parts load as the
+default). `mascot.rs` draws them on the same 24-unit grid as the body. A hat would poke out
+of the canvas, so each hat adds headroom (4–8 units) above the grid and Bloop is drawn a
+little smaller in the same square; the antenna is hidden under any hat. A tinted coat uses a
+fixed dark face so it reads in both themes, and accessory colours are fixed for the same
+reason. The outfit is drawn under the face so a laughing mouth stays visible, the cape before
+the body so it hangs behind. To make Bloop more present, the open notch's header shows it at
+36 px (was 30), an empty chat greets you with a 72 px Bloop, and clicking it makes it laugh.
+Appearance changes apply and save at once, like the rest of that page.
+

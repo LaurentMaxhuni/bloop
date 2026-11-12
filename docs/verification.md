@@ -405,3 +405,18 @@ UI not viewed in a running app. No bloop executable was launched. Actual clipboa
 access, tooltip placement, copied-state appearance and dropdown/footer rendering at
 different Windows scales remain unverified. The mascot implementation and Appearance
 mascot toggle were left untouched. No dependencies or font glyphs were added.
+
+## Mascot outfits (2026-11-12)
+
+`cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass (101 library,
+128 app, and the CLI, diagnose, transport and update suites). New tests: a `Look`
+round-trips, old configs load the default and a partial one fills in the rest; **Surprise
+me** never repeats the current outfit (500 seeds); picking a look applies and saves at once;
+clicking Bloop makes it laugh.
+
+Checked by eye only in an SVG mock that copies the drawing's coordinates (idle face, all hats
+but party and wizard, all eyewear, all outfits): everything sits on the body and inside the
+canvas. Not checked: the real Iced drawing in a running bloop (another copy held the
+single-instance mutex), the party and wizard hats, other moods with accessories (a hop with a
+tall hat, sleepy z and mad mark beside a hat), and the Appearance page's layout at 900 px.
+

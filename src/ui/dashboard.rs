@@ -12,6 +12,7 @@ use bloop::{
         Accent, Config, HOVER_DELAYS_MS, MAIN_PROFILE, MAX_INSTRUCTIONS, MAX_PROFILES,
         NotchPosition, NotchWidth, Profile, ReduceMotion, ThemeChoice,
     },
+    config::{Coat, Eyewear, Hat, Look, Outfit},
     motion::Feel,
     update::Version,
 };
@@ -312,6 +313,7 @@ impl Island {
     fn appearance_page(&self) -> Element<'_, Message> {
         column![
             self.section(Icon::Palette, "Look", self.look_section()),
+            self.section(Icon::Star, "Bloop", self.bloop_section()),
             self.section(Icon::Sparkles, "Motion", self.motion_section()),
             self.section(Icon::PanelTop, "Notch", self.notch_section()),
         ]
@@ -441,10 +443,79 @@ impl Island {
                     Message::SetHoverDelay,
                 ),
             ),
+        ]
+        .spacing(16)
+        .into()
+    }
+
+    /// Dress Bloop: a live preview, then hat, glasses, outfit and colour.
+    fn bloop_section(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let look = self.config.look;
+        let mood = self.mood();
+        let blink = self.blink_until.is_some_and(|until| self.now < until);
+        let preview = button(self.draw_mascot(mood, self.reaction_age(mood), blink, 96.0))
+            .padding(0)
+            .style(style::btn(t, Variant::Bare))
+            .on_press(Message::PokeMascot);
+        let controls = column![
+            field(
+                "Hat",
+                self.choices(
+                    Hat::ALL,
+                    look.hat,
+                    |h| h.label().into(),
+                    move |hat| { Message::SetLook(Look { hat, ..look }) }
+                ),
+            ),
+            field(
+                "Glasses",
+                self.choices(
+                    Eyewear::ALL,
+                    look.eyewear,
+                    |e| e.label().into(),
+                    move |eyewear| Message::SetLook(Look { eyewear, ..look }),
+                ),
+            ),
+            field(
+                "Outfit",
+                self.choices(
+                    Outfit::ALL,
+                    look.outfit,
+                    |o| o.label().into(),
+                    move |outfit| { Message::SetLook(Look { outfit, ..look }) }
+                ),
+            ),
+            field(
+                "Colour",
+                self.choices(
+                    Coat::ALL,
+                    look.coat,
+                    |c| c.label().into(),
+                    move |coat| { Message::SetLook(Look { coat, ..look }) }
+                ),
+            ),
+        ]
+        .spacing(16)
+        .width(Length::Fill);
+        let side = column![
+            container(preview)
+                .padding(12)
+                .style(style::card(t, t.background)),
+            self.button("Surprise me", Variant::Outline)
+                .on_press(Message::ShuffleLook),
+        ]
+        .spacing(10)
+        .align_x(Alignment::Center);
+        column![
+            row![side, controls].spacing(24),
             toggler(self.config.mascot)
-                .label("Show the mascot")
+                .label("Show Bloop in the notch")
                 .text_size(14)
                 .on_toggle(Message::SetMascot),
+            text("Click Bloop to make it giggle.")
+                .size(12)
+                .color(t.muted_foreground),
         ]
         .spacing(16)
         .into()
