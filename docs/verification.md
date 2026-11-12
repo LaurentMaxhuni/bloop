@@ -359,3 +359,7 @@ didn't handle.
 
 Not verified: pressing the keys in a running bloop (another copy held the single-instance
 mutex), and the caret landing at the end of the recalled text.
+
+Ctrl+N in the notch starts a new chat (124 tests pass). `ctrl_n_starts_a_new_chat_only_in_the_open_notch`
+checks it does nothing while the notch is closed or for another window. Not pressed in a
+running bloop.

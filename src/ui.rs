@@ -181,6 +181,8 @@ pub enum Message {
     Escape(window::Id),
     /// Up (true) or Down in the notch: step through this chat's earlier prompts.
     Recall(window::Id, bool),
+    /// Ctrl+N in the notch.
+    NewChatKey(window::Id),
     OnboardNext,
     OnboardBack,
     OnboardSkip,
@@ -621,6 +623,15 @@ impl Island {
                 }) if status == iced::event::Status::Ignored && modifiers.is_empty() => Some(
                     Message::Recall(id, key == iced::keyboard::key::Named::ArrowUp),
                 ),
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Character(c),
+                    modifiers,
+                    ..
+                }) if c.as_str().eq_ignore_ascii_case("n")
+                    && modifiers == iced::keyboard::Modifiers::COMMAND =>
+                {
+                    Some(Message::NewChatKey(id))
+                }
                 iced::Event::Mouse(iced::mouse::Event::CursorEntered) => {
                     Some(Message::Cursor(id, true))
                 }
@@ -1128,6 +1139,11 @@ impl Island {
                 self.draft_config.theme = self.config.theme;
                 self.react(Mood::Happy, 0.9);
                 return self.persist();
+            }
+            Message::NewChatKey(id) => {
+                if self.window == Some(id) && self.is_open() && !self.turns.is_empty() {
+                    return self.update(Message::NewChat);
+                }
             }
             Message::NewChat => {
                 if self.request.is_none() && !self.loading {
@@ -2554,7 +2570,7 @@ impl Island {
             footer = footer.push(self.small_button(
                 Icon::MessageSquarePlus,
                 "New chat",
-                "New chat",
+                "New chat (Ctrl+N)",
                 Message::NewChat,
             ));
         }
@@ -3105,6 +3121,26 @@ mod tests {
         let _ = app.update(Message::Input("draft".into()));
         let _ = app.update(Message::Recall(id, true));
         assert_eq!(app.input, "draft");
+    }
+
+    #[test]
+    fn ctrl_n_starts_a_new_chat_only_in_the_open_notch() {
+        let mut app = ready();
+        let notch = app.window.unwrap();
+        app.turns.push(Turn {
+            user: "hi".into(),
+            assistant: "ok".into(),
+            complete: true,
+        });
+        // Closed notch: nothing happens.
+        let _ = app.update(Message::NewChatKey(notch));
+        assert_eq!(app.turns.len(), 1);
+        let _ = app.update(Message::Toggle);
+        // Another window (the app window): nothing happens.
+        let _ = app.update(Message::NewChatKey(window::Id::unique()));
+        assert_eq!(app.turns.len(), 1);
+        let _ = app.update(Message::NewChatKey(notch));
+        assert!(app.turns.is_empty());
     }
 
     #[test]

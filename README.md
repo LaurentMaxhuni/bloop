@@ -44,7 +44,7 @@ Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to
   **Ctrl+Alt+Shift+A** (configurable, or off) and type your question. The notch shows the
   attached text and where it will be sent before you send it. **Paste clipboard** under the
   prompt does the same.
-- **Chats.** **New chat** starts over and keeps the old one. **All chats** opens the Chats
+- **Chats.** **New chat** (or **Ctrl+N** in the notch) starts over and keeps the old one. **All chats** opens the Chats
   page in the app window: search, open in the notch, rename, export to Markdown, or delete.
 - **Model profiles.** Save extra providers or models as named profiles on the Model page
   (for example a local model and a cloud one) and switch from the menu under the prompt.
