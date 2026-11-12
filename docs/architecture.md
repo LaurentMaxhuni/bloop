@@ -250,3 +250,26 @@ the system message into a user-labelled turn. The entire system message, includi
 the block and its delimiters, counts against the 32 KiB context budget; old whole
 pairs are dropped first, and the current prompt is always retained.
 Save jobs box their config snapshot to keep the queue's enum small as settings grow.
+
+## Context selector and dropdowns (2026-11-12)
+
+`Config.context` stores a global `ContextMode`: Full (the default for old configs),
+Last3, or OnlyMessage. Changing the notch selector applies and persists immediately,
+including the settings draft, without saving pending Model page edits. Each send or
+retry snapshots its turn limit (12, 3, or 0) into `model::context`; existing requests
+are unaffected. The builder still keeps only complete whole pairs, newest first within
+the 32 KiB budget, then emits them in chronological order. The system message, custom
+instructions and current prompt remain in every mode. History stays stored and visible.
+
+Notch dropdowns use 13 px text and [4, 10] padding; settings/setup use 15 px and [10, 14].
+Iced widget 0.14.2 forwards pick-list padding to its overlay menu, so these changes also
+enlarge menu items; `style::menu` controls colours/borders and has no item-padding field.
+The smallest open panel is 480 px with 424 px inside its horizontal padding. The model
+control is bounded to 156 px; the context selector keeps its full labels. The footer wraps
+when controls need more room, including word fallbacks while the icon font is unavailable.
+
+Code-block copy uses the existing Copy/Check glyphs and a tooltip, falling back to words.
+Paste key reads the clipboard only on click and fills the draft without saving a secret;
+late results for a different provider, endpoint or edited profile are ignored. Additional
+retry, cancel, update-restart and setup-restart actions reuse existing glyphs and word
+fallbacks. No dependency, font change, background read or network connection was added.

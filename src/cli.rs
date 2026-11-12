@@ -1243,7 +1243,7 @@ mod tests {
 
     #[test]
     fn flatten_preserves_system_instructions_as_a_user_turn() {
-        let messages = crate::model::context(&[], "hello", "Be brief.");
+        let messages = crate::model::context(&[], "hello", "Be brief.", 12);
         let prompt = flatten_with(&messages, "abc");
         assert!(prompt.contains(&format!(
             "<turn-abc role=\"user\">\n{}\n</turn-abc>",

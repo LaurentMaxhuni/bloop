@@ -78,6 +78,37 @@ pub enum ThemeChoice {
     System,
 }
 
+/// How much completed chat history accompanies the next prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ContextMode {
+    #[default]
+    Full,
+    Last3,
+    OnlyMessage,
+}
+
+impl ContextMode {
+    pub const ALL: [Self; 3] = [Self::Full, Self::Last3, Self::OnlyMessage];
+
+    pub fn max_turns(self) -> usize {
+        match self {
+            Self::Full => 12,
+            Self::Last3 => 3,
+            Self::OnlyMessage => 0,
+        }
+    }
+}
+
+impl std::fmt::Display for ContextMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Full => "Full chat",
+            Self::Last3 => "Last 3 turns",
+            Self::OnlyMessage => "Only this message",
+        })
+    }
+}
+
 /// Colour for buttons, focus rings and the mascot's cheeks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Accent {
@@ -193,6 +224,7 @@ pub struct Config {
     pub model: String,
     /// Global reply preferences, sent with every message across all profiles.
     pub instructions: String,
+    pub context: ContextMode,
     pub shortcut: String,
     pub theme: ThemeChoice,
     /// First-launch setup finished; old configs without it load as false.
@@ -296,6 +328,7 @@ struct ConfigFields {
     endpoint: String,
     model: String,
     instructions: String,
+    context: ContextMode,
     shortcut: String,
     onboarded: bool,
     accent: Accent,
@@ -319,6 +352,7 @@ impl Default for ConfigFields {
             endpoint: c.endpoint,
             model: c.model,
             instructions: c.instructions,
+            context: c.context,
             shortcut: c.shortcut,
             onboarded: c.onboarded,
             accent: c.accent,
@@ -344,6 +378,7 @@ impl From<StoredConfig> for Config {
             endpoint: f.endpoint,
             model: f.model,
             instructions: f.instructions.trim().to_owned(),
+            context: f.context,
             shortcut: f.shortcut,
             theme: stored.theme.unwrap_or(match stored.light {
                 Some(true) => ThemeChoice::Light,
@@ -381,6 +416,7 @@ impl Default for Config {
             endpoint: "http://127.0.0.1:11434".into(),
             model: "qwen3:4b".into(),
             instructions: String::new(),
+            context: ContextMode::Full,
             shortcut: "Ctrl+Alt+B".into(),
             theme: ThemeChoice::Dark,
             onboarded: false,
@@ -555,6 +591,23 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn context_defaults_and_round_trips() {
+        use super::{Config, ContextMode};
+
+        let old: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.context, ContextMode::Full);
+        for mode in ContextMode::ALL {
+            let config = Config {
+                context: mode,
+                ..Config::default()
+            };
+            let back: Config =
+                serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+            assert_eq!(back.context, mode);
+        }
+    }
+
     #[test]
     fn custom_instructions_default_and_round_trip() {
         let old: super::Config = serde_json::from_str("{}").unwrap();

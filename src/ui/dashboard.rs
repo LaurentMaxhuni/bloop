@@ -212,9 +212,13 @@ impl Island {
     fn home_page(&self) -> Element<'_, Message> {
         let t = self.tokens();
         let install = matches!(self.update_state, UpdateState::Ready(..)).then(|| {
-            self.button("Restart to update", Variant::Primary)
-                .on_press_maybe(self.request.is_none().then_some(Message::InstallUpdate))
-                .into()
+            self.icon_action(
+                Icon::RefreshCw,
+                "Restart to update",
+                "Restart to update",
+                Variant::Primary,
+                self.request.is_none().then_some(Message::InstallUpdate),
+            )
         });
         let update = self.update_status();
         let version = if update.is_empty() {
@@ -880,10 +884,13 @@ impl Island {
         )]
         .spacing(8);
         if ready {
-            actions = actions.push(
-                self.button("Restart to update", Variant::Primary)
-                    .on_press_maybe(self.request.is_none().then_some(Message::InstallUpdate)),
-            );
+            actions = actions.push(self.icon_action(
+                Icon::RefreshCw,
+                "Restart to update",
+                "Restart to update",
+                Variant::Primary,
+                self.request.is_none().then_some(Message::InstallUpdate),
+            ));
         }
         let folder = self
             .db_path
@@ -918,8 +925,13 @@ impl Island {
             ),
             field(
                 "Setup",
-                self.button("Run setup again", Variant::Outline)
-                    .on_press(Message::ShowSetup),
+                self.icon_action(
+                    Icon::RotateCcw,
+                    "Run setup again",
+                    "Run setup again",
+                    Variant::Outline,
+                    Some(Message::ShowSetup),
+                ),
             ),
         ]
         .spacing(20);

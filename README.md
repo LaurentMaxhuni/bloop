@@ -26,6 +26,10 @@ Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to
 
 ## Use
 
+- **Chat context.** Beside the model under the prompt, choose **Full chat** (up to 12
+  recent complete turns within 32 KiB), **Last 3 turns**, or **Only this message**.
+  The choice saves immediately and applies to the next send or retry; the system message
+  and custom instructions always stay.
 - **Custom instructions.** On the Model page, tell Bloop about yourself or how to reply,
   then Save. Up to 2048 bytes are sent with every message, across all model profiles.
 - **Sliver → pill → panel.** At rest bloop is a 120 × 5 px sliver at the top centre of the
@@ -104,8 +108,9 @@ With a local model bloop works fully offline. ChatGPT, Claude Code and Codex nee
 - No analytics or telemetry. If you select ChatGPT, Bloop sends your prompt and recent chat
   context to OpenAI and protects the account session with Windows DPAPI. Other chat content
   goes to the model you configured. You can turn off the GitHub update check in Settings.
-- Prompts are limited to 8 KiB and replies to 128 KiB. Context keeps up to 12 recent complete
-  turns within 32 KiB; interrupted replies stay visible but aren't sent back to the model.
+- Prompts are limited to 8 KiB and replies to 128 KiB. Full chat keeps up to 12 recent complete
+  turns within 32 KiB; the context selector can reduce this to three turns or no history.
+  Interrupted replies stay visible but aren't sent back to the model.
 
 ## Build from source
 

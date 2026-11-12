@@ -2,12 +2,15 @@
 //! laid-out math. A [`Reply`] keeps its parsed Markdown and extends it as text streams in.
 
 use super::Message;
+use crate::icons::{self, Icon};
 use crate::style::{RADIUS, Tokens};
 use bloop::math::{self, Limits, Node, Spacing};
 use iced::{
     Alignment, Background, Border, Color, Element, Font, Length, Padding,
     font::{Family, Weight},
-    widget::{Space, button, column, container, markdown, rich_text, row, scrollable, text},
+    widget::{
+        Space, button, column, container, markdown, rich_text, row, scrollable, text, tooltip,
+    },
 };
 
 const MATH: Font = Font {
@@ -54,8 +57,21 @@ impl Reply {
         self.prepared = prepared;
     }
 
-    pub fn view<'a>(&'a self, t: Tokens, copied: Option<&'a str>) -> Element<'a, Message> {
-        markdown::view_with(self.content.items(), settings(t), &Viewer { t, copied })
+    pub fn view<'a>(
+        &'a self,
+        t: Tokens,
+        copied: Option<&'a str>,
+        icons_ready: bool,
+    ) -> Element<'a, Message> {
+        markdown::view_with(
+            self.content.items(),
+            settings(t),
+            &Viewer {
+                t,
+                copied,
+                icons_ready,
+            },
+        )
     }
 }
 
@@ -103,6 +119,7 @@ struct Viewer<'a> {
     t: Tokens,
     /// The code block most recently copied, so its button can say so.
     copied: Option<&'a str>,
+    icons_ready: bool,
 }
 
 impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
@@ -120,26 +137,48 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
         if language == Some("math") {
             return display_math(code, self.t);
         }
-        let copied = self.copied == Some(code);
+        let copied = self.copied == Some(code.trim_end());
+        let word = if copied { "Copied" } else { "Copy" };
+        let label = if self.icons_ready {
+            text(
+                if copied { Icon::Check } else { Icon::Copy }
+                    .codepoint()
+                    .to_string(),
+            )
+            .font(icons::FONT)
+            .size(13)
+        } else {
+            text(word).size(12)
+        };
+        let copy = button(label)
+            .padding(if self.icons_ready { [3, 6] } else { [2, 8] })
+            .on_press(Message::CopyCode(code.trim_end().to_owned()))
+            .style(move |_, status| button::Style {
+                background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                    .then_some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.08))),
+                text_color: if copied { CODE_FG } else { CODE_MUTED },
+                border: Border {
+                    radius: 6.0.into(),
+                    ..Border::default()
+                },
+                ..button::Style::default()
+            });
         let header = row![
             text(language.filter(|l| !l.is_empty()).unwrap_or("code"))
                 .size(11)
                 .font(MONO)
                 .color(CODE_MUTED),
             Space::new().width(Length::Fill),
-            button(text(if copied { "Copied" } else { "Copy" }).size(11))
-                .padding([2, 8])
-                .on_press(Message::CopyCode(code.trim_end().to_owned()))
-                .style(move |_, status| button::Style {
-                    background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-                        .then_some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.08))),
-                    text_color: if copied { CODE_FG } else { CODE_MUTED },
-                    border: Border {
-                        radius: 6.0.into(),
-                        ..Border::default()
-                    },
-                    ..button::Style::default()
-                }),
+            tooltip(
+                copy,
+                container(text(word).size(12).color(CODE_FG))
+                    .padding([4, 8])
+                    .style(|_| container::Style {
+                        background: Some(CODE_BG.into()),
+                        ..Default::default()
+                    }),
+                tooltip::Position::Bottom,
+            ),
         ]
         .align_y(Alignment::Center);
         let body = column(lines.iter().map(|line| {

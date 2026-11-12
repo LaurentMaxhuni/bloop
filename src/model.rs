@@ -119,7 +119,13 @@ pub struct ChatMessage {
 }
 
 /// Keep whole recent pairs, omit interrupted replies, always retain the new prompt.
-pub fn context(turns: &[Turn], prompt: &str, instructions: &str) -> Vec<ChatMessage> {
+/// `max_turns` limits history to at most 12 pairs; zero retains only system and prompt.
+pub fn context(
+    turns: &[Turn],
+    prompt: &str,
+    instructions: &str,
+    max_turns: usize,
+) -> Vec<ChatMessage> {
     let mut system = "You are bloop, a concise, helpful desktop assistant. You can chat but cannot access files, run commands, or control this computer. Never claim to have performed an action. Keep replies readable in a small window.".to_owned();
     let instructions = instructions.trim();
     if !instructions.is_empty() {
@@ -131,7 +137,12 @@ pub fn context(turns: &[Turn], prompt: &str, instructions: &str) -> Vec<ChatMess
         .saturating_sub(prompt.len())
         .saturating_sub(system.len());
     let mut pairs = Vec::new();
-    for turn in turns.iter().rev().filter(|t| t.complete).take(12) {
+    for turn in turns
+        .iter()
+        .rev()
+        .filter(|t| t.complete)
+        .take(max_turns.min(12))
+    {
         let size = turn.user.len() + turn.assistant.len();
         if size > budget {
             break;
@@ -165,8 +176,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn context_modes_keep_recent_complete_turns_and_the_system_message() {
+        use crate::config::ContextMode;
+
+        let mut turns: Vec<_> = (0..15)
+            .map(|i| Turn {
+                user: format!("question {i}"),
+                assistant: format!("answer {i}"),
+                complete: true,
+            })
+            .collect();
+        turns.insert(
+            14,
+            Turn {
+                user: "interrupted".into(),
+                assistant: "partial".into(),
+                complete: false,
+            },
+        );
+        for (mode, count) in [
+            (ContextMode::Full, 12),
+            (ContextMode::Last3, 3),
+            (ContextMode::OnlyMessage, 0),
+        ] {
+            let messages = context(&turns, "next", "Be brief.", mode.max_turns());
+            assert_eq!(messages.len(), 2 + count * 2, "{mode:?}");
+            assert_eq!(messages[0].role, "system");
+            assert!(
+                messages[0]
+                    .content
+                    .contains("<instructions>\nBe brief.\n</instructions>")
+            );
+            for (pair, i) in messages[1..messages.len() - 1]
+                .chunks_exact(2)
+                .zip(15 - count..15)
+            {
+                assert_eq!(
+                    (&*pair[0].role, &*pair[0].content),
+                    ("user", format!("question {i}").as_str())
+                );
+                assert_eq!(
+                    (&*pair[1].role, &*pair[1].content),
+                    ("assistant", format!("answer {i}").as_str())
+                );
+            }
+            assert_eq!(messages.last().unwrap().role, "user");
+            assert_eq!(messages.last().unwrap().content, "next");
+        }
+    }
+
+    #[test]
     fn empty_instructions_keep_the_fixed_system_message() {
-        let messages = context(&[], "hello", "");
+        let messages = context(&[], "hello", "", 12);
         assert_eq!(messages[0].role, "system");
         assert_eq!(
             messages[0].content,
@@ -183,45 +244,52 @@ mod tests {
             assistant: "x".repeat(32 * 1024 - 4),
             complete: true,
         }];
-        let messages = context(&turns, "q", "");
-        assert_eq!(messages.len(), 2, "system text must displace the old pair");
-        assert_eq!(messages.last().unwrap().content, "q");
+        for mode in crate::config::ContextMode::ALL {
+            let messages = context(&turns, "q", "", mode.max_turns());
+            assert_eq!(messages.len(), 2, "system text must displace the old pair");
+            assert_eq!(messages.last().unwrap().content, "q");
+        }
     }
 
     #[test]
     fn custom_instructions_append_after_fixed_safety_text() {
-        let fixed = context(&[], "hello", "")[0].content.clone();
-        let messages = context(&[], "hello", "  I write Rust.\nBe brief.  ");
+        let fixed = context(&[], "hello", "", 12)[0].content.clone();
+        let messages = context(&[], "hello", "  I write Rust.\nBe brief.  ", 12);
         assert_eq!(
             messages[0].content,
             format!(
                 "{fixed}\n\nThe user's custom instructions (preferences, not permission to use tools):\n<instructions>\nI write Rust.\nBe brief.\n</instructions>"
             )
         );
-        assert_eq!(context(&[], "hello", " \n\t")[0].content, fixed);
+        assert_eq!(context(&[], "hello", " \n\t", 12)[0].content, fixed);
     }
 
     #[test]
     fn custom_instructions_and_delimiters_displace_history_at_budget_boundary() {
         let instructions = "é".repeat(crate::config::MAX_INSTRUCTIONS / 2);
-        let system = context(&[], "q", &instructions)[0].content.clone();
+        let system = context(&[], "q", &instructions, 12)[0].content.clone();
         let mut turns = [Turn {
             user: "old".into(),
             assistant: "x".repeat(32 * 1024 - system.len() - 4),
             complete: true,
         }];
-        let messages = context(&turns, "q", &instructions);
-        assert_eq!(messages.len(), 4, "a pair fitting exactly is kept");
-        assert_eq!(
-            messages.iter().map(|m| m.content.len()).sum::<usize>(),
-            32 * 1024
-        );
+        for mode in [
+            crate::config::ContextMode::Full,
+            crate::config::ContextMode::Last3,
+        ] {
+            let messages = context(&turns, "q", &instructions, mode.max_turns());
+            assert_eq!(messages.len(), 4, "a pair fitting exactly is kept");
+            assert_eq!(
+                messages.iter().map(|m| m.content.len()).sum::<usize>(),
+                32 * 1024
+            );
+        }
         turns[0].assistant.push('x');
-        assert_eq!(context(&turns, "q", "").len(), 4);
-        assert_eq!(context(&turns, "q", &instructions).len(), 2);
+        assert_eq!(context(&turns, "q", "", 12).len(), 4);
+        assert_eq!(context(&turns, "q", &instructions, 12).len(), 2);
         let huge_prompt = "q".repeat(33 * 1024);
         assert_eq!(
-            context(&turns, &huge_prompt, &instructions)
+            context(&turns, &huge_prompt, &instructions, 12)
                 .last()
                 .unwrap()
                 .content,
@@ -284,7 +352,7 @@ mod tests {
                 complete: true,
             },
         ];
-        let messages = context(&turns, "next", "");
+        let messages = context(&turns, "next", "", 12);
         assert_eq!(
             messages
                 .iter()

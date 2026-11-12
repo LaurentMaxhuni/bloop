@@ -379,3 +379,29 @@ instructions across profiles and draft reset on reopening.
 
 Not checked: appearance or interaction in a running app, or instruction-following by
 live models. No bloop app was launched; the installed copy was left running.
+
+## Notch context, icon buttons and dropdowns (2026-11-12)
+
+Passed: `cargo fmt`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+and `cargo test` (266 passed, four existing live CLI/network tests ignored). Builds used
+the worktree's default `target/debug`; `CARGO_TARGET_DIR` was not set. The initial sandbox
+run failed `secrets::tests::blank_key_removes` and `secrets::tests::credential_round_trip`
+because Credential Manager had no logon session; both passed with normal Windows access.
+
+Covered: all three context modes select the newest complete pairs in chronological
+order (12, 3, or none), skip interrupted turns, keep the system message/instructions and
+current prompt, and respect the 32 KiB budget. Old config defaults and all mode round-trips
+pass. UI state tests check immediate application and queued saves without saving pending
+Model edits, and key paste trimming, empty clipboard, provider/endpoint/profile mismatches
+and environment-key handling. The existing subset-font test verifies all reused icons.
+
+Reviewed Iced widget 0.14.2 source: pick-list padding flows to the overlay menu, while
+menu style has no item-padding field. Reviewed all NotchWidth panel sizes: S is 480 px
+(424 px inside panel padding), M 540 px and L 600 px. The model control is bounded and
+clipped to 156 px; wrapping the footer keeps its controls within the available width,
+including word fallbacks. Settings/setup dropdowns share the larger item padding.
+
+UI not viewed in a running app. No bloop executable was launched. Actual clipboard
+access, tooltip placement, copied-state appearance and dropdown/footer rendering at
+different Windows scales remain unverified. The mascot implementation and Appearance
+mascot toggle were left untouched. No dependencies or font glyphs were added.

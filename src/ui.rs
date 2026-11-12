@@ -18,8 +18,8 @@ use crate::{
 use bloop::{
     chatgpt::{self, AccountStatus},
     config::{
-        Accent, Config, Destination, HOVER_DELAYS_MS, NotchPosition, NotchWidth, Provider,
-        ReduceMotion, ThemeChoice,
+        Accent, Config, ContextMode, Destination, HOVER_DELAYS_MS, NotchPosition, NotchWidth,
+        Provider, ReduceMotion, ThemeChoice,
     },
     diagnose,
     launch::{Launch, Startup, startup},
@@ -191,6 +191,8 @@ pub enum Message {
     Detected(Vec<Choice>),
     PickChoice(Choice),
     ApiKey(String),
+    PasteKey,
+    KeyPasted(Provider, String, ProfileEdit, Option<String>),
     RemoveKey,
     SetLight(bool),
     SetAutostart(bool),
@@ -200,6 +202,7 @@ pub enum Message {
     /// Show a dashboard page in the app window.
     ShowPage(AppPage),
     SetTheme(ThemeChoice),
+    SetContext(ContextMode),
     SetAccent(Accent),
     SetFeel(Feel),
     SetReduceMotion(ReduceMotion),
@@ -1307,6 +1310,26 @@ impl Island {
             }
             Message::PickChoice(choice) => self.apply_choice(&choice),
             Message::ApiKey(value) => self.key_draft = value,
+            Message::PasteKey => {
+                let provider = self.draft_config.provider;
+                let endpoint = self.draft_config.endpoint.clone();
+                let profile = self.profile_edit;
+                return iced::clipboard::read().map(move |text| {
+                    Message::KeyPasted(provider, endpoint.clone(), profile, text)
+                });
+            }
+            Message::KeyPasted(provider, endpoint, profile, value) => {
+                // A delayed read must not paste a server's key into another profile.
+                if provider == self.draft_config.provider
+                    && endpoint == self.draft_config.endpoint
+                    && profile == self.profile_edit
+                    && matches!(provider, Provider::OpenAi | Provider::Unsloth)
+                    && self.key_status != KeySource::Environment
+                    && let Some(value) = value
+                {
+                    self.key_draft = value.trim().to_owned();
+                }
+            }
             Message::RemoveKey => {
                 if let Err(error) = secrets::set_api_key(&self.draft_config.endpoint, None) {
                     self.status = error;
@@ -1400,6 +1423,7 @@ impl Island {
             }
             Message::ShowPage(page) => self.page = page,
             Message::SetTheme(theme) => return self.apply_live(|c| c.theme = theme),
+            Message::SetContext(context) => return self.apply_live(|c| c.context = context),
             Message::SetAccent(accent) => return self.apply_live(|c| c.accent = accent),
             Message::SetFeel(feel) => return self.apply_live(|c| c.motion = feel),
             Message::SetReduceMotion(choice) => {
@@ -1643,7 +1667,12 @@ impl Island {
         if self.chat.title.is_empty() {
             self.chat.title = model::title_for(&prompt);
         }
-        let messages = model::context(&self.turns, &prompt, &config.instructions);
+        let messages = model::context(
+            &self.turns,
+            &prompt,
+            &config.instructions,
+            config.context.max_turns(),
+        );
         self.turns.push(Turn {
             user: prompt,
             assistant: String::new(),
@@ -1714,7 +1743,20 @@ impl Island {
                         Message::ApiKey,
                     )
                     .secure(true);
-                let mut column = column![input].spacing(6);
+                let mut column = column![
+                    row![
+                        input,
+                        self.small_button(
+                            Icon::ClipboardPaste,
+                            "Paste key",
+                            "Paste key",
+                            Message::PasteKey,
+                        ),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                ]
+                .spacing(6);
                 if status == KeySource::None && self.legacy_key {
                     column = column.push(
                         row![
@@ -2465,7 +2507,7 @@ impl Island {
             let reply: Option<Element<'_, Message>> = match self.replies.get(index) {
                 // Bloop's face (or, without the mascot, "is thinking…") says enough.
                 _ if shown.is_empty() => None,
-                Some(reply) => Some(reply.view(t, self.copied.as_deref())),
+                Some(reply) => Some(reply.view(t, self.copied.as_deref(), self.icons_ready)),
                 None => Some(text(shown).size(14).into()),
             };
             let mut entry = column![label].spacing(4);
@@ -2563,7 +2605,7 @@ impl Island {
                 }),
         );
         let idle = self.request.is_none() && !self.loading;
-        let mut footer = row![self.model_switcher(), Space::new().width(Length::Fill)]
+        let mut footer = row![self.model_switcher(), self.context_selector()]
             .spacing(2)
             .align_y(Alignment::Center);
         if self.attachment.is_none() {
@@ -2588,27 +2630,56 @@ impl Island {
                 Message::NewChat,
             ));
         }
-        body.push(footer).into()
+        // Word fallbacks can need another line at the 480 px panel width.
+        body.push(footer.wrap()).into()
     }
 
     /// The chat's model under the prompt; a menu of profiles once any are saved.
     fn model_switcher(&self) -> Element<'_, Message> {
         let t = self.tokens();
         if self.config.profiles.is_empty() {
-            return container(text(self.badge_text()).size(11))
-                .padding([2, 8])
-                .style(style::badge(t))
-                .into();
+            return self.tip(
+                container(
+                    text(self.badge_text())
+                        .size(13)
+                        .wrapping(text::Wrapping::None),
+                )
+                .width(156)
+                .clip(true)
+                .padding([4, 10])
+                .style(style::badge(t)),
+                "Current model",
+            );
         }
         let options = self.profile_options();
         let selected = options.iter().find(|o| o.id == self.chat.profile).cloned();
-        pick_list(options, selected, |option| Message::PickProfile(option.id))
-            .placeholder("Profile removed")
-            .text_size(11)
-            .padding([2, 8])
+        container(
+            pick_list(options, selected, |option| Message::PickProfile(option.id))
+                .placeholder("Profile removed")
+                .text_size(13)
+                .padding([4, 10])
+                .width(156)
+                .style(style::select(t))
+                .menu_style(style::menu(t)),
+        )
+        .clip(true)
+        .into()
+    }
+
+    fn context_selector(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        self.tip(
+            pick_list(
+                ContextMode::ALL,
+                Some(self.config.context),
+                Message::SetContext,
+            )
+            .text_size(13)
+            .padding([4, 10])
             .style(style::select(t))
-            .menu_style(style::menu(t))
-            .into()
+            .menu_style(style::menu(t)),
+            "How much of this chat is sent",
+        )
     }
 
     /// The clipboard text waiting to go with the next prompt, and where it will go.
@@ -2727,8 +2798,8 @@ impl Island {
                 Some(self.draft_config.provider),
                 Message::Provider,
             )
-            .padding([8, 12])
-            .text_size(14)
+            .padding([10, 14])
+            .text_size(15)
             .width(Length::Fill)
             .style(style::select(t))
             .menu_style(style::menu(t)),
@@ -2780,10 +2851,13 @@ impl Island {
         };
         let mut actions = row![].spacing(8);
         if self.chatgpt_cancel.is_some() {
-            actions = actions.push(
-                self.button("Cancel", Variant::Outline)
-                    .on_press(Message::ChatGptCancel),
-            );
+            actions = actions.push(self.icon_action(
+                Icon::X,
+                "Cancel",
+                "Cancel ChatGPT sign-in",
+                Variant::Outline,
+                Some(Message::ChatGptCancel),
+            ));
         } else if self.chatgpt.signed_in {
             let label = if self.chatgpt.plan_enabled {
                 "Reconnect"
@@ -2848,8 +2922,8 @@ impl Island {
                 "Model",
                 row![
                     pick_list(models, selected, |model| Message::Model(model.slug))
-                        .padding([8, 12])
-                        .text_size(14)
+                        .padding([10, 14])
+                        .text_size(15)
                         .width(Length::Fill)
                         .style(style::select(t))
                         .menu_style(style::menu(t)),
@@ -2898,6 +2972,81 @@ mod tests {
         app.loading = false;
         app.storage_disabled = true;
         app
+    }
+
+    #[test]
+    fn context_changes_apply_and_queue_a_save_without_saving_model_edits() {
+        let mut app = ready();
+        app.storage_disabled = false;
+        app.db_path = Some(PathBuf::from("unused-context-test.sqlite3"));
+        app.saving = true;
+        app.draft_config.model = "unsaved-model".into();
+        for mode in ContextMode::ALL {
+            let _ = app.update(Message::SetContext(mode));
+            assert_eq!(app.config.context, mode);
+            assert_eq!(app.draft_config.context, mode);
+            assert_eq!(app.draft_config.model, "unsaved-model");
+            assert_eq!(app.settings_to_save().unwrap().context, mode);
+            assert!(
+                matches!(app.jobs.back(), Some(jobs::Job::Save { config, .. })
+                if config.context == mode && config.model != "unsaved-model")
+            );
+        }
+    }
+
+    #[test]
+    fn pasted_key_fills_only_the_matching_server_and_profile() {
+        let mut app = ready();
+        app.draft_config.provider = Provider::OpenAi;
+        app.key_status = KeySource::None;
+        let endpoint = app.draft_config.endpoint.clone();
+        let pasted = |provider, endpoint, profile, value: Option<&str>| {
+            Message::KeyPasted(provider, endpoint, profile, value.map(str::to_owned))
+        };
+        let _ = app.update(pasted(
+            Provider::OpenAi,
+            endpoint.clone(),
+            ProfileEdit::Default,
+            Some(" sk-test\r\n"),
+        ));
+        assert_eq!(app.key_draft, "sk-test");
+        for message in [
+            pasted(
+                Provider::Unsloth,
+                endpoint.clone(),
+                ProfileEdit::Default,
+                Some("wrong-provider"),
+            ),
+            pasted(
+                Provider::OpenAi,
+                "https://other.example".into(),
+                ProfileEdit::Default,
+                Some("wrong-server"),
+            ),
+            pasted(
+                Provider::OpenAi,
+                endpoint.clone(),
+                ProfileEdit::Existing(1),
+                Some("wrong-profile"),
+            ),
+            pasted(
+                Provider::OpenAi,
+                endpoint.clone(),
+                ProfileEdit::Default,
+                None,
+            ),
+        ] {
+            let _ = app.update(message);
+            assert_eq!(app.key_draft, "sk-test");
+        }
+        app.key_status = KeySource::Environment;
+        let _ = app.update(pasted(
+            Provider::OpenAi,
+            endpoint,
+            ProfileEdit::Default,
+            Some("ignored"),
+        ));
+        assert_eq!(app.key_draft, "sk-test");
     }
 
     #[test]

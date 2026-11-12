@@ -77,7 +77,12 @@ async fn custom_instructions_reach_both_http_wires() {
     ] {
         let (mut config, server) = fixture(provider, "200 OK", reply).await;
         config.instructions = "I write Rust.\nBe brief.".into();
-        let messages = bloop::model::context(&[], "hello", &config.instructions);
+        let messages = bloop::model::context(
+            &[],
+            "hello",
+            &config.instructions,
+            config.context.max_turns(),
+        );
         chat(&config, &messages, |_| std::future::ready(true))
             .await
             .unwrap();
