@@ -49,19 +49,18 @@ pub fn set_api_key(endpoint: &str, key: Option<&str>) -> Result<(), String> {
     write(&target, key)
 }
 
-/// Moves a key saved by an older bloop (one key for every endpoint) to `endpoint`, the
-/// endpoint it was used with. Does nothing once moved or when that origin has its own key.
-pub fn migrate_legacy_key(endpoint: &str) {
-    let Some(legacy) = read(LEGACY_TARGET) else {
-        return;
-    };
-    let Some(target) = target(endpoint) else {
-        return;
-    };
-    if read(&target).is_none() && write(&target, Some(&legacy)).is_err() {
-        return;
-    }
-    let _ = write(LEGACY_TARGET, None);
+/// An older bloop saved one key for every endpoint. Which server it belongs to is unknown
+/// (the endpoint may have changed since), so it is never sent until the user ties it to one.
+pub fn has_legacy_key() -> bool {
+    read(LEGACY_TARGET).is_some()
+}
+
+/// Ties the older bloop's key to `endpoint`'s origin, at the user's request, and removes it
+/// from its old place.
+pub fn bind_legacy_key(endpoint: &str) -> Result<(), String> {
+    let legacy = read(LEGACY_TARGET).ok_or("There's no older key to use.")?;
+    set_api_key(endpoint, Some(&legacy))?;
+    write(LEGACY_TARGET, None)
 }
 
 /// DPAPI handles OAuth sessions larger than a Credential Manager entry and binds them to

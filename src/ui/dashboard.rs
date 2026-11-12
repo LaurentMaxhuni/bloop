@@ -586,6 +586,7 @@ impl Island {
             ProfileEdit::Existing(id)
         };
         self.profile_name = self.config.profile_name(id).unwrap_or_default().into();
+        self.key_draft.clear();
         self.status.clear();
         self.forget_connection_test();
         self.refresh_key_status();

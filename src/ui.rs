@@ -1,6 +1,7 @@
 mod app_window;
 mod chats;
 mod dashboard;
+mod jobs;
 mod onboarding;
 mod rich;
 
@@ -93,7 +94,8 @@ pub fn notch_settings() -> window::Settings {
 pub enum Message {
     Window(Option<window::Id>),
     Loaded(Result<storage::Loaded, String>),
-    Saved(Result<(), String>),
+    /// A queued storage job finished (see `jobs`).
+    JobDone(jobs::Done),
     Platform(platform::Event),
     /// Shortcut-like toggle: opens from anywhere, closes when open.
     Toggle,
@@ -153,7 +155,10 @@ pub enum Message {
     PickProfile(u32),
     /// Attach the clipboard's text to the next prompt, opening the notch.
     AskClipboard,
-    Clipboard(Option<String>),
+    /// Clipboard text read for the chat with this id.
+    Clipboard(i64, Option<String>),
+    /// Tie a key saved by an older bloop to the Model page's endpoint.
+    BindLegacyKey,
     RemoveAttachment,
     /// Show the chat list in the app window.
     ShowChats,
@@ -250,8 +255,12 @@ pub struct Island {
     search_id: u64,
     renaming: Option<(i64, String)>,
     confirm_delete: Option<i64>,
-    /// The current chat to delete once the save in flight finishes.
-    delete_after_save: Option<i64>,
+    /// Storage jobs waiting their turn; `saving` is true while one runs.
+    jobs: std::collections::VecDeque<jobs::Job>,
+    /// Restart to update once the queue is empty.
+    install_after_save: bool,
+    /// An older bloop's key, not tied to any server, is still saved.
+    legacy_key: bool,
     chats_notice: String,
     /// Which model profile the Model page edits.
     profile_edit: ProfileEdit,
@@ -298,7 +307,6 @@ pub struct Island {
     db_path: Option<PathBuf>,
     storage_disabled: bool,
     saving: bool,
-    save_again: bool,
     quitting: bool,
     born: Instant,
     now: Instant,
@@ -354,7 +362,9 @@ impl Island {
             search_id: 0,
             renaming: None,
             confirm_delete: None,
-            delete_after_save: None,
+            jobs: std::collections::VecDeque::new(),
+            install_after_save: false,
+            legacy_key: false,
             chats_notice: String::new(),
             profile_edit: ProfileEdit::Default,
             profile_name: String::new(),
@@ -383,7 +393,6 @@ impl Island {
             db_path: path.ok(),
             storage_disabled: false,
             saving: false,
-            save_again: false,
             quitting: false,
             born: Instant::now(),
             now: Instant::now(),
@@ -409,13 +418,9 @@ impl Island {
                 Task::perform(
                     async move {
                         let path = load_path?;
-                        tokio::task::spawn_blocking(move || {
-                            let loaded = storage::load(&path)?;
-                            secrets::migrate_legacy_key(&loaded.config.endpoint);
-                            Ok(loaded)
-                        })
-                        .await
-                        .map_err(|e| e.to_string())?
+                        tokio::task::spawn_blocking(move || storage::load(&path))
+                            .await
+                            .map_err(|e| e.to_string())?
                     },
                     Message::Loaded,
                 ),
@@ -605,7 +610,7 @@ impl Island {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        if self.quitting && !matches!(message, Message::Saved(_) | Message::Frame(_)) {
+        if self.quitting && !matches!(message, Message::JobDone(_) | Message::Frame(_)) {
             return Task::none();
         }
         if !matches!(
@@ -613,7 +618,7 @@ impl Island {
             Message::Tick(_)
                 | Message::Blink(_)
                 | Message::Frame(_)
-                | Message::Saved(_)
+                | Message::JobDone(_)
                 | Message::Deadline(_)
                 | Message::FullscreenPoll
                 | Message::Focus(..)
@@ -687,31 +692,7 @@ impl Island {
                 };
                 return Task::batch([layout, notch, windows]);
             }
-            Message::Saved(result) => {
-                self.saving = false;
-                let failed = result.is_err();
-                if let Err(error) = result {
-                    self.storage_warning = format!("Could not save: {error}");
-                } else {
-                    self.storage_warning.clear();
-                }
-                if self.save_again {
-                    self.save_again = false;
-                    return self.persist();
-                }
-                if let Some(id) = self.delete_after_save.take() {
-                    return self.delete_chat(id);
-                }
-                if self.quitting {
-                    if !failed {
-                        return iced::exit();
-                    }
-                    self.quitting = false;
-                    if !self.is_open() {
-                        return self.present(Event::Shortcut);
-                    }
-                }
-            }
+            Message::JobDone(done) => return self.job_done(done),
             Message::Platform(event) => match event {
                 platform::Event::Ready(controller) => {
                     self.controller = Some(controller);
@@ -925,6 +906,7 @@ impl Island {
                     };
                 }
                 self.draft_config.provider = provider;
+                self.key_draft.clear();
                 self.draft_config.endpoint = if provider == self.config.provider {
                     self.config.endpoint.clone()
                 } else {
@@ -934,6 +916,15 @@ impl Island {
                 self.refresh_key_status();
             }
             Message::Endpoint(value) => {
+                let origin = |endpoint: &str| {
+                    bloop::config::validate_endpoint(endpoint)
+                        .ok()
+                        .map(|url| url.origin().ascii_serialization())
+                };
+                if origin(&value) != origin(&self.draft_config.endpoint) {
+                    // A pasted key belongs to the server it was pasted for.
+                    self.key_draft.clear();
+                }
                 self.draft_config.endpoint = value;
                 self.forget_connection_test();
                 self.refresh_key_status();
@@ -1107,13 +1098,16 @@ impl Island {
                 if self.window.is_none() {
                     return Task::none();
                 }
-                let read = iced::clipboard::read().map(Message::Clipboard);
+                let chat = self.chat.id;
+                let read = iced::clipboard::read().map(move |text| Message::Clipboard(chat, text));
                 if self.is_open() {
                     return read;
                 }
                 return Task::batch([self.present(Event::Shortcut), read]);
             }
-            Message::Clipboard(content) => {
+            // A late read for a chat that's no longer in the notch is dropped.
+            Message::Clipboard(chat, _) if chat != self.chat.id => {}
+            Message::Clipboard(_, content) => {
                 match content.filter(|text| !text.trim().is_empty()) {
                     Some(text) => {
                         self.attachment = Some(model::clip_attachment(&text));
@@ -1140,6 +1134,12 @@ impl Island {
                 }
             }
             Message::AskShortcut(value) => self.draft_config.ask_shortcut = value,
+            Message::BindLegacyKey => {
+                if let Err(error) = secrets::bind_legacy_key(&self.draft_config.endpoint) {
+                    self.status = error;
+                }
+                self.refresh_key_status();
+            }
             Message::TestConnection => {
                 self.test_id += 1;
                 let id = self.test_id;
@@ -1161,7 +1161,7 @@ impl Island {
                 self.cancel();
                 self.quitting = true;
                 let save = self.persist();
-                if !self.saving {
+                if self.idle_storage() {
                     return iced::exit();
                 }
                 return save;
@@ -1466,6 +1466,7 @@ impl Island {
         self.replies.clear();
         self.finish_reveal();
         self.editing = false;
+        self.attachment = None;
         self.input.clear();
         self.status.clear();
     }
@@ -1494,6 +1495,7 @@ impl Island {
 
     fn refresh_key_status(&mut self) {
         self.key_status = secrets::key_source(&self.draft_config.endpoint);
+        self.legacy_key = secrets::has_legacy_key();
     }
 
     /// Sends `prompt` as a new turn. With `replace_last`, the last turn is dropped first
@@ -1510,6 +1512,10 @@ impl Island {
             return Task::none();
         }
         let destination = config.destination();
+        if !self.turns.is_empty() && self.chat.destination == model::UNKNOWN_DESTINATION {
+            self.status = "This chat comes from an older bloop, which didn't record where it was sent, so bloop won't send it anywhere. Start a new chat to keep going.".into();
+            return Task::none();
+        }
         if !self.turns.is_empty()
             && !self.chat.destination.is_empty()
             && self.chat.destination != destination.key()
@@ -1618,6 +1624,17 @@ impl Island {
                     )
                     .secure(true);
                 let mut column = column![input].spacing(6);
+                if status == KeySource::None && self.legacy_key {
+                    column = column.push(
+                        row![
+                            note("An older bloop saved a key without a server. Use it here?")
+                                .width(Length::Fill),
+                            self.button("Use it for this server", Variant::Ghost)
+                                .on_press(Message::BindLegacyKey),
+                        ]
+                        .align_y(Alignment::Center),
+                    );
+                }
                 if status == KeySource::Saved {
                     column = column.push(
                         row![
@@ -1649,25 +1666,14 @@ impl Island {
         if self.loading || self.storage_disabled {
             return Task::none();
         }
-        if self.saving {
-            self.save_again = true;
+        if self.db_path.is_none() {
             return Task::none();
         }
-        let Some(path) = self.db_path.clone() else {
-            return Task::none();
-        };
-        self.saving = true;
-        let (config, chat, turns) = (self.config.clone(), self.chat.clone(), self.turns.clone());
-        Task::perform(
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    storage::save(&path, &config, Some((&chat, &turns)))
-                })
-                .await
-                .map_err(|e| e.to_string())?
-            },
-            Message::Saved,
-        )
+        let chat = (!self.turns.is_empty()).then(|| (self.chat.clone(), self.turns.clone()));
+        self.queue(jobs::Job::Save {
+            config: self.config.clone(),
+            chat,
+        })
     }
 
     fn present(&mut self, event: Event) -> Task<Message> {
@@ -1874,6 +1880,11 @@ impl Island {
             return Task::none();
         };
         if self.request.is_some() {
+            return Task::none();
+        }
+        if !self.idle_storage() {
+            // Finish the queued writes first; `jobs` comes back here when they're done.
+            self.install_after_save = true;
             return Task::none();
         }
         let path = path.clone();
@@ -2958,7 +2969,7 @@ mod tests {
         let mut app = ready();
         app.quitting = true;
         app.saving = true;
-        let _ = app.update(Message::Saved(Err("disk full".into())));
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(Err("disk full".into()))));
         assert!(!app.quitting);
         assert_eq!(app.presence.state(), State::Open);
         assert!(app.storage_warning.contains("disk full"));
@@ -3172,10 +3183,13 @@ mod tests {
     #[test]
     fn clipboard_text_goes_with_the_next_prompt_once() {
         let mut app = ready();
-        let _ = app.update(Message::Clipboard(Some("   ".into())));
+        let _ = app.update(Message::Clipboard(app.chat.id, Some("   ".into())));
         assert!(app.attachment.is_none());
         assert!(!app.status.is_empty());
-        let _ = app.update(Message::Clipboard(Some("Error 0x80070005".into())));
+        let _ = app.update(Message::Clipboard(
+            app.chat.id,
+            Some("Error 0x80070005".into()),
+        ));
         assert!(app.attachment.is_some());
         let _task = app.update(Message::Send);
         assert!(app.request.is_some(), "an attachment alone can be sent");
@@ -3188,7 +3202,7 @@ mod tests {
     #[test]
     fn too_long_question_with_clipboard_is_refused() {
         let mut app = ready();
-        let _ = app.update(Message::Clipboard(Some("x".repeat(6000))));
+        let _ = app.update(Message::Clipboard(app.chat.id, Some("x".repeat(6000))));
         app.input = "q".repeat(3000);
         let _ = app.update(Message::Send);
         assert!(app.request.is_none());
@@ -3196,6 +3210,104 @@ mod tests {
             app.attachment.is_some(),
             "kept so the user can shorten the question"
         );
+    }
+
+    fn turns(user: &str) -> Vec<Turn> {
+        vec![Turn {
+            user: user.into(),
+            assistant: "ok".into(),
+            complete: true,
+        }]
+    }
+
+    #[test]
+    fn switching_chats_keeps_the_outgoing_chats_save_in_order() {
+        let mut app = ready();
+        app.storage_disabled = false;
+        app.db_path = Some(PathBuf::from("unused.sqlite3"));
+        app.saving = true; // a save is running
+        exchange(&mut app, "chat A", "final reply");
+        let a = app.chat.id;
+        let _ = app.update(Message::NewChat);
+        let _ = app.update(Message::Chat(ChatAction::Open(42)));
+        // A's finished turns are queued, and the load of chat 42 comes after them.
+        assert!(
+            matches!(&app.jobs[0], jobs::Job::Save { chat: Some((c, t)), .. }
+            if c.id == a && t[0].assistant == "final reply")
+        );
+        assert!(matches!(app.jobs.back(), Some(jobs::Job::Load(42))));
+    }
+
+    #[test]
+    fn deleting_a_chat_drops_its_queued_saves_and_waits_for_the_running_one() {
+        let mut app = ready();
+        app.storage_disabled = false;
+        app.db_path = Some(PathBuf::from("unused.sqlite3"));
+        app.saving = true;
+        exchange(&mut app, "chat A", "reply");
+        let a = app.chat.id;
+        let _ = app.update(Message::Chat(ChatAction::Delete(a)));
+        let _ = app.update(Message::Chat(ChatAction::DeleteConfirm));
+        assert_ne!(app.chat.id, a, "the notch moved to a new chat");
+        assert!(app.chats.iter().all(|c| c.id != a));
+        assert!(app.jobs.iter().all(|job| !matches!(job,
+            jobs::Job::Save { chat: Some((c, _)), .. } if c.id == a)));
+        assert!(matches!(app.jobs.back(), Some(jobs::Job::Delete(id)) if *id == a));
+    }
+
+    #[test]
+    fn quit_waits_for_queued_jobs() {
+        let mut app = ready();
+        app.storage_disabled = false;
+        app.db_path = Some(PathBuf::from("unused.sqlite3"));
+        app.saving = true;
+        let _ = app.update(Message::Quit);
+        assert!(app.quitting);
+        assert!(!app.jobs.is_empty(), "the final save waits its turn");
+    }
+
+    #[test]
+    fn new_chat_and_late_clipboard_reads_drop_the_attachment() {
+        let mut app = ready();
+        let old = app.chat.id;
+        let _ = app.update(Message::Clipboard(old, Some("private".into())));
+        exchange(&mut app, "q", "a");
+        let _ = app.update(Message::Clipboard(app.chat.id, Some("private".into())));
+        let _ = app.update(Message::NewChat);
+        assert!(app.attachment.is_none());
+        let _ = app.update(Message::Clipboard(old, Some("late".into())));
+        assert!(
+            app.attachment.is_none(),
+            "a read for another chat is ignored"
+        );
+    }
+
+    #[test]
+    fn chats_from_an_older_bloop_are_never_sent() {
+        let mut app = ready();
+        app.chat.destination = model::UNKNOWN_DESTINATION.into();
+        app.turns = turns("old private prompt");
+        app.sync_replies();
+        app.input = "more".into();
+        let _ = app.update(Message::Send);
+        let _ = app.update(Message::Retry);
+        assert!(app.request.is_none());
+        assert!(app.status.contains("older bloop"));
+    }
+
+    #[test]
+    fn a_pasted_key_never_follows_a_server_change() {
+        let mut app = ready();
+        app.draft_config.provider = Provider::OpenAi;
+        app.draft_config.endpoint = "https://a.example.com/v1".into();
+        let _ = app.update(Message::ApiKey("sk-a".into()));
+        let _ = app.update(Message::Endpoint("https://a.example.com/v2".into()));
+        assert_eq!(app.key_draft, "sk-a", "same server keeps it");
+        let _ = app.update(Message::Endpoint("https://b.example.com/v1".into()));
+        assert!(app.key_draft.is_empty());
+        let _ = app.update(Message::ApiKey("sk-a".into()));
+        let _ = app.update(Message::EditProfile(0));
+        assert!(app.key_draft.is_empty());
     }
 
     #[test]

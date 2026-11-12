@@ -150,7 +150,7 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
     config.validate()?;
     let legacy = parse_turns(&history)?;
     if !legacy.is_empty() {
-        migrate_history(&mut connection, &config, &legacy, &history)?;
+        migrate_history(&mut connection, &legacy, &history)?;
     }
     let chats = list(&connection)?;
     let current = match chats.first() {
@@ -165,17 +165,13 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
 }
 
 /// Moves the single conversation of an older bloop into `chats`, in one transaction.
-fn migrate_history(
-    connection: &mut Connection,
-    config: &Config,
-    turns: &[Turn],
-    json: &str,
-) -> Result<(), String> {
+fn migrate_history(connection: &mut Connection, turns: &[Turn], json: &str) -> Result<(), String> {
     let chat = Chat {
         id: model::new_chat_id(0),
         title: model::title_for(&turns[0].user),
         profile: 0,
-        destination: config.destination().key(),
+        // Its settings may have changed since it was sent, so where it went is unknown.
+        destination: model::UNKNOWN_DESTINATION.into(),
         updated: model::unix_seconds(),
     };
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
@@ -419,7 +415,7 @@ mod tests {
         assert_eq!(loaded.chats.len(), 1);
         let (chat, turns) = loaded.current.unwrap();
         assert_eq!(chat.title, "Old question");
-        assert_eq!(chat.destination, "local");
+        assert_eq!(chat.destination, model::UNKNOWN_DESTINATION);
         assert_eq!(turns[0].assistant, "answer");
         // A second load finds nothing left to migrate.
         assert_eq!(load(&path).unwrap().chats.len(), 1);

@@ -144,12 +144,19 @@ mouth, a bounce that fades) and Mad (slanted brows, frown, a brief tremble, an a
 - **Chats replace the single history.** A `chats` table holds one row per conversation
   (title, profile, destination, last change, turns as JSON). On first load the old
   `state.history` becomes one chat in a single transaction and is emptied, so the
-  migration runs once. Only the chat in the notch is written by the normal save (together
-  with the settings, in one transaction); rename, delete and search touch other chats
-  directly. A chat without turns is never written, so "New chat" costs nothing. Chat ids
-  are creation times in milliseconds, assigned in the UI, so a save never needs a round
-  trip to learn its id. Deleting the chat in the notch while its save is in flight waits
-  for that save, so the save cannot bring the row back.
+  migration runs once. The old schema never recorded where that history was sent (the
+  settings may have changed since), so the imported chat is marked `unknown` and bloop
+  won't send it anywhere; it can be read, exported or deleted. A chat without turns is
+  never written, so "New chat" costs nothing. Chat ids are creation times in
+  milliseconds, assigned in the UI, so a save never needs a round trip to learn its id.
+- **One storage queue.** Saves (settings plus the chat in the notch), renames, deletes and
+  loads of whole chats run one at a time, in order, each with a snapshot taken when it was
+  queued (`ui/jobs.rs`). A newer save replaces queued saves of the same chat; a delete
+  drops that chat's queued saves and renames and runs after the one in flight. So
+  switching chats can't lose the outgoing chat's last reply, an old save can't bring a
+  deleted chat back, and opening a chat reads its newest turns. Quit and Restart to update
+  wait for the queue to empty. Search reads outside the queue; it may miss a reply still
+  being saved. (Found by Codex reviewing the first version, which tracked one save.)
 - **A chat keeps its destination.** Each chat records where its first message went:
   `local` (a loopback endpoint) or `cloud:<provider or origin>`. bloop refuses to send a
   chat's history anywhere else, including Retry, which would resend an old prompt. Changing
@@ -163,11 +170,16 @@ mouth, a bounce that fades) and Mad (slanted brows, frown, a brief tremble, an a
 - **API keys follow the endpoint.** Saved keys are keyed by endpoint origin in Credential
   Manager (`bloop/api-key/<origin>`), so a profile for one server never sends the key
   saved for another. The old single key moves to the endpoint configured at first start.
-  `BLOOP_API_KEY` still applies to every endpoint, as before.
+  `BLOOP_API_KEY` still applies to every endpoint, as before. The single key an older
+  bloop saved isn't moved automatically, because the endpoint may have changed since it
+  was saved; the Model page offers to tie it to the endpoint shown, and it's never sent
+  until the user does. A key typed into the field is dropped when the provider, profile or
+  server changes, so it can't be saved for a server it wasn't pasted for.
 - **Clipboard ask** is a second global hotkey (default Ctrl+Alt+Shift+A, empty turns it
   off). It reads clipboard text only when pressed, attaches up to 6 KiB below the
   question in a code fence longer than any backtick run inside it, and shows the text and
-  the destination before anything is sent. No image capture yet: many supported models
+  the destination before anything is sent. The attachment belongs to the chat it was made
+  in: New chat, opening another chat or a late clipboard read never carries it over. No image capture yet: many supported models
   can't read images, so a screen-region feature should go through local OCR first.
 - **Markdown export** writes a chat through the standard Windows Save dialog; nothing is
   written without the user picking a file.

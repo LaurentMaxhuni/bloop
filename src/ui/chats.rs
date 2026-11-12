@@ -1,7 +1,7 @@
 //! The Chats page: every saved conversation, with search, open, rename, export and delete.
 //! Only the current chat is written by `persist`; the others change here directly.
 
-use super::{Island, Message};
+use super::{Island, Message, jobs::Job};
 use crate::{
     platform,
     presence::Event,
@@ -25,16 +25,13 @@ pub enum ChatAction {
     Results(u64, Result<Vec<(Chat, String)>, String>),
     /// Show this chat in the notch.
     Open(i64),
-    Opened(Result<(Chat, Vec<Turn>), String>),
     Rename(i64),
     RenameInput(String),
     RenameSave,
     RenameCancel,
-    Renamed(Result<(), String>),
     Delete(i64),
     DeleteConfirm,
     DeleteCancel,
-    Deleted(i64, Result<(), String>),
     Export(i64),
     Exported(Result<Option<PathBuf>, String>),
 }
@@ -107,27 +104,12 @@ impl Island {
                 if id == self.chat.id {
                     return self.show_notch();
                 }
-                let Some(path) = self.db_path.clone() else {
+                if self.chat_store().is_none() {
                     return Task::none();
-                };
-                return Task::perform(
-                    blocking(path, move |path| storage::load_chat(path, id)),
-                    |result| Message::Chat(ChatAction::Opened(result)),
-                );
-            }
-            ChatAction::Opened(result) => match result {
-                Ok((chat, turns)) if self.request.is_none() => {
-                    self.start_chat(chat.profile);
-                    self.chat = chat;
-                    self.turns = turns;
-                    self.sync_replies();
-                    self.chats_notice.clear();
-                    let scroll = self.scroll();
-                    return Task::batch([self.show_notch(), scroll]);
                 }
-                Ok(_) => {}
-                Err(error) => self.chats_notice = format!("Couldn't open that chat: {error}"),
-            },
+                // Behind any queued save, so it reads the chat's newest turns.
+                return self.queue(Job::Load(id));
+            }
             ChatAction::Rename(id) => {
                 let title = self
                     .chats
@@ -155,9 +137,9 @@ impl Island {
                     self.chats_notice = "Give the chat a name.".into();
                     return Task::none();
                 }
-                let Some(path) = self.chat_store() else {
+                if self.chat_store().is_none() {
                     return Task::none();
-                };
+                }
                 self.renaming = None;
                 self.chats_notice.clear();
                 for chat in self.chats.iter_mut().chain(
@@ -174,15 +156,7 @@ impl Island {
                     self.chat.title = title;
                     return self.persist();
                 }
-                return Task::perform(
-                    blocking(path, move |path| storage::rename_chat(path, id, &title)),
-                    |result| Message::Chat(ChatAction::Renamed(result)),
-                );
-            }
-            ChatAction::Renamed(result) => {
-                if let Err(error) = result {
-                    self.chats_notice = format!("Couldn't rename the chat: {error}");
-                }
+                return self.queue(Job::Rename(id, title));
             }
             ChatAction::Delete(id) => self.confirm_delete = Some(id),
             ChatAction::DeleteCancel => self.confirm_delete = None,
@@ -200,19 +174,11 @@ impl Island {
                     }
                     let profile = self.usable_profile(self.chat.profile);
                     self.start_chat(profile);
-                    if self.saving {
-                        // A save of this chat is in flight; delete it once that lands.
-                        self.forget_chat(id);
-                        self.delete_after_save = Some(id);
-                        return Task::none();
-                    }
                 }
-                return self.delete_chat(id);
+                // Runs after any save of this chat already under way, never before it.
+                self.forget_chat(id);
+                return self.queue(Job::Delete(id));
             }
-            ChatAction::Deleted(id, result) => match result {
-                Ok(()) => self.forget_chat(id),
-                Err(error) => self.chats_notice = format!("Couldn't delete the chat: {error}"),
-            },
             ChatAction::Export(id) => {
                 let Some(path) = self.db_path.clone() else {
                     return Task::none();
@@ -247,19 +213,30 @@ impl Island {
         Task::none()
     }
 
-    /// Deletes a chat that isn't being saved right now.
-    pub(super) fn delete_chat(&mut self, id: i64) -> Task<Message> {
-        let Some(path) = self.db_path.clone() else {
-            return Task::none();
-        };
-        self.forget_chat(id);
-        Task::perform(
-            blocking(path, move |path| storage::delete_chat(path, id)),
-            move |result| Message::Chat(ChatAction::Deleted(id, result)),
-        )
+    /// Shows a chat read by the queue in the notch, unless a reply started meanwhile.
+    pub(super) fn opened_chat(
+        &mut self,
+        result: Result<(Chat, Vec<Turn>), String>,
+    ) -> Task<Message> {
+        match result {
+            Ok((chat, turns)) if self.request.is_none() => {
+                self.start_chat(chat.profile);
+                self.chat = chat;
+                self.turns = turns;
+                self.sync_replies();
+                self.chats_notice.clear();
+                let scroll = self.scroll();
+                Task::batch([self.show_notch(), scroll])
+            }
+            Ok(_) => Task::none(),
+            Err(error) => {
+                self.chats_notice = format!("Couldn't open that chat: {error}");
+                Task::none()
+            }
+        }
     }
 
-    fn forget_chat(&mut self, id: i64) {
+    pub(super) fn forget_chat(&mut self, id: i64) {
         self.chats.retain(|c| c.id != id);
         if let Some(hits) = &mut self.chat_hits {
             hits.retain(|(c, _)| c.id != id);
@@ -346,7 +323,9 @@ impl Island {
             .into(),
         };
         let mut meta = vec![when(chat.updated, now)];
-        if !chat.destination.is_empty() {
+        if chat.destination == model::UNKNOWN_DESTINATION {
+            meta.push("From an older bloop (read-only)".into());
+        } else if !chat.destination.is_empty() {
             meta.push(Destination::from_key(&chat.destination).label().to_owned());
         }
         if let Some(name) = self.config.profile_name(chat.profile)

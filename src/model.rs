@@ -15,6 +15,10 @@ pub struct Turn {
 /// still fits in `MAX_PROMPT`.
 pub const MAX_ATTACHMENT: usize = 6 * 1024;
 
+/// `Chat::destination` of a chat imported from an older bloop, which didn't record where
+/// it was sent. Such a chat is never sent anywhere.
+pub const UNKNOWN_DESTINATION: &str = "unknown";
+
 /// A saved conversation, without its turns.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chat {
