@@ -3,7 +3,7 @@
 use iced::{
     Background, Border, Color, Font, Shadow, Theme, Vector,
     font::{Family, Weight},
-    widget::{button, container, overlay::menu, pick_list, scrollable, text_input},
+    widget::{button, container, overlay::menu, pick_list, scrollable, text_editor, text_input},
 };
 
 pub const REGULAR: Font = Font {
@@ -203,6 +203,23 @@ pub fn bare_input(t: Tokens) -> impl Fn(&Theme, text_input::Status) -> text_inpu
     move |theme, status| text_input::Style {
         border: Border::default(),
         ..input(t)(theme, status)
+    }
+}
+
+pub fn editor(t: Tokens) -> impl Fn(&Theme, text_editor::Status) -> text_editor::Style {
+    move |_, status| text_editor::Style {
+        background: Background::Color(Color::TRANSPARENT),
+        border: border(
+            if matches!(status, text_editor::Status::Focused { .. }) {
+                t.ring
+            } else {
+                t.border
+            },
+            1.0,
+        ),
+        placeholder: t.muted_foreground,
+        value: t.foreground,
+        selection: fade(t.ring, 0.45),
     }
 }
 

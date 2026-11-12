@@ -347,3 +347,19 @@ the one being edited open; `default_profile` round-trips and a dangling one load
 
 Not verified: the new icons, tooltips and profile rows weren't looked at in a running
 bloop, because a debug copy was running and a second one would only signal it.
+
+## Custom instructions (2026-11-12)
+
+Passed: `cargo fmt`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+and `cargo test` (260 passed, four existing live CLI/network tests ignored). The suite
+was rerun after boxing save-job config snapshots. The initial sandbox run could not
+access Credential Manager; the complete suite passed with normal Windows access.
+
+Covered: old config defaults, trimmed multiline round-trip, UTF-8 byte limits,
+unchanged empty system text, appended instructions and exact context-budget boundary;
+Ollama/OpenAI HTTP payloads via loopback fixtures, ChatGPT developer payload and CLI
+flattening; editor loading, edits, Save/clear, oversized draft rejection, shared
+instructions across profiles and draft reset on reopening.
+
+Not checked: appearance or interaction in a running app, or instruction-following by
+live models. No bloop app was launched; the installed copy was left running.

@@ -33,6 +33,8 @@ impl Island {
         }
         self.page = AppPage::Home;
         self.draft_config = self.config.clone();
+        self.instructions_editor =
+            iced::widget::text_editor::Content::with_text(&self.draft_config.instructions);
         self.key_draft.clear();
         self.profile_edit = super::ProfileEdit::Default;
         self.refresh_key_status();

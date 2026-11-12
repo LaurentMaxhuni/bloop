@@ -64,6 +64,41 @@ fn messages() -> Vec<ChatMessage> {
 }
 
 #[tokio::test]
+async fn custom_instructions_reach_both_http_wires() {
+    for (provider, reply) in [
+        (
+            Provider::Ollama,
+            "{\"message\":{\"content\":\"hi\"},\"done\":true}\n",
+        ),
+        (
+            Provider::OpenAi,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
+        ),
+    ] {
+        let (mut config, server) = fixture(provider, "200 OK", reply).await;
+        config.instructions = "I write Rust.\nBe brief.".into();
+        let messages = bloop::model::context(&[], "hello", &config.instructions);
+        chat(&config, &messages, |_| std::future::ready(true))
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert!(
+            body["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .ends_with("<instructions>\nI write Rust.\nBe brief.\n</instructions>")
+        );
+        assert_eq!(
+            body["messages"][1],
+            serde_json::json!({"role":"user", "content":"hello"})
+        );
+    }
+}
+
+#[tokio::test]
 async fn ollama_streams_over_real_http_and_sends_expected_request() {
     let (config, server) = fixture(
         Provider::Ollama,

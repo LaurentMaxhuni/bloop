@@ -9,15 +9,15 @@ use crate::{
 };
 use bloop::{
     config::{
-        Accent, Config, HOVER_DELAYS_MS, MAIN_PROFILE, MAX_PROFILES, NotchPosition, NotchWidth,
-        Profile, ReduceMotion, ThemeChoice,
+        Accent, Config, HOVER_DELAYS_MS, MAIN_PROFILE, MAX_INSTRUCTIONS, MAX_PROFILES,
+        NotchPosition, NotchWidth, Profile, ReduceMotion, ThemeChoice,
     },
     motion::Feel,
     update::Version,
 };
 use iced::{
     Alignment, Element, Length, Task,
-    widget::{Space, button, column, container, row, scrollable, text, toggler},
+    widget::{Space, button, column, container, row, scrollable, text, text_editor, toggler},
 };
 
 /// Sidebar width and the page content's maximum width, in logical pixels.
@@ -493,6 +493,33 @@ impl Island {
                 .size(12)
                 .color(t.muted_foreground),
             )
+            .push(field(
+                "Custom instructions",
+                column![
+                    text_editor(&self.instructions_editor)
+                        .on_action(Message::Instructions)
+                        .height(128)
+                        .padding(10)
+                        .size(14)
+                        .font(style::REGULAR)
+                        .style(style::editor(t)),
+                    row![
+                        text("Tell Bloop about yourself or how to reply. Sent with every message.")
+                            .size(12)
+                            .color(t.muted_foreground)
+                            .width(Length::Fill),
+                        text(format!("{} / {MAX_INSTRUCTIONS}", self.draft_config.instructions.len()))
+                            .size(12)
+                            .color(if self.draft_config.instructions.len() > MAX_INSTRUCTIONS {
+                                t.destructive
+                            } else {
+                                t.muted_foreground
+                            }),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(8),
+            ))
             .push(self.save_row())
             .into()
     }
@@ -743,6 +770,7 @@ impl Island {
     /// its place and the default model left alone. Checks everything first.
     pub(super) fn settings_to_save(&self) -> Result<Config, String> {
         let mut config = self.draft_config.clone();
+        config.instructions = config.instructions.trim().to_owned();
         config.profiles = self.config.profiles.clone();
         config.default_profile = self.config.default_profile;
         let id = match self.profile_edit {
@@ -802,6 +830,7 @@ impl Island {
             .config
             .with_profile(id)
             .unwrap_or_else(|| self.config.clone());
+        self.instructions_editor = text_editor::Content::with_text(&self.draft_config.instructions);
     }
 
     fn shortcut_page(&self) -> Element<'_, Message> {

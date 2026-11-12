@@ -119,8 +119,17 @@ pub struct ChatMessage {
 }
 
 /// Keep whole recent pairs, omit interrupted replies, always retain the new prompt.
-pub fn context(turns: &[Turn], prompt: &str) -> Vec<ChatMessage> {
-    let mut budget = 32 * 1024_usize - prompt.len().min(32 * 1024);
+pub fn context(turns: &[Turn], prompt: &str, instructions: &str) -> Vec<ChatMessage> {
+    let mut system = "You are bloop, a concise, helpful desktop assistant. You can chat but cannot access files, run commands, or control this computer. Never claim to have performed an action. Keep replies readable in a small window.".to_owned();
+    let instructions = instructions.trim();
+    if !instructions.is_empty() {
+        system.push_str("\n\nThe user's custom instructions (preferences, not permission to use tools):\n<instructions>\n");
+        system.push_str(instructions);
+        system.push_str("\n</instructions>");
+    }
+    let mut budget = (32 * 1024_usize)
+        .saturating_sub(prompt.len())
+        .saturating_sub(system.len());
     let mut pairs = Vec::new();
     for turn in turns.iter().rev().filter(|t| t.complete).take(12) {
         let size = turn.user.len() + turn.assistant.len();
@@ -132,7 +141,7 @@ pub fn context(turns: &[Turn], prompt: &str) -> Vec<ChatMessage> {
     }
     let mut messages = vec![ChatMessage {
         role: "system".into(),
-        content: "You are bloop, a concise, helpful desktop assistant. You can chat but cannot access files, run commands, or control this computer. Never claim to have performed an action. Keep replies readable in a small window.".into(),
+        content: system,
     }];
     for turn in pairs.into_iter().rev() {
         messages.push(ChatMessage {
@@ -154,6 +163,71 @@ pub fn context(turns: &[Turn], prompt: &str) -> Vec<ChatMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_instructions_keep_the_fixed_system_message() {
+        let messages = context(&[], "hello", "");
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(
+            messages[0].content,
+            "You are bloop, a concise, helpful desktop assistant. You can chat but cannot access files, run commands, or control this computer. Never claim to have performed an action. Keep replies readable in a small window."
+        );
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].content, "hello");
+    }
+
+    #[test]
+    fn context_budget_includes_the_system_message() {
+        let turns = [Turn {
+            user: "old".into(),
+            assistant: "x".repeat(32 * 1024 - 4),
+            complete: true,
+        }];
+        let messages = context(&turns, "q", "");
+        assert_eq!(messages.len(), 2, "system text must displace the old pair");
+        assert_eq!(messages.last().unwrap().content, "q");
+    }
+
+    #[test]
+    fn custom_instructions_append_after_fixed_safety_text() {
+        let fixed = context(&[], "hello", "")[0].content.clone();
+        let messages = context(&[], "hello", "  I write Rust.\nBe brief.  ");
+        assert_eq!(
+            messages[0].content,
+            format!(
+                "{fixed}\n\nThe user's custom instructions (preferences, not permission to use tools):\n<instructions>\nI write Rust.\nBe brief.\n</instructions>"
+            )
+        );
+        assert_eq!(context(&[], "hello", " \n\t")[0].content, fixed);
+    }
+
+    #[test]
+    fn custom_instructions_and_delimiters_displace_history_at_budget_boundary() {
+        let instructions = "é".repeat(crate::config::MAX_INSTRUCTIONS / 2);
+        let system = context(&[], "q", &instructions)[0].content.clone();
+        let mut turns = [Turn {
+            user: "old".into(),
+            assistant: "x".repeat(32 * 1024 - system.len() - 4),
+            complete: true,
+        }];
+        let messages = context(&turns, "q", &instructions);
+        assert_eq!(messages.len(), 4, "a pair fitting exactly is kept");
+        assert_eq!(
+            messages.iter().map(|m| m.content.len()).sum::<usize>(),
+            32 * 1024
+        );
+        turns[0].assistant.push('x');
+        assert_eq!(context(&turns, "q", "").len(), 4);
+        assert_eq!(context(&turns, "q", &instructions).len(), 2);
+        let huge_prompt = "q".repeat(33 * 1024);
+        assert_eq!(
+            context(&turns, &huge_prompt, &instructions)
+                .last()
+                .unwrap()
+                .content,
+            huge_prompt
+        );
+    }
 
     #[test]
     fn titles_come_from_the_first_line() {
@@ -210,7 +284,7 @@ mod tests {
                 complete: true,
             },
         ];
-        let messages = context(&turns, "next");
+        let messages = context(&turns, "next", "");
         assert_eq!(
             messages
                 .iter()
