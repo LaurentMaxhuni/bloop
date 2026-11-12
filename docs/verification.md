@@ -472,3 +472,21 @@ canvas. Not checked: the real Iced drawing in a running bloop (another copy held
 single-instance mutex), the party and wizard hats, other moods with accessories (a hop with a
 tall hat, sleepy z and mad mark beside a hat), and the Appearance page's layout at 900 px.
 
+
+## 0.5.0 release build (2026-11-12)
+
+`cargo build --release` and the full checks pass on the merged branch (104 library, 140 app,
+8 CLI, 8 diagnose, 11 transport, 9 update). The release exe was started against a scratch
+`BLOOP_DATA_DIR` with outfits seeded into its settings, and screenshots were taken:
+
+| Check | Result |
+| --- | --- |
+| Setup screen's 96 px Bloop in wizard hat, round glasses, robe, lilac coat | Pass: hat sits on the head inside the canvas, glasses frame the eyes, robe follows the body |
+| Party hat, shades, bow tie, mint coat | Pass |
+| Top hat, monocle, cape, classic coat | Pass: cape hangs behind the body |
+| App window Home page reports bloop 0.5.0 | Pass |
+
+Not checked: the Appearance page's Bloop section, the Model page (custom instructions, Paste
+key, bigger dropdowns) and the open notch (context selector, header and greeting Bloop,
+prompt recall, Ctrl+N). Synthetic mouse clicks and hover didn't reach the window, and
+AGENTS.md says not to drive the desktop, so these need a person.
