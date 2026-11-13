@@ -1,6 +1,3 @@
-// TEMPORARY (Linux port in progress): removed once every Linux function is wired up.
-#![cfg_attr(target_os = "linux", allow(dead_code))]
-
 #[cfg(any(target_os = "linux", test))]
 pub mod linux;
 

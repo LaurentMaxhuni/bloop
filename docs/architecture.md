@@ -92,8 +92,19 @@ the local chat MVP. Future model proposals must pass a typed registry and code-o
 permissions; model confidence never grants permission. No shell/tool execution in
 this milestone.
 
-Performance targets are provisional. Windows overlay is the supported milestone;
-Linux tray, compositor placement, and shortcuts require separate verification.
+Performance targets are provisional.
+
+Linux (2026-11-13, spec `docs/superpowers/specs/2026-11-13-linux-port-design.md`): bloop removes
+`WAYLAND_DISPLAY` at the top of `main` so winit uses X11, which on Wayland desktops means
+XWayland. Only X11 lets the notch keep itself on top and pick its position on every desktop;
+native layer-shell would be sharper on KDE and wlroots but Iced can't create those surfaces and
+GNOME has none. Child processes (links, CLIs, the relaunch after an update) get the original
+`WAYLAND_DISPLAY` back. Everything lives in `src/platform/linux/`: `x11` (window type, SHAPE,
+RandR placement, EWMH fullscreen), `tray` (StatusNotifierItem via ksni), `shortcuts`
+(global-hotkey on X11, the GlobalShortcuts portal on Wayland), `portal` (theme and motion,
+Save dialog, links), `desktop` (autostart and launcher entries, tiling rules), `instance`
+(single instance over a Unix socket). Secrets use the Secret Service through oo7; the ChatGPT
+session is a keyring item there, never in SQLite. Updates replace the AppImage in place.
 The first measured GPU baseline exceeds the provisional 50 MB target. A future
 software compositor must preserve alpha correctly before replacing DirectX.
 

@@ -501,3 +501,36 @@ delete, and never below a saved profile's id on load), and `next_profile_id` cou
 (104 library, 141 app, integration suites). Limitation: a config saved by 0.5.0 or older
 after deleting its top profile has no record of that id; the first delete with this build
 starts recording.
+
+## Linux port (2026-11-13)
+
+Automated: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`
+pass on Windows (local) and on Ubuntu 22.04 (CI job `linux`), and the same job builds the
+AppImage. Pure Linux logic (backend choice, shape rectangles, scale factor, monitor choice and
+work areas, shortcut triggers, tiling detection, desktop-file quoting, theme values, file URIs,
+update decisions, keyring vault) is also tested on Windows.
+
+Manual checks per desktop. Values: pass, fail, not possible on this desktop, or not yet checked.
+None of these have been run on real desktops yet.
+
+| Check | GNOME Wayland | KDE Plasma Wayland | Hyprland or Sway | Xfce (X11) |
+|---|---|---|---|---|
+| Notch at Centre / Left / Right | not yet checked | not yet checked | not yet checked | not yet checked |
+| Stays on top of normal windows | not yet checked | not yet checked | not yet checked | not yet checked |
+| Shape and click-through outside it | not yet checked | not yet checked | not yet checked | not yet checked |
+| Not in taskbar / Alt-Tab | not yet checked | not yet checked | not yet checked | not yet checked |
+| Hides for a fullscreen X11 app | not yet checked | not yet checked | not yet checked | not yet checked |
+| Hidden by a fullscreen Wayland app | not yet checked | not yet checked | not yet checked | not possible on this desktop |
+| Tray icon and menu | not yet checked | not yet checked | not yet checked | not yet checked |
+| Toggle shortcut | not yet checked | not yet checked | not yet checked | not yet checked |
+| Ask-about-clipboard shortcut | not yet checked | not yet checked | not yet checked | not yet checked |
+| Prompt has focus after the shortcut | not yet checked | not yet checked | not yet checked | not yet checked |
+| Second launch, `--toggle`, `--ask` | not yet checked | not yet checked | not yet checked | not yet checked |
+| Start on login | not yet checked | not yet checked | not yet checked | not yet checked |
+| API key and ChatGPT sign-in in the keyring | not yet checked | not yet checked | not yet checked | not yet checked |
+| Light/dark follows the system | not yet checked | not yet checked | not yet checked | not yet checked |
+| Export chat (Save dialog) | not yet checked | not yet checked | not yet checked | not yet checked |
+| Links open in the browser | not yet checked | not yet checked | not yet checked | not yet checked |
+| Self-update of the AppImage | not yet checked | not yet checked | not yet checked | not yet checked |
+| Tiling rule card and rule work | not possible on this desktop | not possible on this desktop | not yet checked | not possible on this desktop |
+

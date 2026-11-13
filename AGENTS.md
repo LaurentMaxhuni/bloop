@@ -4,10 +4,10 @@ Bloop is a lightweight, local-first AI desktop companion that lives in a small n
 
 ## Technology
 - Rust for the application core.
-- Iced 0.14 for the native GUI (DirectX 12 via wgpu). Slint was evaluated and rejected; see `docs/architecture.md`.
+- Iced 0.14 for the native GUI (wgpu: DirectX 12 on Windows, Vulkan or OpenGL ES on Linux). Slint was evaluated and rejected; see `docs/architecture.md`.
 - SQLite for persistent data when needed.
 - Local AI through OpenAI-compatible HTTP APIs (plus Ollama's API); the Claude Code and Codex CLIs in chat-only mode; ChatGPT plans through Sign in with ChatGPT and the Responses API.
-- Windows first, Linux support later.
+- Windows first; Linux runs through X11 (XWayland on Wayland desktops). Linux code lives in `src/platform/linux/` behind `cfg(target_os = "linux")` and must not change Windows behaviour.
 
 ## Hard constraints
 - No Electron, React, Node.js, Chromium, or embedded webviews.
