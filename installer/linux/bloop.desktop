@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=bloop
+Comment=A local-first AI notch
+Exec=bloop
+Icon=bloop
+Terminal=false
+Categories=Utility;
+StartupWMClass=bloop
