@@ -1395,24 +1395,27 @@ pub fn launch_installer(path: &std::path::Path) -> Result<(), String> {
         replace(path, &appimage).map_err(|e| format!("Couldn't replace bloop: {e}"))?;
         let mut command = relaunch_command(&appimage, std::process::id());
         linux::child_env(&mut command);
-        return command.spawn().map(drop).map_err(|e| e.to_string());
+        command.spawn().map(drop).map_err(|e| e.to_string())
     }
-    #[cfg(windows)]
+    #[cfg(not(target_os = "linux"))]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-        if bloop::update::installer_command(path)
-            .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
-            .spawn()
-            .is_ok()
+        #[cfg(windows)]
         {
-            return Ok(());
+            use std::os::windows::process::CommandExt;
+            const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+            if bloop::update::installer_command(path)
+                .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
         }
+        bloop::update::installer_command(path)
+            .spawn()
+            .map(drop)
+            .map_err(|e| e.to_string())
     }
-    bloop::update::installer_command(path)
-        .spawn()
-        .map(drop)
-        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
