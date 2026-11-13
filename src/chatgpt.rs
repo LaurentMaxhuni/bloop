@@ -104,10 +104,9 @@ impl Session {
 
 impl Store {
     fn load() -> Result<Self, String> {
-        let Some(mut protected) = crate::storage::load_chatgpt()? else {
+        let Some(mut data) = crate::secrets::load_chatgpt_session()? else {
             return Ok(Self::default());
         };
-        let mut data = crate::secrets::chatgpt_blob(&mut protected, false)?;
         let result = serde_json::from_slice(&data)
             .map_err(|_| "Could not read the saved ChatGPT account.".into());
         data.fill(0);
@@ -117,9 +116,9 @@ impl Store {
     fn save(&self) -> Result<(), String> {
         let mut data = serde_json::to_vec(self)
             .map_err(|_| "Could not encode the ChatGPT account.".to_owned())?;
-        let protected = crate::secrets::chatgpt_blob(&mut data, true);
+        let saved = crate::secrets::save_chatgpt_session(&mut data);
         data.fill(0);
-        crate::storage::save_chatgpt(&protected?)
+        saved
     }
 
     fn status(&self) -> AccountStatus {

@@ -1,4 +1,5 @@
-//! Windows protection for provider credentials.
+//! Saved provider keys and the ChatGPT sign-in: Windows Credential Manager and DPAPI, or the
+//! Secret Service (GNOME Keyring, KWallet, KeePassXC) on Linux. Never plain text.
 
 /// Where the key in use comes from, for the Settings status line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,7 +11,6 @@ pub enum KeySource {
 
 /// Where keys were saved before they were tied to an endpoint.
 const LEGACY_TARGET: &str = "bloop/api-key";
-#[cfg_attr(not(windows), allow(dead_code))]
 const MAX_KEY: usize = 4096;
 
 /// Saved keys belong to one endpoint origin (scheme, host and port), so a model profile
@@ -125,9 +125,156 @@ pub(crate) fn chatgpt_blob(bytes: &mut [u8], encrypt: bool) -> Result<Vec<u8>, S
     }
 }
 
-#[cfg(not(windows))]
-pub(crate) fn chatgpt_blob(_bytes: &mut [u8], _encrypt: bool) -> Result<Vec<u8>, String> {
-    Err("ChatGPT sign-in is available on Windows.".into())
+/// Shown when Linux has no usable keyring (none running, or the unlock prompt was dismissed).
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+pub(crate) const NO_KEYRING: &str = "bloop needs a keyring to save sign-ins (GNOME Keyring, KWallet or KeePassXC). Install or unlock one and try again.";
+
+/// Where the ChatGPT session lives in a keyring.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+const CHATGPT_TARGET: &str = "bloop/chatgpt";
+
+/// A secret store addressed by target name.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+trait Vault {
+    fn get(&self, target: &str) -> Result<Option<Vec<u8>>, String>;
+    /// `None` removes the secret (a missing one is fine).
+    fn set(&self, target: &str, value: Option<&[u8]>) -> Result<(), String>;
+}
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn read_with(vault: &dyn Vault, target: &str) -> Option<String> {
+    vault
+        .get(target)
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .filter(|key| !key.trim().is_empty())
+}
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn write_with(vault: &dyn Vault, target: &str, key: Option<&str>) -> Result<(), String> {
+    match key.map(str::trim).filter(|k| !k.is_empty()) {
+        None => vault.set(target, None),
+        Some(key) if key.len() > MAX_KEY => Err("The key is too long (4 KiB at most).".into()),
+        Some(key) => vault.set(target, Some(key.as_bytes())),
+    }
+}
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn save_session_with(vault: &dyn Vault, data: &[u8]) -> Result<(), String> {
+    vault.set(CHATGPT_TARGET, Some(data))
+}
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn load_session_with(vault: &dyn Vault) -> Result<Option<Vec<u8>>, String> {
+    vault.get(CHATGPT_TARGET)
+}
+
+/// Saves the ChatGPT session: DPAPI-protected in bloop's database on Windows, a keyring item
+/// on Linux (never in the database there).
+pub(crate) fn save_chatgpt_session(data: &mut [u8]) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let protected = chatgpt_blob(data, true)?;
+        crate::storage::save_chatgpt(&protected)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        save_session_with(&linux::Keyring, data)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = data;
+        Err("ChatGPT sign-in isn't available on this platform.".into())
+    }
+}
+
+/// Loads the ChatGPT session saved by [`save_chatgpt_session`].
+pub(crate) fn load_chatgpt_session() -> Result<Option<Vec<u8>>, String> {
+    #[cfg(windows)]
+    {
+        let Some(mut protected) = crate::storage::load_chatgpt()? else {
+            return Ok(None);
+        };
+        chatgpt_blob(&mut protected, false).map(Some)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        load_session_with(&linux::Keyring)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        Ok(None)
+    }
+}
+
+/// The Secret Service through `oo7`, one short-lived connection per call on its own thread,
+/// so it works from any context (UI thread, async task or blocking worker).
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::{NO_KEYRING, Vault};
+
+    pub struct Keyring;
+
+    fn keyring_error(error: oo7::Error) -> String {
+        tracing::warn!("keyring unavailable: {error}");
+        NO_KEYRING.into()
+    }
+
+    fn blocking<T: Send + 'static>(
+        work: impl Future<Output = Result<T, String>> + Send + 'static,
+    ) -> Result<T, String> {
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?
+                .block_on(work)
+        })
+        .join()
+        .unwrap_or_else(|_| Err(NO_KEYRING.into()))
+    }
+
+    async fn open() -> Result<oo7::Keyring, String> {
+        let keyring = oo7::Keyring::new().await.map_err(keyring_error)?;
+        keyring.unlock().await.map_err(keyring_error)?;
+        Ok(keyring)
+    }
+
+    impl Vault for Keyring {
+        fn get(&self, target: &str) -> Result<Option<Vec<u8>>, String> {
+            let target = target.to_owned();
+            blocking(async move {
+                let keyring = open().await?;
+                let attributes = [("application", "bloop"), ("target", target.as_str())];
+                let items = keyring
+                    .search_items(&attributes)
+                    .await
+                    .map_err(keyring_error)?;
+                let Some(item) = items.first() else {
+                    return Ok(None);
+                };
+                let secret = item.secret().await.map_err(keyring_error)?;
+                Ok(Some(secret.as_bytes().to_vec()))
+            })
+        }
+
+        fn set(&self, target: &str, value: Option<&[u8]>) -> Result<(), String> {
+            let target = target.to_owned();
+            let value = value.map(<[u8]>::to_vec);
+            blocking(async move {
+                let keyring = open().await?;
+                let attributes = [("application", "bloop"), ("target", target.as_str())];
+                match value {
+                    None => keyring.delete(&attributes).await.map_err(keyring_error),
+                    Some(bytes) => keyring
+                        .create_item(&format!("bloop: {target}"), &attributes, bytes, true)
+                        .await
+                        .map_err(keyring_error),
+                }
+            })
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -209,12 +356,22 @@ fn write(target: &str, key: Option<&str>) -> Result<(), String> {
         .map_err(|e| format!("Could not save the key: {}", e.message()))
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn read(target: &str) -> Option<String> {
+    read_with(&linux::Keyring, target)
+}
+
+#[cfg(target_os = "linux")]
+fn write(target: &str, key: Option<&str>) -> Result<(), String> {
+    write_with(&linux::Keyring, target, key)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn read(_target: &str) -> Option<String> {
     None
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn write(_target: &str, _key: Option<&str>) -> Result<(), String> {
     Err("Saving keys is only available on Windows; set BLOOP_API_KEY instead.".into())
 }
@@ -276,5 +433,75 @@ mod tests {
         let mut protected = chatgpt_blob(&mut original, true).unwrap();
         assert_ne!(original, protected);
         assert_eq!(chatgpt_blob(&mut protected, false).unwrap(), original);
+    }
+}
+
+#[cfg(test)]
+mod vault_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct FakeVault(Mutex<HashMap<String, Vec<u8>>>);
+
+    impl Vault for FakeVault {
+        fn get(&self, target: &str) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.0.lock().unwrap().get(target).cloned())
+        }
+
+        fn set(&self, target: &str, value: Option<&[u8]>) -> Result<(), String> {
+            let mut map = self.0.lock().unwrap();
+            match value {
+                Some(bytes) => map.insert(target.into(), bytes.to_vec()),
+                None => map.remove(target),
+            };
+            Ok(())
+        }
+    }
+
+    struct NoKeyring;
+
+    impl Vault for NoKeyring {
+        fn get(&self, _: &str) -> Result<Option<Vec<u8>>, String> {
+            Err(NO_KEYRING.into())
+        }
+
+        fn set(&self, _: &str, _: Option<&[u8]>) -> Result<(), String> {
+            Err(NO_KEYRING.into())
+        }
+    }
+
+    #[test]
+    fn vault_round_trip() {
+        let vault = FakeVault::default();
+        write_with(&vault, "t", Some("  sk-abc  ")).unwrap();
+        assert_eq!(read_with(&vault, "t").as_deref(), Some("sk-abc"));
+        write_with(&vault, "t", Some("   ")).unwrap();
+        assert_eq!(read_with(&vault, "t"), None, "blank removes");
+        assert!(write_with(&vault, "t", Some(&"k".repeat(4097))).is_err());
+    }
+
+    #[test]
+    fn chatgpt_session_goes_to_the_vault() {
+        let vault = FakeVault::default();
+        let session = vec![b'x'; 5000];
+        save_session_with(&vault, &session).unwrap();
+        assert_eq!(load_session_with(&vault).unwrap(), Some(session));
+        assert_eq!(
+            vault.0.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
+            [CHATGPT_TARGET]
+        );
+    }
+
+    #[test]
+    fn keyring_error_copy() {
+        assert_eq!(
+            write_with(&NoKeyring, "t", Some("sk")).unwrap_err(),
+            NO_KEYRING
+        );
+        assert_eq!(save_session_with(&NoKeyring, b"x").unwrap_err(), NO_KEYRING);
+        assert_eq!(read_with(&NoKeyring, "t"), None);
+        assert!(NO_KEYRING.contains("keyring"));
     }
 }

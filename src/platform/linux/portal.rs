@@ -20,6 +20,32 @@ pub fn reduce_motion(portal: Option<u32>, gnome_animations: Option<bool>) -> boo
     }
 }
 
+/// A local `file://` URI (as the file chooser portal returns it) as a path.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn file_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let path = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !path.starts_with('/') {
+        return None;
+    }
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(decoded)
+        .ok()
+        .map(std::path::PathBuf::from)
+}
+
 /// `xdg-open <url>`: the URL is one argument, never parsed by a shell.
 pub fn xdg_open_command(url: &str) -> std::process::Command {
     let mut command = std::process::Command::new("xdg-open");
@@ -108,7 +134,10 @@ mod io {
                 .await
                 .map_err(|_| "No file dialog is available on this desktop.".to_owned())?;
             match request.response() {
-                Ok(files) => Ok(files.uris().first().and_then(|uri| uri.to_file_path().ok())),
+                Ok(files) => Ok(files
+                    .uris()
+                    .first()
+                    .and_then(|uri| super::file_uri_to_path(uri.as_str()))),
                 Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => Ok(None),
                 Err(error) => Err(format!("The Save dialog failed: {error}")),
             }
@@ -172,6 +201,22 @@ mod tests {
         assert!(!reduce_motion(Some(0), Some(false)));
         assert!(reduce_motion(None, Some(false)), "GNOME animations off");
         assert!(!reduce_motion(None, None));
+    }
+
+    #[test]
+    fn file_uris_become_paths() {
+        use std::path::PathBuf;
+        assert_eq!(
+            file_uri_to_path("file:///home/a%20b/chat%C3%A9.md"),
+            Some(PathBuf::from("/home/a b/chat\u{e9}.md"))
+        );
+        assert_eq!(
+            file_uri_to_path("file://localhost/tmp/x.md"),
+            Some(PathBuf::from("/tmp/x.md"))
+        );
+        assert_eq!(file_uri_to_path("https://example.com/x"), None);
+        assert_eq!(file_uri_to_path("file:///bad%zz"), None);
+        assert_eq!(file_uri_to_path("file://otherhost/x"), None);
     }
 
     #[test]
