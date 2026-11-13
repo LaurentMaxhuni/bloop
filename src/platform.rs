@@ -1192,6 +1192,7 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
 }
 
 /// The Run-key command: autostart launches quietly, without opening the app window.
+#[cfg(any(windows, test))]
 fn run_command(exe: &std::path::Path) -> String {
     format!("\"{}\" --background", exe.display())
 }
@@ -1200,6 +1201,7 @@ fn run_command(exe: &std::path::Path) -> String {
 /// entry (`"<exe>"`). Absent means autostart is off; a value naming another exe belongs to
 /// another copy (the installed one, when this is a dev build) and is left alone, or every
 /// copy launched once would take over sign-in and the installed copy would stop updating.
+#[cfg(any(windows, test))]
 fn needs_migration(current: Option<&str>, exe: &std::path::Path) -> bool {
     let legacy = format!("\"{}\"", exe.display());
     current.is_some_and(|value| value.trim().eq_ignore_ascii_case(&legacy))
