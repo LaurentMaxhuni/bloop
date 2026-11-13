@@ -627,7 +627,11 @@ impl Island {
     pub fn subscription(&self) -> Subscription<Message> {
         let mut events = vec![
             Subscription::run(platform::events).map(Message::Platform),
-            Subscription::run(platform::open_requests).map(|()| Message::OpenWindow),
+            Subscription::run(platform::open_requests).map(|request| match request {
+                bloop::launch::Request::Open => Message::OpenWindow,
+                bloop::launch::Request::Toggle => Message::Toggle,
+                bloop::launch::Request::Ask => Message::AskClipboard,
+            }),
             window::close_requests().map(Message::CloseRequested),
             window::close_events().map(Message::WindowClosed),
             iced::event::listen_with(|event, status, id| match event {

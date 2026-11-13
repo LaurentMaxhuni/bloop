@@ -751,10 +751,30 @@ pub struct Instance {
     handle: windows::Win32::Foundation::HANDLE,
     #[cfg(windows)]
     open_event: Option<windows::Win32::Foundation::HANDLE>,
+    /// The socket's folder, when this copy owns the instance socket.
+    #[cfg(target_os = "linux")]
+    socket_dir: Option<std::path::PathBuf>,
+}
+
+/// The instance socket's listener, handed to [`open_requests`].
+#[cfg(target_os = "linux")]
+static LISTENER: std::sync::Mutex<Option<std::os::unix::net::UnixListener>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(target_os = "linux")]
+fn linux_socket_dir() -> std::path::PathBuf {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from);
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    linux::instance::socket_dir(runtime.as_deref(), uid)
 }
 
 impl Drop for Instance {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(dir) = &self.socket_dir {
+            linux::instance::remove(dir);
+        }
         #[cfg(windows)]
         // SAFETY: both handles are ours (CreateMutexW / CreateEventW) and closed exactly once here.
         unsafe {
@@ -777,14 +797,41 @@ pub fn single_instance() -> Option<Instance> {
     {
         instance_named(MUTEX_NAME, OPEN_EVENT_NAME)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        let dir = linux_socket_dir();
+        match linux::instance::bind(&dir) {
+            Ok(Some(listener)) => {
+                if let Ok(mut slot) = LISTENER.lock() {
+                    *slot = Some(listener);
+                }
+                Some(Instance {
+                    socket_dir: Some(dir),
+                })
+            }
+            Ok(None) => None,
+            Err(error) => {
+                // Run anyway: a broken socket must not stop bloop from starting.
+                tracing::warn!("single-instance socket unavailable: {error}");
+                Some(Instance { socket_dir: None })
+            }
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Some(Instance {})
     }
 }
 
-/// Asks the running bloop to open its app window (best effort).
-pub fn signal_running_copy() {
+/// Passes this launch's request to the running bloop (best effort). Windows always opens the
+/// app window, as before.
+pub fn signal_running_copy(request: bloop::launch::Request) {
+    #[cfg(target_os = "linux")]
+    if let Err(error) = linux::instance::send(&linux_socket_dir(), request) {
+        tracing::warn!("could not reach the running copy: {error}");
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = request;
     #[cfg(windows)]
     {
         use windows::Win32::{
@@ -823,19 +870,40 @@ pub fn signal_running_copy() {
 }
 
 /// Yields `()` each time a second launch asks this copy to open its window.
-pub fn open_requests() -> impl iced::futures::Stream<Item = ()> {
+pub fn open_requests() -> impl iced::futures::Stream<Item = bloop::launch::Request> {
     iced::stream::channel(4, async |mut output| {
         #[cfg(windows)]
         {
             let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
             std::thread::spawn(move || wait_for_open_requests(sender));
             while receiver.recv().await.is_some() {
-                if output.send(()).await.is_err() {
+                if output.send(bloop::launch::Request::Open).await.is_err() {
                     break;
                 }
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let listener = LISTENER.lock().ok().and_then(|mut slot| slot.take());
+            if let Some(listener) = listener {
+                let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+                std::thread::spawn(move || {
+                    for stream in listener.incoming().flatten() {
+                        if let Some(request) = linux::instance::receive(stream)
+                            && sender.send(request).is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                while let Some(request) = receiver.recv().await {
+                    if output.send(request).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = &mut output;
         }

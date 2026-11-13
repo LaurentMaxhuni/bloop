@@ -7,6 +7,39 @@ pub enum Launch {
     Manual,
     /// Started with `--background`, e.g. by login autostart.
     Background,
+    /// Started with `--toggle`: show or collapse the running copy's notch.
+    Toggle,
+    /// Started with `--ask`: ask the running copy about the clipboard.
+    Ask,
+}
+
+/// What a later launch asks the running copy to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+    Open,
+    Toggle,
+    Ask,
+}
+
+impl Request {
+    /// The one-line wire form sent to the running copy.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Toggle => "toggle",
+            Self::Ask => "ask",
+        }
+    }
+
+    /// Reads a wire line; anything else is ignored.
+    pub fn parse(line: &str) -> Option<Self> {
+        match line.trim() {
+            "open" => Some(Self::Open),
+            "toggle" => Some(Self::Toggle),
+            "ask" => Some(Self::Ask),
+            _ => None,
+        }
+    }
 }
 
 /// Which screen the app opens to.
@@ -17,10 +50,17 @@ pub enum Startup {
     NotchOnly,
 }
 
-/// `Background` if any argument after the program path is `--background`; otherwise `Manual`.
+/// `Background` if any argument after the program path is `--background`; else `Toggle` or
+/// `Ask` for `--toggle` / `--ask`; otherwise `Manual`.
 pub fn launch_kind(args: impl IntoIterator<Item = String>) -> Launch {
-    if args.into_iter().skip(1).any(|a| a == "--background") {
+    let args: Vec<String> = args.into_iter().skip(1).collect();
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    if has("--background") {
         Launch::Background
+    } else if has("--toggle") {
+        Launch::Toggle
+    } else if has("--ask") {
+        Launch::Ask
     } else {
         Launch::Manual
     }
@@ -31,14 +71,24 @@ pub fn launch_kind(args: impl IntoIterator<Item = String>) -> Launch {
 pub fn startup(launch: Launch, onboarded: bool) -> Startup {
     match (onboarded, launch) {
         (false, _) => Startup::Onboarding,
-        (true, Launch::Manual) => Startup::Dashboard,
+        (true, Launch::Manual | Launch::Toggle | Launch::Ask) => Startup::Dashboard,
         (true, Launch::Background) => Startup::NotchOnly,
     }
 }
 
-/// Only a manual launch tells an already-running copy to show its window.
+/// What this launch asks an already-running copy to do; a background launch asks nothing.
+pub fn request(launch: Launch) -> Option<Request> {
+    match launch {
+        Launch::Manual => Some(Request::Open),
+        Launch::Background => None,
+        Launch::Toggle => Some(Request::Toggle),
+        Launch::Ask => Some(Request::Ask),
+    }
+}
+
+/// Only a launch with a request tells an already-running copy anything.
 pub fn signals_running_copy(launch: Launch) -> bool {
-    launch == Launch::Manual
+    request(launch).is_some()
 }
 
 #[cfg(test)]
@@ -87,5 +137,26 @@ mod tests {
     fn only_manual_launches_signal() {
         assert!(signals_running_copy(Launch::Manual));
         assert!(!signals_running_copy(Launch::Background));
+    }
+
+    #[test]
+    fn toggle_and_ask_flags() {
+        assert_eq!(launch_kind(args(&["bloop", "--toggle"])), Launch::Toggle);
+        assert_eq!(launch_kind(args(&["bloop", "--ask"])), Launch::Ask);
+        assert_eq!(
+            launch_kind(args(&["bloop", "--toggle", "--background"])),
+            Launch::Background
+        );
+    }
+
+    #[test]
+    fn requests_per_launch() {
+        assert_eq!(request(Launch::Manual), Some(Request::Open));
+        assert_eq!(request(Launch::Background), None);
+        assert_eq!(request(Launch::Toggle), Some(Request::Toggle));
+        assert_eq!(request(Launch::Ask), Some(Request::Ask));
+        assert_eq!(startup(Launch::Ask, true), Startup::Dashboard);
+        assert_eq!(startup(Launch::Toggle, false), Startup::Onboarding);
+        assert!(signals_running_copy(Launch::Toggle));
     }
 }
