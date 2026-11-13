@@ -57,7 +57,11 @@ impl Island {
         let t = self.tokens();
         let mut control = column![
             toggler(self.autostart)
-                .label("Start with Windows")
+                .label(if cfg!(target_os = "linux") {
+                    "Start on login"
+                } else {
+                    "Start with Windows"
+                })
                 .text_size(14)
                 .on_toggle(Message::SetAutostart),
         ]

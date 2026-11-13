@@ -1126,7 +1126,11 @@ pub fn autostart() -> bool {
     {
         run_value(RUN_KEY).is_some()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::desktop::autostart()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         false
     }
@@ -1137,7 +1141,11 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
     {
         set_run_value(RUN_KEY, enable)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::desktop::set_autostart(enable)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = enable;
         Err("Start with Windows is only available on Windows.".into())
@@ -1163,6 +1171,11 @@ pub fn migrate_autostart() {
     #[cfg(windows)]
     if let Err(error) = migrate_run_value(RUN_KEY) {
         tracing::warn!("could not migrate the autostart entry: {error}");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::desktop::migrate_autostart();
+        linux::desktop::ensure_launcher_entry();
     }
 }
 

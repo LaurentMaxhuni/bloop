@@ -76,6 +76,13 @@ mod run {
     /// Applies shortcut commands for the rest of the session.
     pub async fn run(sender: UnboundedSender<Event>, inbox: UnboundedReceiver<Command>) {
         let session = super::super::session();
+        // Unsandboxed apps have no app ID unless they register one; GNOME's portal needs it.
+        // Same D-Bus connection as the portal calls below, so it must run here.
+        if let Ok(id) = super::super::desktop::APP_ID.parse()
+            && let Err(error) = ashpd::register_host_app(id).await
+        {
+            tracing::debug!("app ID registration unavailable: {error}");
+        }
         let portal = match backend(session, true) {
             Backend::Portal => portal().await,
             _ => None,
