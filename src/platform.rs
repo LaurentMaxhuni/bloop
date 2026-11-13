@@ -224,13 +224,20 @@ pub fn events() -> impl iced::futures::Stream<Item = Event> {
                 }
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         {
-            let _ = output
-                .send(Event::Warning(
-                    "Linux tray and global shortcut are not implemented yet.".into(),
-                ))
-                .await;
+            if linux::session() == linux::Session::WaylandOnly {
+                let _ = output
+                    .send(Event::Warning(
+                        "Install XWayland for the notch to stay on top.".into(),
+                    ))
+                    .await;
+            }
+            std::future::pending::<()>().await;
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            let _ = &mut output;
             std::future::pending::<()>().await;
         }
     })
@@ -550,7 +557,11 @@ pub fn fullscreen_active() -> bool {
             .contains(&state)
         })
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::x11::fullscreen_active()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         false
     }
@@ -566,7 +577,7 @@ pub enum Target {
     Active,
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 #[derive(Debug, PartialEq, Eq)]
 struct PhysicalRect {
     x: i32,
@@ -575,7 +586,7 @@ struct PhysicalRect {
     height: i32,
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn physical_rect(
     area: [i32; 4],
     scale: f32,
@@ -702,7 +713,15 @@ pub fn place_on(
             }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // The pointer is only fresh under XWayland while it is over an X11 window, so Wayland
+        // sessions keep the notch on its current monitor.
+        let use_pointer =
+            matches!(target, Target::Active) && linux::session() == linux::Session::X11;
+        linux::x11::place(window, canvas, position, use_pointer);
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     let _ = (window, canvas, position, target);
 }
 
@@ -747,7 +766,17 @@ pub fn place(size: Size, position: NotchPosition) -> Option<Point> {
         // Flush with the top edge so it reads as a notch.
         Some(Point::new(x, area.top as f32 / scale))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        let ([left, top, right, _bottom], _) = linux::x11::primary_area()?;
+        let x = match position {
+            NotchPosition::Centre => (left + right) / 2.0 - size.width / 2.0,
+            NotchPosition::Left => left + EDGE_INSET,
+            NotchPosition::Right => right - EDGE_INSET - size.width,
+        };
+        Some(Point::new(x, top))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (size, position);
         None
