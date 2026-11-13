@@ -1,6 +1,7 @@
 //! Linux implementations of the `platform` functions. Pure helpers compile on every OS under
 //! `cfg(test)` so their tests run on Windows too; code that talks to the desktop is Linux-only.
 
+pub mod desktop;
 #[cfg(target_os = "linux")]
 pub mod icon;
 #[cfg(target_os = "linux")]
@@ -8,6 +9,9 @@ pub mod instance;
 pub mod monitors;
 pub mod session;
 pub mod shape;
+pub mod shortcuts;
+#[cfg(target_os = "linux")]
+pub mod tray;
 #[cfg(target_os = "linux")]
 pub mod x11;
 

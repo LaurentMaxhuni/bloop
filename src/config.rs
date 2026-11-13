@@ -249,6 +249,8 @@ pub struct Config {
     /// The highest profile id ever handed out. Ids are never reused, so a chat that kept a
     /// deleted profile's id can't land on a newer, unrelated profile.
     pub last_profile_id: u32,
+    /// Linux tiling desktops: the user dismissed the "keep the notch on top" rule card.
+    pub tiling_rule_dismissed: bool,
 }
 
 /// A named provider, endpoint and model to switch to from the notch.
@@ -349,6 +351,7 @@ struct ConfigFields {
     profiles: Vec<Profile>,
     default_profile: u32,
     last_profile_id: u32,
+    tiling_rule_dismissed: bool,
 }
 
 impl Default for ConfigFields {
@@ -375,6 +378,7 @@ impl Default for ConfigFields {
             profiles: c.profiles,
             default_profile: c.default_profile,
             last_profile_id: c.last_profile_id,
+            tiling_rule_dismissed: c.tiling_rule_dismissed,
         }
     }
 }
@@ -421,6 +425,7 @@ impl From<StoredConfig> for Config {
                 .map(|p| p.id)
                 .fold(f.last_profile_id, u32::max),
             profiles: f.profiles,
+            tiling_rule_dismissed: f.tiling_rule_dismissed,
         }
     }
 }
@@ -449,6 +454,7 @@ impl Default for Config {
             profiles: Vec::new(),
             default_profile: 0,
             last_profile_id: 0,
+            tiling_rule_dismissed: false,
         }
     }
 }
@@ -719,6 +725,13 @@ impl Look {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tiling_rule_not_dismissed_by_default() {
+        assert!(!crate::config::Config::default().tiling_rule_dismissed);
+        let old: crate::config::Config = serde_json::from_str("{}").unwrap();
+        assert!(!old.tiling_rule_dismissed);
+    }
+
     #[test]
     fn context_defaults_and_round_trips() {
         use super::{Config, ContextMode};

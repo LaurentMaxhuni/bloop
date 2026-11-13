@@ -210,6 +210,11 @@ pub enum Message {
     RemoveKey,
     SetLight(bool),
     SetAutostart(bool),
+    /// Linux tiling desktops: copy the window rule that floats the notch.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    CopyTilingRule(String),
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    DismissTilingRule,
     ShowSetup,
     /// The icon font finished loading (true) or failed (false: keep word labels).
     FontLoaded(bool),
@@ -274,6 +279,10 @@ pub struct Island {
     recall: Option<usize>,
     status: String,
     desktop_warning: String,
+    /// Linux Wayland: shortcuts as the desktop reports them, `(id, key combination)`.
+    system_shortcuts: Vec<(String, String)>,
+    /// Lasting notes about this desktop (no tray, no XWayland).
+    desktop_notes: Vec<String>,
     storage_warning: String,
     loading: bool,
     presence: Presence,
@@ -392,6 +401,8 @@ impl Island {
             recall: None,
             status: String::new(),
             desktop_warning: String::new(),
+            system_shortcuts: Vec::new(),
+            desktop_notes: Vec::new(),
             storage_warning: String::new(),
             loading: true,
             presence: Presence::new(),
@@ -810,7 +821,19 @@ impl Island {
                 platform::Event::Quit => return self.update(Message::Quit),
                 platform::Event::Warning(error) => self.desktop_warning = error,
                 platform::Event::ShortcutApplied => self.desktop_warning.clear(),
+                platform::Event::ShortcutsManagedBySystem(list) => self.system_shortcuts = list,
+                platform::Event::Note(note) => {
+                    if !self.desktop_notes.contains(&note) {
+                        self.desktop_notes.push(note);
+                    }
+                }
             },
+            Message::CopyTilingRule(rule) => return iced::clipboard::write(rule),
+            Message::DismissTilingRule => {
+                self.config.tiling_rule_dismissed = true;
+                self.draft_config.tiling_rule_dismissed = true;
+                return self.persist();
+            }
             // No notch yet (first-run setup): the shortcut brings the setup window forward.
             Message::Toggle if self.window.is_none() => return self.open_app_window(),
             Message::Toggle => return self.present(Event::Shortcut),

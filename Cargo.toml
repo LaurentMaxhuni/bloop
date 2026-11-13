@@ -38,7 +38,7 @@ iced = { version = "0.14", default-features = false, features = ["wgpu-bare", "t
 wgpu = { version = "27", default-features = false, features = ["std", "wgsl", "vulkan", "gles"] }
 x11rb = { version = "0.13", features = ["shape", "randr"] }
 ksni = { version = "0.3", default-features = false, features = ["tokio"] }
-ashpd = { version = "0.14", default-features = false, features = ["tokio"] }
+ashpd = { version = "0.14", default-features = false, features = ["tokio", "global_shortcuts", "settings", "file_chooser"] }
 oo7 = { version = "0.7", default-features = false, features = ["tokio", "native_crypto"] }
 libc = "0.2"
 png = "0.18"

@@ -48,6 +48,12 @@ pub enum Event {
     Quit,
     Warning(String),
     ShortcutApplied,
+    /// Linux Wayland: the desktop manages the shortcuts; `(id, key combination)` as reported.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    ShortcutsManagedBySystem(Vec<(String, String)>),
+    /// A lasting note about this desktop (e.g. no tray), shown on the Shortcut & startup page.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Note(String),
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +62,8 @@ pub struct Controller {
     sender: std::sync::mpsc::Sender<Command>,
     #[cfg(windows)]
     thread_id: u32,
+    #[cfg(target_os = "linux")]
+    linux: tokio::sync::mpsc::UnboundedSender<linux::shortcuts::Command>,
 }
 
 #[cfg(windows)]
@@ -77,14 +85,20 @@ impl Controller {
     pub fn ask_shortcut(&self, value: String) {
         #[cfg(windows)]
         self.send(Command::AskShortcut(value));
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        let _ = self
+            .linux
+            .send(linux::shortcuts::Command::AskShortcut(value));
+        #[cfg(not(any(windows, target_os = "linux")))]
         let _ = value;
     }
 
     pub fn shortcut(&self, value: String) {
         #[cfg(windows)]
         self.send(Command::Shortcut(value));
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        let _ = self.linux.send(linux::shortcuts::Command::Shortcut(value));
+        #[cfg(not(any(windows, target_os = "linux")))]
         let _ = value;
     }
 
@@ -104,7 +118,7 @@ impl Controller {
 }
 
 pub fn validate_shortcut(value: &str) -> Result<(), String> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
         value
             .parse::<global_hotkey::hotkey::HotKey>()
@@ -226,12 +240,29 @@ pub fn events() -> impl iced::futures::Stream<Item = Event> {
         }
         #[cfg(target_os = "linux")]
         {
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let (commands, inbox) = tokio::sync::mpsc::unbounded_channel();
+            let _ = sender.send(Event::Ready(Controller { linux: commands }));
             if linux::session() == linux::Session::WaylandOnly {
-                let _ = output
-                    .send(Event::Warning(
-                        "Install XWayland for the notch to stay on top.".into(),
-                    ))
-                    .await;
+                let _ = sender.send(Event::Note(
+                    "Install XWayland for the notch to stay on top.".into(),
+                ));
+            }
+            // Stop both when the subscription ends.
+            struct Abort(Vec<tokio::task::JoinHandle<()>>);
+            impl Drop for Abort {
+                fn drop(&mut self) {
+                    self.0.iter().for_each(tokio::task::JoinHandle::abort);
+                }
+            }
+            let _tasks = Abort(vec![
+                tokio::spawn(linux::tray::run(sender.clone())),
+                tokio::spawn(linux::shortcuts::run(sender, inbox)),
+            ]);
+            while let Some(event) = receiver.recv().await {
+                if output.send(event).await.is_err() {
+                    break;
+                }
             }
             std::future::pending::<()>().await;
         }
@@ -246,13 +277,13 @@ pub fn events() -> impl iced::futures::Stream<Item = Event> {
 #[cfg(windows)]
 const WAKE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 42;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[derive(Default)]
-struct Shortcuts([Option<global_hotkey::hotkey::HotKey>; 2]);
+pub(crate) struct Shortcuts([Option<global_hotkey::hotkey::HotKey>; 2]);
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 impl Shortcuts {
-    fn event(&self, id: u32) -> Option<Event> {
+    pub(crate) fn event(&self, id: u32) -> Option<Event> {
         if self.0[0].is_some_and(|key| key.id() == id) {
             Some(Event::Toggle)
         } else if self.0[1].is_some_and(|key| key.id() == id) {
@@ -262,7 +293,7 @@ impl Shortcuts {
         }
     }
 
-    fn apply(
+    pub(crate) fn apply(
         &mut self,
         slot: usize,
         value: &str,
