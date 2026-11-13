@@ -7,6 +7,7 @@ pub mod icon;
 #[cfg(target_os = "linux")]
 pub mod instance;
 pub mod monitors;
+pub mod portal;
 pub mod session;
 pub mod shape;
 pub mod shortcuts;

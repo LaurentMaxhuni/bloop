@@ -35,7 +35,9 @@ pub fn show_fatal(message: &str) {
             );
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    linux::portal::show_fatal(message);
+    #[cfg(not(any(windows, target_os = "linux")))]
     eprintln!("bloop could not start: {message}");
 }
 
@@ -181,7 +183,11 @@ pub fn save_file_dialog(suggested_name: &str) -> Result<Option<std::path::PathBu
             ))
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::portal::save_file_dialog(suggested_name)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = suggested_name;
         Err("The Save dialog is only available on Windows.".into())
@@ -256,6 +262,7 @@ pub fn events() -> impl iced::futures::Stream<Item = Event> {
                 }
             }
             let _tasks = Abort(vec![
+                tokio::spawn(linux::portal::watch_settings()),
                 tokio::spawn(linux::tray::run(sender.clone())),
                 tokio::spawn(linux::shortcuts::run(sender, inbox)),
             ]);
@@ -562,7 +569,11 @@ pub fn open_url(url: &str) -> Result<(), String> {
         }
         Ok(())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::portal::open_url(url.trim())
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Err("Opening links isn't supported on this platform yet.".into())
     }
@@ -1293,7 +1304,11 @@ pub fn reduce_motion_system() -> bool {
         };
         ok.is_ok() && !enabled.as_bool()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::portal::reduce_motion_system()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         false
     }
@@ -1323,7 +1338,11 @@ pub fn light_theme_system() -> bool {
         };
         status.is_ok() && value == 1
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::portal::light_theme_system()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         false
     }
