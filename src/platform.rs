@@ -125,7 +125,7 @@ pub fn validate_shortcut(value: &str) -> Result<(), String> {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = value;
         Ok(())
