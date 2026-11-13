@@ -3102,6 +3102,8 @@ mod tests {
         app.window = Some(window::Id::unique());
         app.loading = false;
         app.storage_disabled = true;
+        // Tests don't run as an AppImage; behave like a copy that can install updates.
+        app.can_self_update = || true;
         app
     }
 
