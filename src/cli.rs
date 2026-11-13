@@ -617,15 +617,36 @@ impl Default for Limits {
     }
 }
 
-/// First `<name>.exe`, `.cmd` or `.bat` in the directories of `path_var`.
+/// Windows: the first `<name>.exe`, `.cmd` or `.bat` in the directories of `path_var`.
 /// PowerShell shims (`.ps1`) are skipped: they need PowerShell to run.
+/// Unix: the first `<name>` that is a file with an execute bit.
 pub fn find_in(name: &str, path_var: &OsStr) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::env::split_paths(path_var)
+            .map(|dir| dir.join(name))
+            .find(|candidate| {
+                std::fs::metadata(candidate)
+                    .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            })
+    }
+    #[cfg(not(unix))]
     std::env::split_paths(path_var).find_map(|dir| {
         ["exe", "cmd", "bat"]
             .iter()
             .map(|ext| dir.join(format!("{name}.{ext}")))
             .find(|candidate| candidate.is_file())
     })
+}
+
+/// Linux: lets the app give CLIs the original `WAYLAND_DISPLAY` back (see the platform code).
+static CHILD_ENV: std::sync::OnceLock<fn(&mut tokio::process::Command)> =
+    std::sync::OnceLock::new();
+
+/// Sets the hook applied to every CLI command before it starts.
+pub fn set_child_env_hook(hook: fn(&mut tokio::process::Command)) {
+    let _ = CHILD_ENV.set(hook);
 }
 
 pub fn find(kind: Kind) -> Option<PathBuf> {
@@ -727,6 +748,23 @@ async fn stream_in<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
     }
     #[cfg(windows)]
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    if let Some(hook) = CHILD_ENV.get() {
+        hook(&mut command);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Its own process group, so `Job` can kill helpers the CLI starts along with it.
+        command.process_group(0);
+        // SAFETY: the closure runs in the forked child before exec and only calls prctl,
+        // which is async-signal-safe; it touches no memory shared with the parent.
+        unsafe {
+            command.pre_exec(|| {
+                // Die with bloop, even if bloop is killed before `Job` can clean up.
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                Ok(())
+            });
+        }
+    }
     let mut child = command
         .spawn()
         .map_err(|e| Error::Protocol(format!("Could not start {}: {e}", kind.name())))?;
@@ -878,12 +916,16 @@ fn explain(kind: Kind, error: Error, stderr: &str) -> Error {
     Error::Protocol(message)
 }
 
-/// A Windows job object that kills every process in it when closed.
+/// Windows: a job object that kills every process in it when closed. Linux: the child's
+/// process group, killed on drop.
 mod job {
     pub struct Job {
         /// Raw job handle, stored as an integer so the stream future stays `Send`.
         #[cfg(windows)]
         handle: Option<usize>,
+        /// The child's process group (its pid, see `process_group(0)`).
+        #[cfg(target_os = "linux")]
+        group: Option<i32>,
     }
 
     impl Job {
@@ -929,7 +971,13 @@ mod job {
                     handle: Some(job.0 as usize),
                 }
             }
-            #[cfg(not(windows))]
+            #[cfg(target_os = "linux")]
+            {
+                Self {
+                    group: child.id().and_then(|pid| i32::try_from(pid).ok()),
+                }
+            }
+            #[cfg(not(any(windows, target_os = "linux")))]
             {
                 let _ = child;
                 Self {}
@@ -939,6 +987,13 @@ mod job {
 
     impl Drop for Job {
         fn drop(&mut self) {
+            #[cfg(target_os = "linux")]
+            if let Some(group) = self.group.take() {
+                // SAFETY: killpg only sends a signal; the group id came from our own child.
+                unsafe {
+                    libc::killpg(group, libc::SIGKILL);
+                }
+            }
             #[cfg(windows)]
             if let Some(handle) = self.handle.take() {
                 // SAFETY: we own this job handle; closing it kills the processes in the job.
