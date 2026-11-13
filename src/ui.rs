@@ -245,6 +245,8 @@ pub enum Message {
     UpdateProgress(Version, u8),
     UpdateReady(Result<(Version, PathBuf), String>),
     InstallUpdate,
+    /// Opens the release page of an update this copy can't install itself.
+    OpenReleasePage,
     SetAutoUpdate(bool),
 }
 
@@ -347,6 +349,9 @@ pub struct Island {
     update_peek_pending: bool,
     /// Starts the downloaded installer; replaced in tests.
     installer_launcher: fn(&std::path::Path) -> Result<(), String>,
+    /// A newer release this copy can't install itself (Linux, not a writable AppImage).
+    release_page: Option<Version>,
+    can_self_update: fn() -> bool,
     /// The notch window.
     window: Option<window::Id>,
     /// The decorated app window, while it is open.
@@ -443,6 +448,8 @@ impl Island {
             update_failures: 0,
             update_peek_pending: false,
             installer_launcher: platform::launch_installer,
+            release_page: None,
+            can_self_update: platform::can_self_update,
             window: None,
             app_window: None,
             launch,
@@ -1442,6 +1449,10 @@ impl Island {
                 );
             }
             Message::UpdateChecked(manual, result) => match result {
+                Ok(Some(release)) if !(self.can_self_update)() => {
+                    self.release_page = Some(release.version);
+                    self.update_state = UpdateState::Idle;
+                }
                 Ok(Some(release)) => return self.start_download(release),
                 Ok(None) => {
                     self.update_failures = 0;
@@ -1479,6 +1490,13 @@ impl Island {
                 }
             },
             Message::InstallUpdate => return self.install_update(),
+            Message::OpenReleasePage => {
+                if let Some(version) = self.release_page
+                    && let Err(error) = platform::open_url(&update::release_page(&version))
+                {
+                    self.update_state = UpdateState::Failed(error);
+                }
+            }
             Message::SetAutoUpdate(on) => {
                 if on {
                     self.next_check = Instant::now();
@@ -2056,6 +2074,10 @@ impl Island {
     /// One line for the dashboard's update status.
     pub fn update_status(&self) -> String {
         match &self.update_state {
+            UpdateState::Idle if self.release_page.is_some() => self
+                .release_page
+                .map(|version| format!("{version} available"))
+                .unwrap_or_default(),
             UpdateState::Idle if self.up_to_date => "Up to date".into(),
             UpdateState::Idle => String::new(),
             UpdateState::Checking => "Checking…".into(),
@@ -4407,6 +4429,16 @@ mod tests {
         );
         let _ = app.present_at(Event::Tick, start + Duration::from_millis(310));
         assert_eq!(app.presence.state(), State::Hover);
+    }
+
+    #[test]
+    fn copy_that_cant_update_itself_links_to_the_release() {
+        let mut app = ready();
+        app.can_self_update = || false;
+        let _ = app.update(Message::UpdateChecked(true, Ok(Some(sample_release()))));
+        assert_eq!(app.update_state, UpdateState::Idle, "nothing downloads");
+        assert_eq!(app.release_page, Some(sample_release().version));
+        assert!(app.update_status().ends_with("available"));
     }
 
     fn sample_release() -> Release {

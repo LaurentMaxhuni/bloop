@@ -1021,6 +1021,15 @@ impl Island {
             (!busy && !ready).then_some(Message::CheckUpdates { manual: true }),
         )]
         .spacing(8);
+        if self.release_page.is_some() {
+            actions = actions.push(self.icon_action(
+                Icon::RefreshCw,
+                "Open release page",
+                "Open the release page to download the update",
+                Variant::Primary,
+                Some(Message::OpenReleasePage),
+            ));
+        }
         if ready {
             actions = actions.push(self.icon_action(
                 Icon::RefreshCw,

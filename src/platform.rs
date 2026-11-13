@@ -533,6 +533,37 @@ pub fn shape(window: &dyn iced::window::Window, outline: &[(f32, f32)]) {
     }
 }
 
+/// Linux: how this copy takes an update (replace its AppImage, or only link to the release).
+#[cfg(target_os = "linux")]
+fn linux_install_mode() -> bloop::linux_update::InstallMode {
+    let appimage = std::env::var_os("APPIMAGE")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from);
+    let writable = appimage
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .and_then(|dir| std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok())
+        // SAFETY: access only reads the NUL-terminated path for the duration of the call.
+        .is_some_and(|dir| unsafe { libc::access(dir.as_ptr(), libc::W_OK) } == 0);
+    bloop::linux_update::install_mode(appimage.as_deref(), writable)
+}
+
+/// False when this copy can only point at the release page (Linux, not run as a writable
+/// AppImage). Windows always installs updates itself.
+pub fn can_self_update() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        matches!(
+            linux_install_mode(),
+            bloop::linux_update::InstallMode::Replace { .. }
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
 /// Linux: marks the still-hidden notch as a utility window kept out of the taskbar and pager.
 /// Other platforms set this up through the window settings.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -1355,6 +1386,17 @@ pub fn light_theme_system() -> bool {
 /// closes (some launchers and terminals do this), setup is started outside that job; a job
 /// that forbids breaking away gets setup as a normal child instead.
 pub fn launch_installer(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        use bloop::linux_update::{InstallMode, relaunch_command, replace};
+        let InstallMode::Replace { appimage } = linux_install_mode() else {
+            return Err("This copy of bloop can't update itself.".into());
+        };
+        replace(path, &appimage).map_err(|e| format!("Couldn't replace bloop: {e}"))?;
+        let mut command = relaunch_command(&appimage, std::process::id());
+        linux::child_env(&mut command);
+        return command.spawn().map(drop).map_err(|e| e.to_string());
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

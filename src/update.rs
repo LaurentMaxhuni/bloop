@@ -109,6 +109,11 @@ impl Release {
     }
 }
 
+/// The GitHub page of a release, for copies that can't install it themselves.
+pub fn release_page(version: &Version) -> String {
+    format!("https://github.com/LaurentMaxhuni/bloop/releases/tag/v{version}")
+}
+
 pub fn installer_name(version: &Version) -> String {
     installer_name_for(&CURRENT, version)
 }
@@ -528,6 +533,14 @@ mod tests {
             "too big"
         );
         assert!(parse_release(b"<html>rate limited</html>", &current).is_err());
+    }
+
+    #[test]
+    fn release_page_names_the_tag() {
+        assert_eq!(
+            release_page(&v("0.6.0")),
+            "https://github.com/LaurentMaxhuni/bloop/releases/tag/v0.6.0"
+        );
     }
 
     #[test]
