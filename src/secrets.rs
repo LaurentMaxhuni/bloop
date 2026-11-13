@@ -10,6 +10,7 @@ pub enum KeySource {
 
 /// Where keys were saved before they were tied to an endpoint.
 const LEGACY_TARGET: &str = "bloop/api-key";
+#[cfg_attr(not(windows), allow(dead_code))]
 const MAX_KEY: usize = 4096;
 
 /// Saved keys belong to one endpoint origin (scheme, host and port), so a model profile
