@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>bloop — a free, local AI chat notch for Windows</title>
-<meta name="description" content="bloop is a free, open-source AI chat notch for Windows 10 and 11. Chat with Ollama, llama.cpp, ChatGPT, Claude Code or Codex from the top of your screen.">
+<meta name="description" content="bloop is a free, open-source AI chat notch for Windows and Linux. Chat with Ollama, llama.cpp, ChatGPT, Claude Code or Codex from the top of your screen.">
 <link rel="canonical" href="https://laurentmaxhuni.github.io/bloop/">
 <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
 <link rel="alternate" type="text/markdown" href="llms.txt" title="bloop for AI assistants">
@@ -46,9 +46,9 @@
       "url": "https://laurentmaxhuni.github.io/bloop/",
       "applicationCategory": "UtilitiesApplication",
       "applicationSubCategory": "AI chat assistant",
-      "operatingSystem": "Windows 10, Windows 11",
+      "operatingSystem": "Windows 10, Windows 11, Linux",
       "softwareVersion": "0.5.1",
-      "downloadUrl": "https://github.com/LaurentMaxhuni/bloop/releases/latest",
+      "downloadUrl": "https://laurentmaxhuni.github.io/bloop/downloads.html",
       "installUrl": "https://github.com/LaurentMaxhuni/bloop/releases/latest",
       "releaseNotes": "https://github.com/LaurentMaxhuni/bloop/releases",
       "softwareRequirements": "A DirectX 12 graphics driver; a model server (such as Ollama) or the Claude Code or Codex CLI",
@@ -152,7 +152,7 @@
       "name": "Does bloop work on macOS or Linux?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Not yet. bloop runs on Windows 10 and 11 with a DirectX 12 graphics driver. Linux support is planned."
+        "text": "Linux, yes: from version 0.6.0 there is an x86_64 AppImage for GNOME, KDE Plasma, Xfce, Hyprland, Sway and other desktops (glibc 2.35 or newer, a Vulkan or OpenGL driver). On Windows, bloop runs on Windows 10 and 11 with a DirectX 12 graphics driver. macOS isn't supported."
       }
     },
     {
@@ -255,6 +255,7 @@
       <a href="#window">App window</a>
       <a href="#private">Privacy</a>
       <a href="#faq">FAQ</a>
+      <a href="downloads.html">Downloads</a>
     </nav>
     <div class="bar-actions">
       <a class="icon-btn" href="https://github.com/LaurentMaxhuni/bloop" aria-label="bloop on GitHub" title="GitHub"><svg class="i"><use href="#i-github"/></svg></a>
@@ -273,16 +274,16 @@
       </div>
       <p class="hint" id="hint"><svg class="i"><use href="#i-arrow-up"/></svg><span data-hint-text>The notch up top is real. Rest your mouse on it.</span></p>
       <h1>Your AI, tucked into the top of your screen.</h1>
-      <p class="lede">bloop is a tiny chat notch for Windows. It rests as a thin sliver at the top of your screen, pops open when you need it, and talks to <em>your</em> model: Ollama, llama.cpp, Unsloth Studio, ChatGPT, Claude Code or Codex.</p>
+      <p class="lede">bloop is a tiny chat notch for Windows and Linux. It rests as a thin sliver at the top of your screen, pops open when you need it, and talks to <em>your</em> model: Ollama, llama.cpp, Unsloth Studio, ChatGPT, Claude Code or Codex.</p>
       <div class="cta">
         <a class="btn btn-primary btn-lg" data-download href="https://github.com/LaurentMaxhuni/bloop/releases/latest">
           <svg class="i"><use href="#i-download"/></svg>
-          <span>Download for Windows</span>
+          <span data-download-label>Download for Windows</span>
           <span class="btn-meta" data-download-meta hidden></span>
         </a>
         <a class="btn btn-outline btn-lg" href="https://github.com/LaurentMaxhuni/bloop"><svg class="i"><use href="#i-github"/></svg>View on GitHub</a>
       </div>
-      <p class="fine">Free and open source · MIT · Windows 10 and 11 · native Rust, no browser inside</p>
+      <p class="fine">Free and open source · MIT · Windows 10 and 11 · Linux · native Rust, no browser inside · <a href="downloads.html">All downloads</a></p>
     </div>
   </section>
 
@@ -523,7 +524,7 @@
         </div>
         <div class="qa">
           <h3>Does bloop work on macOS or Linux?</h3>
-          <p>Not yet. bloop runs on Windows 10 and 11 with a DirectX 12 graphics driver. Linux support is planned.</p>
+          <p>Linux, yes: from version 0.6.0 there is an x86_64 AppImage for GNOME, KDE Plasma, Xfce, Hyprland, Sway and other desktops (glibc 2.35 or newer, a Vulkan or OpenGL driver). On Windows, bloop runs on Windows 10 and 11 with a DirectX 12 graphics driver. macOS isn't supported.</p>
         </div>
         <div class="qa">
           <h3>Why does Windows say &quot;unknown publisher&quot; when I install bloop?</h3>
@@ -537,14 +538,15 @@
     <div class="wrap final-inner">
       <span class="mascot" data-mascot="final" style="--size:72px"></span>
       <h2 id="final-title">Ready when you are.</h2>
-      <p class="sub">One small installer. bloop updates itself after that.</p>
+      <p class="sub">One small download. bloop updates itself after that.</p>
       <div class="cta">
         <a class="btn btn-primary btn-lg" data-download href="https://github.com/LaurentMaxhuni/bloop/releases/latest">
           <svg class="i"><use href="#i-download"/></svg>
-          <span>Download for Windows</span>
+          <span data-download-label>Download for Windows</span>
           <span class="btn-meta" data-download-meta hidden></span>
         </a>
       </div>
+      <p class="fine"><a href="downloads.html">Linux, earlier versions and checksums</a></p>
     </div>
   </section>
 </main>
@@ -559,6 +561,7 @@
       <span class="brand small"><span class="mascot" data-mascot="foot" style="--size:18px"></span>bloop</span>
       <nav class="foot-links" aria-label="Links">
         <a href="https://github.com/LaurentMaxhuni/bloop">GitHub</a>
+        <a href="downloads.html">Downloads</a>
         <a href="https://github.com/LaurentMaxhuni/bloop/releases">Release notes</a>
         <a href="https://github.com/LaurentMaxhuni/bloop/blob/main/LICENSE">MIT licence</a>
         <a href="code-signing.html">Code signing policy</a>

@@ -74,4 +74,5 @@ cargo test --test cli -- --ignored   # runs the real Claude Code and Codex CLIs;
 - `docs/architecture.md`: decisions and why, dated.
 - `docs/verification.md`: what was checked, how, and what wasn't.
 - `docs/code-signing.md` and `site/code-signing.html`: how releases are signed and the public signing and privacy policy. If bloop gains a new network connection, add it to that page's privacy section.
+- `site/downloads.html`: every release with its Windows and Linux files. It refreshes from GitHub, but add each new release to the HTML list (and its Latest badge) so the page is right without JavaScript.
 - `site/index.html` and `site/llms.txt`: public facts (providers, platforms, privacy). Keep the FAQ text and its `FAQPage` JSON-LD identical, and update `softwareVersion` and the sitemap's `lastmod` on release.
