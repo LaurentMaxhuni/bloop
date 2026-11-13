@@ -11,7 +11,8 @@ const APP_MIN_SIZE: Size = Size::new(720.0, 520.0);
 /// A normal desktop window: decorated, resizable, centered and in the taskbar. Closing it
 /// only hides bloop's window; the notch keeps running.
 pub(super) fn app_settings() -> window::Settings {
-    window::Settings {
+    #[allow(unused_mut)]
+    let mut settings = window::Settings {
         size: APP_SIZE,
         min_size: Some(APP_MIN_SIZE),
         position: window::Position::Centered,
@@ -21,7 +22,13 @@ pub(super) fn app_settings() -> window::Settings {
         level: window::Level::Normal,
         exit_on_close_request: false,
         ..Default::default()
+    };
+    #[cfg(target_os = "linux")]
+    {
+        settings.platform_specific.application_id = "bloop".into();
+        settings.icon = platform::linux::icon::window_icon();
     }
+    settings
 }
 
 impl Island {
@@ -61,6 +68,7 @@ impl Island {
         let mut font = Some(self.icon_font());
         open.then(move |id| {
             Task::batch([
+                show_notch(id),
                 Task::done(Message::Window(Some(id))),
                 font.take().unwrap_or_else(Task::none),
             ])
@@ -96,5 +104,20 @@ impl Island {
                 ..container::Style::default()
             })
             .into()
+    }
+}
+
+/// Linux opens the notch hidden: set its window type, then show it. Elsewhere it opens visible.
+fn show_notch(id: window::Id) -> Task<Message> {
+    #[cfg(target_os = "linux")]
+    {
+        window::run(id, platform::prepare_notch)
+            .discard()
+            .chain(window::set_mode(id, window::Mode::Windowed))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = id;
+        Task::none()
     }
 }

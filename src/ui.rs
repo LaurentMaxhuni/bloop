@@ -90,8 +90,19 @@ pub fn notch_settings() -> window::Settings {
     {
         settings.platform_specific.skip_taskbar = true;
     }
+    #[cfg(target_os = "linux")]
+    {
+        // Hidden until `platform::prepare_notch` has set its window type (see `open_notch`).
+        settings.visible = false;
+        settings.platform_specific.application_id = "bloop".into();
+        settings.icon = platform::linux::icon::window_icon();
+    }
     settings
 }
+
+/// The notch's window title on Linux, which tiling-desktop window rules match.
+#[cfg(target_os = "linux")]
+pub const NOTCH_TITLE: &str = "bloop notch";
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -473,7 +484,12 @@ impl Island {
             ThemeChoice::System => self.system_light,
         }
     }
-    pub fn title(&self, _id: window::Id) -> String {
+    pub fn title(&self, id: window::Id) -> String {
+        #[cfg(target_os = "linux")]
+        if self.window == Some(id) {
+            return NOTCH_TITLE.into();
+        }
+        let _ = id;
         "bloop".into()
     }
 

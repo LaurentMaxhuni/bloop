@@ -336,6 +336,7 @@ dependencies = [
  "ksni",
  "libc",
  "oo7",
+ "png",
  "reqwest",
  "ring",
  "rusqlite",

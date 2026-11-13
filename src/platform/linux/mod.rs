@@ -2,8 +2,13 @@
 //! `cfg(test)` so their tests run on Windows too; code that talks to the desktop is Linux-only.
 
 #[cfg(target_os = "linux")]
+pub mod icon;
+#[cfg(target_os = "linux")]
 pub mod instance;
 pub mod session;
+pub mod shape;
+#[cfg(target_os = "linux")]
+pub mod x11;
 
 #[cfg(target_os = "linux")]
 pub use session::init_backend;

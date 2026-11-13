@@ -1,3 +1,6 @@
+// TEMPORARY (Linux port in progress): removed once every Linux function is wired up.
+#![cfg_attr(target_os = "linux", allow(dead_code))]
+
 #[cfg(any(target_os = "linux", test))]
 pub mod linux;
 
@@ -477,10 +480,22 @@ pub fn shape(window: &dyn iced::window::Window, outline: &[(f32, f32)]) {
             let _ = unsafe { DeleteObject(region.into()) };
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    linux::x11::shape(window, outline);
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (window, outline);
     }
+}
+
+/// Linux: marks the still-hidden notch as a utility window kept out of the taskbar and pager.
+/// Other platforms set this up through the window settings.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn prepare_notch(window: &dyn iced::window::Window) {
+    #[cfg(target_os = "linux")]
+    linux::x11::prepare_notch(window);
+    #[cfg(not(target_os = "linux"))]
+    let _ = window;
 }
 
 /// Opens a link from a reply in the default browser. Only web and mail links: a reply
