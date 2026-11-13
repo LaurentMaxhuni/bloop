@@ -1,3 +1,6 @@
+#[cfg(any(target_os = "linux", test))]
+pub mod linux;
+
 use bloop::config::NotchPosition;
 use iced::{Point, Size, futures::SinkExt};
 

@@ -10,6 +10,9 @@ mod ui;
 use iced::Color;
 
 fn main() {
+    // Before any thread starts: pick X11 (XWayland on Wayland desktops).
+    #[cfg(target_os = "linux")]
+    platform::linux::init_backend();
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
