@@ -8,6 +8,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
 const SOCKET: &str = "instance.sock";
+const LOCK: &str = "instance.lock";
 
 /// `<runtime>/bloop`, or `/tmp/bloop-<uid>` when there is no runtime directory.
 pub fn socket_dir(runtime_dir: Option<&Path>, uid: u32) -> PathBuf {
@@ -36,24 +37,46 @@ fn prepare_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Binds the instance socket. `Ok(None)` means another live copy owns it.
-pub fn bind(dir: &Path) -> std::io::Result<Option<UnixListener>> {
+/// The running copy's hold on the instance: its socket, and the lock that makes it the owner.
+pub struct Owner {
+    pub listener: UnixListener,
+    /// Held for the copy's lifetime; the kernel releases it when the copy exits or crashes.
+    pub lock: std::fs::File,
+}
+
+/// Becomes the running copy. `Ok(None)` means another live copy owns the instance.
+///
+/// Ownership is an exclusive `flock` on a lock file, not the socket: two copies starting
+/// together can't both decide a socket is stale and both bind one.
+pub fn bind(dir: &Path) -> std::io::Result<Option<Owner>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
     prepare_dir(dir)?;
-    let path = dir.join(SOCKET);
-    match UnixListener::bind(&path) {
-        Ok(listener) => Ok(Some(listener)),
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-            match UnixStream::connect(&path) {
-                Ok(_) => Ok(None),
-                // Left behind by a copy that crashed: nobody listens, so take it over.
-                Err(_) => {
-                    std::fs::remove_file(&path)?;
-                    UnixListener::bind(&path).map(Some)
-                }
-            }
-        }
-        Err(error) => Err(error),
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join(LOCK))?;
+    // SAFETY: flock only reads the descriptor, which `lock` keeps open for the call.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        return if error.kind() == std::io::ErrorKind::WouldBlock {
+            Ok(None)
+        } else {
+            Err(error)
+        };
     }
+    // The lock is ours, so any socket file left here belongs to a copy that has exited.
+    let path = dir.join(SOCKET);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let listener = UnixListener::bind(&path)?;
+    Ok(Some(Owner { listener, lock }))
 }
 
 /// Sends one request to the running copy.
@@ -100,9 +123,9 @@ mod tests {
     #[test]
     fn send_reaches_listener() {
         let dir = temp("send");
-        let listener = bind(&dir).unwrap().unwrap();
+        let owner = bind(&dir).unwrap().unwrap();
         send(&dir, Request::Toggle).unwrap();
-        let (stream, _) = listener.accept().unwrap();
+        let (stream, _) = owner.listener.accept().unwrap();
         assert_eq!(receive(stream), Some(Request::Toggle));
         remove(&dir);
     }
@@ -110,9 +133,21 @@ mod tests {
     #[test]
     fn stale_socket_is_replaced() {
         let dir = temp("stale");
-        drop(bind(&dir).unwrap().unwrap()); // listener gone, file left behind
+        drop(bind(&dir).unwrap().unwrap()); // copy gone, socket file left behind
         assert!(dir.join(SOCKET).exists());
         assert!(bind(&dir).unwrap().is_some());
+        remove(&dir);
+    }
+
+    #[test]
+    fn a_live_owner_keeps_its_socket() {
+        let dir = temp("live");
+        let owner = bind(&dir).unwrap().unwrap();
+        // A second copy must neither take over nor delete the running copy's socket.
+        assert!(bind(&dir).unwrap().is_none());
+        send(&dir, Request::Open).unwrap();
+        let (stream, _) = owner.listener.accept().unwrap();
+        assert_eq!(receive(stream), Some(Request::Open));
         remove(&dir);
     }
 

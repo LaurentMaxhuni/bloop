@@ -107,6 +107,9 @@ pub const NOTCH_TITLE: &str = "bloop notch";
 #[derive(Debug, Clone)]
 pub enum Message {
     Window(Option<window::Id>),
+    /// Linux: the hidden notch has its window type and can be shown.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    NotchPrepared(window::Id),
     Loaded(Result<storage::Loaded, String>),
     /// A queued storage job finished (see `jobs`).
     JobDone(jobs::Done),
@@ -748,6 +751,12 @@ impl Island {
             Message::Window(id) => {
                 self.window = id;
                 return self.place_window(platform::Target::Current);
+            }
+            Message::NotchPrepared(id) => {
+                // Presence may have hidden the notch (a fullscreen app) while it was prepared.
+                if self.window == Some(id) && self.presence.state() != State::Hidden {
+                    return window::set_mode(id, window::Mode::Windowed);
+                }
             }
             Message::Tick(now) => {
                 self.now = now;
@@ -1450,12 +1459,14 @@ impl Island {
             }
             Message::UpdateChecked(manual, result) => match result {
                 Ok(Some(release)) if !(self.can_self_update)() => {
+                    self.update_failures = 0;
                     self.release_page = Some(release.version);
                     self.update_state = UpdateState::Idle;
                 }
                 Ok(Some(release)) => return self.start_download(release),
                 Ok(None) => {
                     self.update_failures = 0;
+                    self.release_page = None;
                     self.update_state = UpdateState::Idle;
                     self.up_to_date = manual;
                 }
@@ -4434,6 +4445,21 @@ mod tests {
     }
 
     #[test]
+    fn prepared_notch_stays_hidden_behind_a_fullscreen_app() {
+        let mut app = ready();
+        let id = app.window.unwrap();
+        app.presence.on(Event::Fullscreen(true), Instant::now());
+        assert_eq!(app.presence.state(), State::Hidden);
+        assert_eq!(
+            app.update(Message::NotchPrepared(id)).units(),
+            0,
+            "stays hidden"
+        );
+        app.presence.on(Event::Fullscreen(false), Instant::now());
+        assert!(app.update(Message::NotchPrepared(id)).units() > 0, "shown");
+    }
+
+    #[test]
     fn copy_that_cant_update_itself_links_to_the_release() {
         let mut app = ready();
         app.can_self_update = || false;
@@ -4441,6 +4467,8 @@ mod tests {
         assert_eq!(app.update_state, UpdateState::Idle, "nothing downloads");
         assert_eq!(app.release_page, Some(sample_release().version));
         assert!(app.update_status().ends_with("available"));
+        let _ = app.update(Message::UpdateChecked(true, Ok(None)));
+        assert_eq!(app.release_page, None, "nothing newer any more");
     }
 
     fn sample_release() -> Release {

@@ -86,11 +86,6 @@ pub fn request(launch: Launch) -> Option<Request> {
     }
 }
 
-/// Only a launch with a request tells an already-running copy anything.
-pub fn signals_running_copy(launch: Launch) -> bool {
-    request(launch).is_some()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,9 +129,9 @@ mod tests {
     }
 
     #[test]
-    fn only_manual_launches_signal() {
-        assert!(signals_running_copy(Launch::Manual));
-        assert!(!signals_running_copy(Launch::Background));
+    fn background_launches_ask_nothing() {
+        assert_eq!(request(Launch::Manual), Some(Request::Open));
+        assert_eq!(request(Launch::Background), None);
     }
 
     #[test]
@@ -157,6 +152,5 @@ mod tests {
         assert_eq!(request(Launch::Ask), Some(Request::Ask));
         assert_eq!(startup(Launch::Ask, true), Startup::Dashboard);
         assert_eq!(startup(Launch::Toggle, false), Startup::Onboarding);
-        assert!(signals_running_copy(Launch::Toggle));
     }
 }

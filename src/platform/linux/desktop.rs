@@ -80,6 +80,22 @@ pub fn autostart_is_stale(entry: &str, exe: &Path, exists: impl Fn(&Path) -> boo
     exec_target(entry).is_some_and(|target| target != exe && !exists(&target))
 }
 
+/// Whether the launcher entry should be (re)written for `exe`: it's missing, it names this
+/// program with outdated text, or the program it names is gone. An entry for another copy
+/// that still exists (the installed AppImage, while a dev build runs) is left alone.
+pub fn launcher_needs_write(
+    current: Option<&str>,
+    wanted: &str,
+    exe: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> bool {
+    match current {
+        None => true,
+        Some(entry) if entry == wanted => false,
+        Some(entry) => exec_target(entry).is_none_or(|target| target == exe || !exists(&target)),
+    }
+}
+
 fn xdg_dir(var: &impl Fn(&str) -> Option<OsString>, name: &str, fallback: &str) -> Option<PathBuf> {
     var(name)
         .filter(|value| !value.is_empty())
@@ -236,16 +252,19 @@ pub fn ensure_launcher_entry() {
     };
     if let Some(path) = launcher_path(&env_var) {
         let wanted = desktop_entry(&exe, false);
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(wanted.as_str()) {
+        let current = std::fs::read_to_string(&path).ok();
+        if launcher_needs_write(current.as_deref(), &wanted, &exe, Path::exists) {
             if let Err(error) = write_file(&path, wanted.as_bytes()) {
                 tracing::warn!("could not write the launcher entry: {error}");
-            } else if let Some(dir) = path.parent() {
-                // Best effort: refresh menus that cache entries.
-                let _ = std::process::Command::new("update-desktop-database")
+            } else if let Some(dir) = path.parent()
+                && let Ok(mut child) = std::process::Command::new("update-desktop-database")
                     .arg(dir)
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
-                    .spawn();
+                    .spawn()
+            {
+                // Best effort: refresh menus that cache entries. Reap it so no zombie is left.
+                std::thread::spawn(move || child.wait());
             }
         }
     }
@@ -268,6 +287,36 @@ mod tests {
                 .find(|(name, _)| *name == key)
                 .map(|(_, value)| value.into())
         }
+    }
+
+    #[test]
+    fn launcher_entry_of_another_live_copy_is_kept() {
+        let exe = Path::new("/home/u/src/bloop/target/debug/bloop");
+        let installed = desktop_entry(Path::new("/home/u/Apps/bloop.AppImage"), false);
+        let wanted = desktop_entry(exe, false);
+        let all_exist = |_: &Path| true;
+        let none_exist = |_: &Path| false;
+        assert!(
+            launcher_needs_write(None, &wanted, exe, all_exist),
+            "missing"
+        );
+        assert!(
+            !launcher_needs_write(Some(&wanted), &wanted, exe, all_exist),
+            "current"
+        );
+        assert!(
+            !launcher_needs_write(Some(&installed), &wanted, exe, all_exist),
+            "another copy that still exists keeps its entry"
+        );
+        assert!(
+            launcher_needs_write(Some(&installed), &wanted, exe, none_exist),
+            "the program it named is gone"
+        );
+        let old_text = wanted.replace("Utility;", "Other;");
+        assert!(
+            launcher_needs_write(Some(&old_text), &wanted, exe, all_exist),
+            "this program, outdated text"
+        );
     }
 
     #[test]

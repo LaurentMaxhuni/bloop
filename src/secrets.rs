@@ -37,7 +37,7 @@ pub fn api_key(endpoint: &str) -> Option<String> {
 pub fn key_source(endpoint: &str) -> KeySource {
     if environment_key().is_some() {
         KeySource::Environment
-    } else if target(endpoint).and_then(|t| read(&t)).is_some() {
+    } else if target(endpoint).is_some_and(|t| saved(&t)) {
         KeySource::Saved
     } else {
         KeySource::None
@@ -53,7 +53,7 @@ pub fn set_api_key(endpoint: &str, key: Option<&str>) -> Result<(), String> {
 /// An older bloop saved one key for every endpoint. Which server it belongs to is unknown
 /// (the endpoint may have changed since), so it is never sent until the user ties it to one.
 pub fn has_legacy_key() -> bool {
-    read(LEGACY_TARGET).is_some()
+    saved(LEGACY_TARGET)
 }
 
 /// Ties the older bloop's key to `endpoint`'s origin, at the user's request, and removes it
@@ -139,6 +139,10 @@ trait Vault {
     fn get(&self, target: &str) -> Result<Option<Vec<u8>>, String>;
     /// `None` removes the secret (a missing one is fine).
     fn set(&self, target: &str, value: Option<&[u8]>) -> Result<(), String>;
+    /// Whether a secret is saved, without reading it (so without asking to unlock).
+    fn contains(&self, target: &str) -> Result<bool, String> {
+        self.get(target).map(|value| value.is_some())
+    }
 }
 
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
@@ -216,7 +220,7 @@ mod linux {
 
     pub struct Keyring;
 
-    fn keyring_error(error: oo7::Error) -> String {
+    fn keyring_error(error: impl std::fmt::Display) -> String {
         tracing::warn!("keyring unavailable: {error}");
         NO_KEYRING.into()
     }
@@ -235,6 +239,25 @@ mod linux {
         .unwrap_or_else(|_| Err(NO_KEYRING.into()))
     }
 
+    fn attributes(target: &str) -> [(&'static str, &str); 2] {
+        [("application", "bloop"), ("target", target)]
+    }
+
+    /// bloop's items for `target` in the default collection, found without unlocking it and
+    /// without creating it: a desktop whose keyring was never set up shows no prompt here.
+    async fn saved_items(target: &str) -> Result<Vec<oo7::dbus::Item>, String> {
+        let service = oo7::dbus::Service::new().await.map_err(keyring_error)?;
+        let Some(collection) = service.with_alias("default").await.map_err(keyring_error)? else {
+            return Ok(Vec::new());
+        };
+        collection
+            .search_items(&attributes(target))
+            .await
+            .map_err(keyring_error)
+    }
+
+    /// The default collection, created and unlocked if needed: only for saving, which the
+    /// user asked for, so a keyring prompt is expected there.
     async fn open() -> Result<oo7::Keyring, String> {
         let keyring = oo7::Keyring::new().await.map_err(keyring_error)?;
         keyring.unlock().await.map_err(keyring_error)?;
@@ -245,18 +268,36 @@ mod linux {
         fn get(&self, target: &str) -> Result<Option<Vec<u8>>, String> {
             let target = target.to_owned();
             blocking(async move {
-                let keyring = open().await?;
-                let attributes = [("application", "bloop"), ("target", target.as_str())];
-                let items = keyring
-                    .search_items(&attributes)
-                    .await
-                    .map_err(keyring_error)?;
-                let Some(item) = items.first() else {
+                if ashpd::is_sandboxed() {
+                    let keyring = open().await?;
+                    let items = keyring
+                        .search_items(&attributes(&target))
+                        .await
+                        .map_err(keyring_error)?;
+                    let Some(item) = items.first() else {
+                        return Ok(None);
+                    };
+                    let secret = item.secret().await.map_err(keyring_error)?;
+                    return Ok(Some(secret.as_bytes().to_vec()));
+                }
+                // Only an existing, locked item asks to unlock; nothing is created.
+                let Some(item) = saved_items(&target).await?.into_iter().next() else {
                     return Ok(None);
                 };
+                if item.is_locked().await.map_err(keyring_error)? {
+                    item.unlock(None).await.map_err(keyring_error)?;
+                }
                 let secret = item.secret().await.map_err(keyring_error)?;
                 Ok(Some(secret.as_bytes().to_vec()))
             })
+        }
+
+        fn contains(&self, target: &str) -> Result<bool, String> {
+            if ashpd::is_sandboxed() {
+                return self.get(target).map(|value| value.is_some());
+            }
+            let target = target.to_owned();
+            blocking(async move { Ok(!saved_items(&target).await?.is_empty()) })
         }
 
         fn set(&self, target: &str, value: Option<&[u8]>) -> Result<(), String> {
@@ -264,7 +305,7 @@ mod linux {
             let value = value.map(<[u8]>::to_vec);
             blocking(async move {
                 let keyring = open().await?;
-                let attributes = [("application", "bloop"), ("target", target.as_str())];
+                let attributes = attributes(&target);
                 match value {
                     None => keyring.delete(&attributes).await.map_err(keyring_error),
                     Some(bytes) => keyring
@@ -364,6 +405,23 @@ fn read(target: &str) -> Option<String> {
 #[cfg(target_os = "linux")]
 fn write(target: &str, key: Option<&str>) -> Result<(), String> {
     write_with(&linux::Keyring, target, key)
+}
+
+/// Whether a key is saved under `target`, for status lines. Linux checks without unlocking
+/// the keyring, so opening Settings never shows a keyring prompt.
+#[cfg(target_os = "linux")]
+fn saved(target: &str) -> bool {
+    saved_with(&linux::Keyring, target)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn saved(target: &str) -> bool {
+    read(target).is_some()
+}
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn saved_with(vault: &dyn Vault, target: &str) -> bool {
+    vault.contains(target).unwrap_or(false)
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
@@ -491,6 +549,35 @@ mod vault_tests {
         assert_eq!(
             vault.0.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
             [CHATGPT_TARGET]
+        );
+    }
+
+    /// A vault whose secrets are behind a lock: reading one would prompt.
+    struct Locked(FakeVault);
+
+    impl Vault for Locked {
+        fn get(&self, _: &str) -> Result<Option<Vec<u8>>, String> {
+            panic!("a status check must not read (and so unlock) the secret");
+        }
+
+        fn set(&self, target: &str, value: Option<&[u8]>) -> Result<(), String> {
+            self.0.set(target, value)
+        }
+
+        fn contains(&self, target: &str) -> Result<bool, String> {
+            self.0.get(target).map(|value| value.is_some())
+        }
+    }
+
+    #[test]
+    fn status_checks_never_read_the_secret() {
+        let vault = Locked(FakeVault::default());
+        assert!(!saved_with(&vault, "t"));
+        write_with(&vault, "t", Some("sk")).unwrap();
+        assert!(saved_with(&vault, "t"));
+        assert!(
+            !saved_with(&NoKeyring, "t"),
+            "no keyring counts as nothing saved"
         );
     }
 

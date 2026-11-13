@@ -534,3 +534,50 @@ None of these have been run on real desktops yet.
 | Self-update of the AppImage | not yet checked | not yet checked | not yet checked | not yet checked |
 | Tiling rule card and rule work | not possible on this desktop | not possible on this desktop | not yet checked | not possible on this desktop |
 
+### Virtual X11 run and review fixes (2026-11-13)
+
+The real `bloop` binary ran in a cloud container: Xvfb (2560×1080, one RandR monitor), Openbox
+and then i3, a private D-Bus session with GNOME Keyring, Mesa software rendering (llvmpipe), no
+portal and no tray host. A scratch `BLOOP_DATA_DIR`, `HOME` and `XDG_RUNTIME_DIR` were used.
+Windows were checked with `xwininfo`/`xprop` and screenshots; clicks went only to that virtual
+display. This is not a real desktop: no GPU, compositor, Wayland, portal or tray.
+
+Bugs this found, each fixed and checked again the same way:
+- **Keyring prompts blocked startup.** Opening the app window read the key status on the UI
+  thread, and every read unlocked (or created) the default keyring. On a keyring that was never
+  set up, bloop showed no window until the system prompt was answered; each Cancel brought the
+  next prompt (six before the window appeared). Status checks now only search item attributes
+  (no unlock, nothing created); reading a secret unlocks only an existing, locked item; saving
+  still opens and creates the keyring. After the fix the setup window appeared at once with no
+  prompt. Covered by `status_checks_never_read_the_secret`.
+- **The notch never appeared.** It isn't resizable, so winit pins min = max = its 120×5 starting
+  size in `WM_NORMAL_HINTS`, and Openbox refused the resize to the 600×580 canvas. The window
+  sat at the centred x for 600 px with 120 px of width, so the outline fell outside it.
+  Placement now sets the size hints to the new size first; afterwards the window was 600×580 at
+  x = 980 with its shape (117×5) centred.
+- **wgpu panic opening the app window after the notch:** `Requested alpha mode PreMultiplied is
+  not in the list of supported alpha modes: [Opaque, Inherit]`. Iced picks one alpha mode from
+  the first surface; the opaque app window gets a visual without alpha. Opened the other way
+  round, the notch would have been drawn opaque. The app window is now transparent on Linux too
+  (it paints its own opaque background); both orders opened without a panic.
+
+Also checked: the notch's `_NET_WM_WINDOW_TYPE_UTILITY`, `SKIP_TASKBAR`, `SKIP_PAGER` and `ABOVE`;
+`bloop --toggle` opening the running copy's notch over other windows and `--ask` reaching it,
+with one process left; the socket and lock files in `$XDG_RUNTIME_DIR/bloop`; i3 floating the
+notch at the top centre without a rule; `--background` showing only the notch; the tray and
+portal being absent logged as such, without a crash.
+
+Review fixes in the same change: a single-instance `flock` replaces the stale-socket takeover
+(two copies starting together could both bind); a cleared Ask shortcut is ignored on the
+portal (a portal session can't unbind one shortcut); the notch stays hidden if presence hid it
+while it was prepared; a dev build no longer rewrites the launcher entry of another copy that
+still exists; GNOME's animation switch is followed while running; `update-desktop-database` is
+reaped; a release-page notice clears when nothing is newer.
+
+Known and left as they are: `_NET_WORKAREA` covers the whole desktop, so a panel on one monitor
+also offsets the notch on the others; the CLI's process group is killed with `killpg` on its
+pid, which in principle could reach a reused group id once every process in it has exited.
+
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` (321 passed,
+2 ignored) pass on Linux; `cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D
+warnings` passes, which checks the Windows code but not the MSVC build CI runs.

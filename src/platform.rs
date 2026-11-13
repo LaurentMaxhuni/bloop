@@ -868,6 +868,9 @@ pub struct Instance {
     /// The socket's folder, when this copy owns the instance socket.
     #[cfg(target_os = "linux")]
     socket_dir: Option<std::path::PathBuf>,
+    /// The instance lock, held until this copy exits.
+    #[cfg(target_os = "linux")]
+    _lock: Option<std::fs::File>,
 }
 
 /// The instance socket's listener, handed to [`open_requests`].
@@ -915,19 +918,23 @@ pub fn single_instance() -> Option<Instance> {
     {
         let dir = linux_socket_dir();
         match linux::instance::bind(&dir) {
-            Ok(Some(listener)) => {
+            Ok(Some(owner)) => {
                 if let Ok(mut slot) = LISTENER.lock() {
-                    *slot = Some(listener);
+                    *slot = Some(owner.listener);
                 }
                 Some(Instance {
                     socket_dir: Some(dir),
+                    _lock: Some(owner.lock),
                 })
             }
             Ok(None) => None,
             Err(error) => {
                 // Run anyway: a broken socket must not stop bloop from starting.
                 tracing::warn!("single-instance socket unavailable: {error}");
-                Some(Instance { socket_dir: None })
+                Some(Instance {
+                    socket_dir: None,
+                    _lock: None,
+                })
             }
         }
     }

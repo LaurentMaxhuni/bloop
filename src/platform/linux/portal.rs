@@ -114,6 +114,15 @@ mod io {
                         REDUCE.store(value == 1, Ordering::Relaxed);
                     }
                 }
+                // GNOME's switch only counts when the portal has no reduced-motion setting.
+                ("org.gnome.desktop.interface", "enable-animations") if portal_motion.is_none() => {
+                    if let Ok(animations) = bool::try_from(change.value()) {
+                        REDUCE.store(
+                            super::reduce_motion(None, Some(animations)),
+                            Ordering::Relaxed,
+                        );
+                    }
+                }
                 _ => {}
             }
         }

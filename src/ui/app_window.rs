@@ -25,6 +25,11 @@ pub(super) fn app_settings() -> window::Settings {
     };
     #[cfg(target_os = "linux")]
     {
+        // Iced picks one alpha mode for every window from the first surface it creates. On
+        // X11 an opaque window gets a visual without alpha, so after the (transparent) notch
+        // it can't take that mode and wgpu panics; opened first, it would make the notch
+        // opaque. Both windows are transparent; the dashboard paints its own opaque background.
+        settings.transparent = true;
         settings.platform_specific.application_id = "bloop".into();
         settings.icon = platform::linux::icon::window_icon();
     }
@@ -107,13 +112,14 @@ impl Island {
     }
 }
 
-/// Linux opens the notch hidden: set its window type, then show it. Elsewhere it opens visible.
+/// Linux opens the notch hidden: set its window type, then show it (`Message::NotchPrepared`
+/// leaves it hidden if presence hid it meanwhile). Elsewhere it opens visible.
 fn show_notch(id: window::Id) -> Task<Message> {
     #[cfg(target_os = "linux")]
     {
         window::run(id, platform::prepare_notch)
             .discard()
-            .chain(window::set_mode(id, window::Mode::Windowed))
+            .chain(Task::done(Message::NotchPrepared(id)))
     }
     #[cfg(not(target_os = "linux"))]
     {

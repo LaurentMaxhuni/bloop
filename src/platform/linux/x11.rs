@@ -249,15 +249,30 @@ pub fn place(
     };
     let area = monitors::work_area(&list[index], desktop_work_area(connection, *screen));
     let rect = super::super::physical_rect(area, scale(connection, *screen), canvas, position);
+    let (width, height) = (rect.width.max(1), rect.height.max(1));
+    // The notch isn't resizable, so winit pins min = max = its first size in the size hints,
+    // and window managers then refuse the resize below. Pin the new size instead.
+    let _ = fixed_size_hints(rect.x, rect.y, width, height).set_normal_hints(connection, id);
     let _ = connection.configure_window(
         id,
         &ConfigureWindowAux::new()
             .x(rect.x)
             .y(rect.y)
-            .width(rect.width.max(1) as u32)
-            .height(rect.height.max(1) as u32),
+            .width(width as u32)
+            .height(height as u32),
     );
     let _ = connection.flush();
+}
+
+/// Size hints that fix the window at `width` x `height`, placed at `(x, y)` by the program.
+fn fixed_size_hints(x: i32, y: i32, width: i32, height: i32) -> x11rb::properties::WmSizeHints {
+    use x11rb::properties::{WmSizeHints, WmSizeHintsSpecification::ProgramSpecified};
+    let mut hints = WmSizeHints::new();
+    hints.position = Some((ProgramSpecified, x, y));
+    hints.size = Some((ProgramSpecified, width, height));
+    hints.min_size = Some((width, height));
+    hints.max_size = Some((width, height));
+    hints
 }
 
 /// The primary monitor's work area in logical units, and the scale.

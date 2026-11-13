@@ -105,6 +105,10 @@ RandR placement, EWMH fullscreen), `tray` (StatusNotifierItem via ksni), `shortc
 Save dialog, links), `desktop` (autostart and launcher entries, tiling rules), `instance`
 (single instance over a Unix socket). Secrets use the Secret Service through oo7; the ChatGPT
 session is a keyring item there, never in SQLite. Updates replace the AppImage in place.
+Keyring status checks never unlock or create a keyring (only a read of a saved secret may
+prompt), so the UI thread can't wait on a password dialog. On Linux both windows are
+transparent because Iced chooses one surface alpha mode for all windows, and the notch sets its
+own fixed size hints when it is placed because X11 window managers enforce winit's.
 The first measured GPU baseline exceeds the provisional 50 MB target. A future
 software compositor must preserve alpha correctly before replacing DirectX.
 

@@ -161,13 +161,19 @@ mod run {
         sender: UnboundedSender<Event>,
         mut inbox: UnboundedReceiver<Command>,
     ) {
+        // A portal can't unbind one shortcut of a session, so clearing the Ask shortcut
+        // leaves it bound; its presses are ignored instead.
+        let ask_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let activated_sender = sender.clone();
+        let activated_ask = ask_enabled.clone();
         if let Ok(mut activated) = proxy.receive_activated().await {
             tokio::spawn(async move {
                 while let Some(event) = activated.next().await {
                     let action = match event.shortcut_id() {
                         "toggle" => Event::Toggle,
-                        "ask" => Event::Ask,
+                        "ask" if activated_ask.load(std::sync::atomic::Ordering::Relaxed) => {
+                            Event::Ask
+                        }
                         _ => continue,
                     };
                     if activated_sender.send(action).is_err() {
@@ -188,6 +194,7 @@ mod run {
             while let Ok(command) = inbox.try_recv() {
                 apply(command);
             }
+            ask_enabled.store(!ask.is_empty(), std::sync::atomic::Ordering::Relaxed);
             let mut wanted = vec![
                 NewShortcut::new("toggle", "Show or collapse bloop")
                     .preferred_trigger(portal_trigger(&toggle).as_deref()),
