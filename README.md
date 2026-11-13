@@ -1,6 +1,6 @@
 # bloop
 
-A free, open-source AI chat notch for Windows. bloop rests as a thin sliver at the top of
+A free, open-source AI chat notch for Windows and Linux. bloop rests as a thin sliver at the top of
 your screen, pops open when you want it, and chats with a model you choose: Ollama,
 llama.cpp, Unsloth Studio, any OpenAI-compatible server, your ChatGPT plan, or the Claude Code
 and Codex CLIs.
@@ -23,6 +23,42 @@ from Windows Settings › Apps; it asks before deleting your chats and settings.
 
 Requirements: Windows 10 or 11 and a DirectX 12 graphics driver, plus a model to talk to (see
 [Models](#models)). bloop doesn't download or start a model for you.
+
+### Linux
+
+Download `bloop-<version>-x86_64.AppImage` from the latest release, make it executable and run
+it:
+
+```bash
+chmod +x bloop-*-x86_64.AppImage && ./bloop-*-x86_64.AppImage
+```
+
+Keep it somewhere you can write to (for example `~/Applications`) so it can update itself;
+from a read-only folder bloop links to the release page instead. On first run it adds itself
+to your app menu, and **Start on login** in Settings adds an autostart entry. The AppImage
+isn't code-signed: check it against the `.sha256` file next to it.
+
+Requirements: x86_64, glibc 2.35 or newer (Ubuntu 22.04, Fedora 36, Debian 12 or later), a
+Vulkan or OpenGL graphics driver, and a keyring (GNOME Keyring, KWallet or KeePassXC) to save
+API keys and the ChatGPT sign-in. Without a keyring, set `BLOOP_API_KEY` instead.
+
+Desktop notes:
+
+- **GNOME, KDE Plasma, Xfce, Cinnamon, MATE** work as they are. bloop draws through X11 (XWayland
+  on Wayland desktops), so with fractional scaling the notch can look slightly soft.
+- **GNOME** shows the tray icon only with the AppIndicator extension (Ubuntu includes it).
+- **Global shortcuts on Wayland** go through your desktop's shortcut service (KDE Plasma 6,
+  GNOME 48+, Hyprland), which may ask you to confirm the key. Without one (Sway, older GNOME),
+  bind `bloop --toggle` and `bloop --ask` to keys in your keyboard settings.
+- **Hyprland, Sway and i3** tile windows, so the notch needs one config line. bloop shows it on
+  Home with a Copy button; here it is too:
+
+  ```text
+  # Hyprland (~/.config/hypr/hyprland.conf)
+  windowrulev2 = float, pin, noborder, noshadow, title:^(bloop notch)$
+  # Sway (~/.config/sway/config) and i3 (~/.config/i3/config)
+  for_window [title="^bloop notch$"] floating enable, sticky enable, border none
+  ```
 
 ## Use
 
@@ -171,16 +207,22 @@ Only one bloop runs at a time, so quit the installed copy before launching a dev
   installer on GitHub Actions, signs them once SignPath is set up, writes the SHA-256 and
   publishes the release. `-Local` builds and publishes from your PC instead (always unsigned).
   Signing setup: [docs/code-signing.md](docs/code-signing.md).
-- **CI:** the same workflow checks (fmt, clippy, tests) and builds an unsigned installer for
-  pull requests that touch code or the installer; download it from the run's artifacts.
+- **CI:** the same workflow checks (fmt, clippy, tests) on Windows and on Linux (Ubuntu 22.04),
+  and builds an unsigned installer and AppImage for pull requests that touch code or the
+  installer; download them from the run's artifacts. On tags its `publish` job attaches both to
+  one release. `-Local` publishes only the Windows installer.
 - **Website:** the landing page is `site/`, published to GitHub Pages by
   `.github/workflows/pages.yml` on pushes to `main`. Preview it with
   `python -m http.server -d site`.
 
 ## Status and limits
 
-- Windows only. Linux is planned; macOS isn't. The notch moves to the active monitor when
-  opened with the shortcut; hovering works on the monitor it's on.
+- Windows and Linux (x86_64); macOS isn't planned. On Windows and X11 desktops the notch moves
+  to the active monitor when opened with the shortcut; on Wayland desktops it stays on its
+  monitor. Hovering works on the monitor it's on.
+- Linux: on Wayland desktops a shortcut can open the notch without giving the prompt keyboard
+  focus (the desktop decides); click the notch to type. Fullscreen hiding sees only X11 apps
+  there. Per-desktop results: [verification notes](docs/verification.md#linux-port-2026-11-13).
 - Memory use is about 100 MiB working set (GPU renderer); the provisional 50 MB target isn't met.
   See [verification notes](docs/verification.md).
 - Screen-reader support is incomplete.

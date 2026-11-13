@@ -81,9 +81,9 @@ fn v(text: &str) -> Version {
 fn release_json(base: &str, tag: &str, size: usize) -> String {
     format!(
         r#"{{"tag_name":"{tag}","draft":false,"prerelease":false,"assets":[
-        {{"name":"bloop-setup-{v}.exe","size":{size},"browser_download_url":"{base}/exe"}},
-        {{"name":"bloop-setup-{v}.exe.sha256","size":90,"browser_download_url":"{base}/sha"}}]}}"#,
-        v = tag.trim_start_matches('v')
+        {{"name":"{name}","size":{size},"browser_download_url":"{base}/exe"}},
+        {{"name":"{name}.sha256","size":90,"browser_download_url":"{base}/sha"}}]}}"#,
+        name = update::installer_name(&v(tag.trim_start_matches('v')))
     )
 }
 
@@ -155,7 +155,7 @@ async fn rate_limit_or_html_is_an_error_not_a_panic() {
 #[tokio::test]
 async fn download_verifies_and_renames() {
     let payload = vec![7u8; 300_000];
-    let name = "bloop-setup-0.9.0.exe";
+    let name = &update::installer_name(&v("0.9.0"));
     let base = serve(HashMap::from([
         ("/exe", ok(payload.clone())),
         ("/sha", ok(sha_line(&payload, name))),
@@ -175,7 +175,7 @@ async fn download_verifies_and_renames() {
 
 #[tokio::test]
 async fn checksum_mismatch_deletes_file() {
-    let name = "bloop-setup-0.9.0.exe";
+    let name = &update::installer_name(&v("0.9.0"));
     let base = serve(HashMap::from([
         ("/exe", ok(vec![1u8; 1000])),
         ("/sha", ok(sha_line(b"something else", name))),
@@ -193,7 +193,7 @@ async fn checksum_mismatch_deletes_file() {
 #[tokio::test]
 async fn size_overrun_is_rejected() {
     let payload = vec![2u8; 5000];
-    let name = "bloop-setup-0.9.0.exe";
+    let name = &update::installer_name(&v("0.9.0"));
     let base = serve(HashMap::from([
         ("/exe", ok(payload.clone())),
         ("/sha", ok(sha_line(&payload, name))),
@@ -220,7 +220,10 @@ async fn redirect_to_other_host_refused() {
                 location: Some("http://example.com/evil.exe".into()),
             },
         ),
-        ("/sha", ok(sha_line(b"x", "bloop-setup-0.9.0.exe"))),
+        (
+            "/sha",
+            ok(sha_line(b"x", &update::installer_name(&v("0.9.0")))),
+        ),
     ]))
     .await;
     let dir = temp_dir("redirect");
@@ -236,7 +239,7 @@ fn ready_ignores_part_and_older() {
     let dir = temp_dir("ready");
     std::fs::create_dir_all(&dir).unwrap();
     let put = |version: &str, bytes: &[u8], part: bool| {
-        let name = format!("bloop-setup-{version}.exe");
+        let name = update::installer_name(&v(version));
         std::fs::write(dir.join(format!("{name}.sha256")), sha_line(bytes, &name)).unwrap();
         let file = if part { format!("{name}.part") } else { name };
         std::fs::write(dir.join(file), bytes).unwrap();
@@ -246,7 +249,7 @@ fn ready_ignores_part_and_older() {
     put("0.9.0", b"unfinished", true);
     let (version, path) = update::ready(&dir, &v("0.2.0")).unwrap();
     assert_eq!(version, v("0.5.0"));
-    assert!(path.ends_with("bloop-setup-0.5.0.exe"));
+    assert!(path.ends_with(update::installer_name(&v("0.5.0"))));
     // A tampered file no longer counts.
     std::fs::write(&path, b"tampered").unwrap();
     assert_eq!(

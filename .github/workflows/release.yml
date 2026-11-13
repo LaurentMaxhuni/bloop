@@ -5,6 +5,8 @@ name: Release
 # - Pull requests and manual runs: check, build and upload the unsigned installer as an artifact.
 # - Tags `v<version>` (pushed by installer/release.ps1): the same, plus SignPath signing when it
 #   is configured, then publish the GitHub release that running copies update to.
+# - Linux (job `linux`): fmt, clippy, tests and the AppImage on Ubuntu 22.04 (the oldest glibc
+#   bloop supports). On tags the `publish` job attaches both platforms to one release.
 # Signing setup: docs/code-signing.md.
 
 on:
@@ -33,8 +35,11 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      signed: ${{ env.SIGN }}
     permissions:
-      contents: write # publish the release (tags only)
+      contents: read # publishing moved to the `publish` job
       actions: read # SignPath reads the uploaded build artifacts
     env:
       CARGO_TERM_COLOR: never
@@ -158,17 +163,90 @@ jobs:
             dist/bloop-setup-${{ steps.version.outputs.version }}.exe.sha256
           if-no-files-found: error
 
+
+  # Linux: fmt, clippy and tests on the oldest supported glibc (Ubuntu 22.04).
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+
+      - name: Build the AppImage
+        run: installer/linux/build-appimage.sh
+
+      - name: Upload the AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: bloop-linux
+          path: |
+            dist/bloop-*-x86_64.AppImage
+            dist/bloop-*-x86_64.AppImage.sha256
+          if-no-files-found: error
+
+  # Tags only: one GitHub release with both platforms' files, once both builds passed.
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [build, linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the annotated tag carries the release notes
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bloop-setup-${{ needs.build.outputs.version }}
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bloop-linux
+          path: dist
+
       - name: Publish the release
-        if: github.ref_type == 'tag'
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          SIGNED: ${{ needs.build.outputs.signed }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
-          $name = "bloop-setup-${{ steps.version.outputs.version }}.exe"
-          $notes = (git tag -l --format='%(contents)' $tag) -join "`n"
-          if (-not $notes.Trim()) { $notes = "bloop ${{ steps.version.outputs.version }}" }
-          $signed = if ($env:SIGN -eq 'true') { 'This release is signed.' } else { 'This release is not code-signed yet: if SmartScreen warns, choose More info, then Run anyway.' }
-          $notes += "`n`n$signed Built by GitHub Actions from this tag. [Code signing policy](https://laurentmaxhuni.github.io/bloop/code-signing.html)"
-          Set-Content -Path notes.md -Value $notes -Encoding utf8
-          gh release create $tag "dist/$name" "dist/$name.sha256" --verify-tag --title "bloop ${{ steps.version.outputs.version }}" --notes-file notes.md
+          tag="$GITHUB_REF_NAME"
+          notes="$(git tag -l --format='%(contents)' "$tag")"
+          [ -n "${notes//[[:space:]]/}" ] || notes="bloop $VERSION"
+          if [ "$SIGNED" = true ]; then
+            signed='This release is signed.'
+          else
+            signed='This release is not code-signed yet: if SmartScreen warns, choose More info, then Run anyway.'
+          fi
+          {
+            printf '%s\n\n' "$notes"
+            printf '%s Built by GitHub Actions from this tag. [Code signing policy](https://laurentmaxhuni.github.io/bloop/code-signing.html)\n\n' "$signed"
+            printf "The Linux AppImage isn't code-signed. Check it against the .sha256 file next to it.\n"
+          } > notes.md
+          win="dist/bloop-setup-$VERSION.exe"
+          lin="dist/bloop-$VERSION-x86_64.AppImage"
+          gh release create "$tag" "$win" "$win.sha256" "$lin" "$lin.sha256" \
+            --verify-tag --title "bloop $VERSION" --notes-file notes.md

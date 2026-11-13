@@ -248,6 +248,13 @@ impl Island {
             self.summary_row("Version", version, install, AppPage::About),
         ]
         .spacing(10);
+        #[cfg(target_os = "linux")]
+        if !self.config.tiling_rule_dismissed
+            && let Some(kind) =
+                crate::platform::linux::desktop::tiling(|name| std::env::var_os(name))
+        {
+            page = page.push(self.tiling_card(kind));
+        }
         if !self.storage_warning.is_empty() {
             page = page
                 .push(text(&self.storage_warning).size(13).color(t.destructive))
@@ -257,6 +264,33 @@ impl Island {
                 );
         }
         page.into()
+    }
+
+    /// Linux tiling desktops: the rule that keeps the notch floating on top.
+    #[cfg(target_os = "linux")]
+    fn tiling_card(&self, kind: crate::platform::linux::desktop::Tiling) -> Element<'_, Message> {
+        use crate::platform::linux::desktop::{config_file, rule};
+        let t = self.tokens();
+        let rule = rule(kind);
+        column![
+            text("Keep the notch on top").size(14),
+            text(format!(
+                "Your desktop tiles windows. Add this to {} so the notch floats above them:",
+                config_file(kind)
+            ))
+            .size(12)
+            .color(t.muted_foreground),
+            text(rule).size(12).font(iced::Font::MONOSPACE),
+            row![
+                self.button("Copy", Variant::Primary)
+                    .on_press(Message::CopyTilingRule(rule.into())),
+                self.button("Dismiss", Variant::Outline)
+                    .on_press(Message::DismissTilingRule),
+            ]
+            .spacing(8),
+        ]
+        .spacing(8)
+        .into()
     }
 
     /// A row of buttons where the selected option is filled.
@@ -941,8 +975,31 @@ impl Island {
                 .color(t.muted_foreground),
         ]
         .spacing(16);
+        if !self.system_shortcuts.is_empty() {
+            let keys = self
+                .system_shortcuts
+                .iter()
+                .map(|(id, keys)| {
+                    let name = if id == "ask" {
+                        "Ask about clipboard"
+                    } else {
+                        "Global shortcut"
+                    };
+                    format!("{name}: {keys}")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            page = page.push(text(keys).size(13)).push(
+                text("Your desktop manages this shortcut.")
+                    .size(12)
+                    .color(t.muted_foreground),
+            );
+        }
         if !self.desktop_warning.is_empty() {
             page = page.push(text(&self.desktop_warning).size(13).color(t.destructive));
+        }
+        for note in &self.desktop_notes {
+            page = page.push(text(note).size(13).color(t.muted_foreground));
         }
         page.push(self.save_row())
             .push(self.autostart_toggle())
@@ -964,6 +1021,15 @@ impl Island {
             (!busy && !ready).then_some(Message::CheckUpdates { manual: true }),
         )]
         .spacing(8);
+        if self.release_page.is_some() {
+            actions = actions.push(self.icon_action(
+                Icon::RefreshCw,
+                "Open release page",
+                "Open the release page to download the update",
+                Variant::Primary,
+                Some(Message::OpenReleasePage),
+            ));
+        }
         if ready {
             actions = actions.push(self.icon_action(
                 Icon::RefreshCw,

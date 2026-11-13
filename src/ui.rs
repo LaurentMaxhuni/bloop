@@ -90,12 +90,26 @@ pub fn notch_settings() -> window::Settings {
     {
         settings.platform_specific.skip_taskbar = true;
     }
+    #[cfg(target_os = "linux")]
+    {
+        // Hidden until `platform::prepare_notch` has set its window type (see `open_notch`).
+        settings.visible = false;
+        settings.platform_specific.application_id = "bloop".into();
+        settings.icon = platform::linux::icon::window_icon();
+    }
     settings
 }
+
+/// The notch's window title on Linux, which tiling-desktop window rules match.
+#[cfg(target_os = "linux")]
+pub const NOTCH_TITLE: &str = "bloop notch";
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Window(Option<window::Id>),
+    /// Linux: the hidden notch has its window type and can be shown.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    NotchPrepared(window::Id),
     Loaded(Result<storage::Loaded, String>),
     /// A queued storage job finished (see `jobs`).
     JobDone(jobs::Done),
@@ -199,6 +213,11 @@ pub enum Message {
     RemoveKey,
     SetLight(bool),
     SetAutostart(bool),
+    /// Linux tiling desktops: copy the window rule that floats the notch.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    CopyTilingRule(String),
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    DismissTilingRule,
     ShowSetup,
     /// The icon font finished loading (true) or failed (false: keep word labels).
     FontLoaded(bool),
@@ -229,6 +248,8 @@ pub enum Message {
     UpdateProgress(Version, u8),
     UpdateReady(Result<(Version, PathBuf), String>),
     InstallUpdate,
+    /// Opens the release page of an update this copy can't install itself.
+    OpenReleasePage,
     SetAutoUpdate(bool),
 }
 
@@ -263,6 +284,10 @@ pub struct Island {
     recall: Option<usize>,
     status: String,
     desktop_warning: String,
+    /// Linux Wayland: shortcuts as the desktop reports them, `(id, key combination)`.
+    system_shortcuts: Vec<(String, String)>,
+    /// Lasting notes about this desktop (no tray, no XWayland).
+    desktop_notes: Vec<String>,
     storage_warning: String,
     loading: bool,
     presence: Presence,
@@ -327,6 +352,9 @@ pub struct Island {
     update_peek_pending: bool,
     /// Starts the downloaded installer; replaced in tests.
     installer_launcher: fn(&std::path::Path) -> Result<(), String>,
+    /// A newer release this copy can't install itself (Linux, not a writable AppImage).
+    release_page: Option<Version>,
+    can_self_update: fn() -> bool,
     /// The notch window.
     window: Option<window::Id>,
     /// The decorated app window, while it is open.
@@ -381,6 +409,8 @@ impl Island {
             recall: None,
             status: String::new(),
             desktop_warning: String::new(),
+            system_shortcuts: Vec::new(),
+            desktop_notes: Vec::new(),
             storage_warning: String::new(),
             loading: true,
             presence: Presence::new(),
@@ -421,6 +451,8 @@ impl Island {
             update_failures: 0,
             update_peek_pending: false,
             installer_launcher: platform::launch_installer,
+            release_page: None,
+            can_self_update: platform::can_self_update,
             window: None,
             app_window: None,
             launch,
@@ -473,7 +505,12 @@ impl Island {
             ThemeChoice::System => self.system_light,
         }
     }
-    pub fn title(&self, _id: window::Id) -> String {
+    pub fn title(&self, id: window::Id) -> String {
+        #[cfg(target_os = "linux")]
+        if self.window == Some(id) {
+            return NOTCH_TITLE.into();
+        }
+        let _ = id;
         "bloop".into()
     }
 
@@ -627,7 +664,11 @@ impl Island {
     pub fn subscription(&self) -> Subscription<Message> {
         let mut events = vec![
             Subscription::run(platform::events).map(Message::Platform),
-            Subscription::run(platform::open_requests).map(|()| Message::OpenWindow),
+            Subscription::run(platform::open_requests).map(|request| match request {
+                bloop::launch::Request::Open => Message::OpenWindow,
+                bloop::launch::Request::Toggle => Message::Toggle,
+                bloop::launch::Request::Ask => Message::AskClipboard,
+            }),
             window::close_requests().map(Message::CloseRequested),
             window::close_events().map(Message::WindowClosed),
             iced::event::listen_with(|event, status, id| match event {
@@ -711,6 +752,12 @@ impl Island {
                 self.window = id;
                 return self.place_window(platform::Target::Current);
             }
+            Message::NotchPrepared(id) => {
+                // Presence may have hidden the notch (a fullscreen app) while it was prepared.
+                if self.window == Some(id) && self.presence.state() != State::Hidden {
+                    return window::set_mode(id, window::Mode::Windowed);
+                }
+            }
             Message::Tick(now) => {
                 self.now = now;
                 if self.reaction.is_some_and(|(_, _, until)| now >= until) {
@@ -790,7 +837,19 @@ impl Island {
                 platform::Event::Quit => return self.update(Message::Quit),
                 platform::Event::Warning(error) => self.desktop_warning = error,
                 platform::Event::ShortcutApplied => self.desktop_warning.clear(),
+                platform::Event::ShortcutsManagedBySystem(list) => self.system_shortcuts = list,
+                platform::Event::Note(note) => {
+                    if !self.desktop_notes.contains(&note) {
+                        self.desktop_notes.push(note);
+                    }
+                }
             },
+            Message::CopyTilingRule(rule) => return iced::clipboard::write(rule),
+            Message::DismissTilingRule => {
+                self.config.tiling_rule_dismissed = true;
+                self.draft_config.tiling_rule_dismissed = true;
+                return self.persist();
+            }
             // No notch yet (first-run setup): the shortcut brings the setup window forward.
             Message::Toggle if self.window.is_none() => return self.open_app_window(),
             Message::Toggle => return self.present(Event::Shortcut),
@@ -1399,9 +1458,15 @@ impl Island {
                 );
             }
             Message::UpdateChecked(manual, result) => match result {
+                Ok(Some(release)) if !(self.can_self_update)() => {
+                    self.update_failures = 0;
+                    self.release_page = Some(release.version);
+                    self.update_state = UpdateState::Idle;
+                }
                 Ok(Some(release)) => return self.start_download(release),
                 Ok(None) => {
                     self.update_failures = 0;
+                    self.release_page = None;
                     self.update_state = UpdateState::Idle;
                     self.up_to_date = manual;
                 }
@@ -1436,6 +1501,13 @@ impl Island {
                 }
             },
             Message::InstallUpdate => return self.install_update(),
+            Message::OpenReleasePage => {
+                if let Some(version) = self.release_page
+                    && let Err(error) = platform::open_url(&update::release_page(&version))
+                {
+                    self.update_state = UpdateState::Failed(error);
+                }
+            }
             Message::SetAutoUpdate(on) => {
                 if on {
                     self.next_check = Instant::now();
@@ -2013,6 +2085,10 @@ impl Island {
     /// One line for the dashboard's update status.
     pub fn update_status(&self) -> String {
         match &self.update_state {
+            UpdateState::Idle if self.release_page.is_some() => self
+                .release_page
+                .map(|version| format!("{version} available"))
+                .unwrap_or_default(),
             UpdateState::Idle if self.up_to_date => "Up to date".into(),
             UpdateState::Idle => String::new(),
             UpdateState::Checking => "Checking…".into(),
@@ -3037,6 +3113,8 @@ mod tests {
         app.window = Some(window::Id::unique());
         app.loading = false;
         app.storage_disabled = true;
+        // Tests don't run as an AppImage; behave like a copy that can install updates.
+        app.can_self_update = || true;
         app
     }
 
@@ -4364,6 +4442,33 @@ mod tests {
         );
         let _ = app.present_at(Event::Tick, start + Duration::from_millis(310));
         assert_eq!(app.presence.state(), State::Hover);
+    }
+
+    #[test]
+    fn prepared_notch_stays_hidden_behind_a_fullscreen_app() {
+        let mut app = ready();
+        let id = app.window.unwrap();
+        app.presence.on(Event::Fullscreen(true), Instant::now());
+        assert_eq!(app.presence.state(), State::Hidden);
+        assert_eq!(
+            app.update(Message::NotchPrepared(id)).units(),
+            0,
+            "stays hidden"
+        );
+        app.presence.on(Event::Fullscreen(false), Instant::now());
+        assert!(app.update(Message::NotchPrepared(id)).units() > 0, "shown");
+    }
+
+    #[test]
+    fn copy_that_cant_update_itself_links_to_the_release() {
+        let mut app = ready();
+        app.can_self_update = || false;
+        let _ = app.update(Message::UpdateChecked(true, Ok(Some(sample_release()))));
+        assert_eq!(app.update_state, UpdateState::Idle, "nothing downloads");
+        assert_eq!(app.release_page, Some(sample_release().version));
+        assert!(app.update_status().ends_with("available"));
+        let _ = app.update(Message::UpdateChecked(true, Ok(None)));
+        assert_eq!(app.release_page, None, "nothing newer any more");
     }
 
     fn sample_release() -> Release {

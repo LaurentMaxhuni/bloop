@@ -4,6 +4,8 @@ pub mod config;
 pub mod diagnose;
 pub mod export;
 pub mod launch;
+#[cfg(any(target_os = "linux", test))]
+pub mod linux_update;
 pub mod math;
 pub mod model;
 pub mod motion;

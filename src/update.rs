@@ -5,8 +5,36 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// Largest installer bloop will download.
+/// Largest Windows installer bloop will download.
 pub const MAX_INSTALLER: u64 = 50 * 1024 * 1024;
+
+/// How a platform's release asset is named, and the largest one bloop will download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssetNames {
+    pub prefix: &'static str,
+    pub suffix: &'static str,
+    pub max_size: u64,
+}
+
+/// The Windows installer: `bloop-setup-<version>.exe`.
+pub const WINDOWS: AssetNames = AssetNames {
+    prefix: "bloop-setup-",
+    suffix: ".exe",
+    max_size: MAX_INSTALLER,
+};
+
+/// The Linux AppImage: `bloop-<version>-x86_64.AppImage`.
+pub const LINUX: AssetNames = AssetNames {
+    prefix: "bloop-",
+    suffix: "-x86_64.AppImage",
+    max_size: 150 * 1024 * 1024,
+};
+
+/// The asset this build updates from.
+#[cfg(target_os = "linux")]
+pub const CURRENT: AssetNames = LINUX;
+#[cfg(not(target_os = "linux"))]
+pub const CURRENT: AssetNames = WINDOWS;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
@@ -81,8 +109,17 @@ impl Release {
     }
 }
 
+/// The GitHub page of a release, for copies that can't install it themselves.
+pub fn release_page(version: &Version) -> String {
+    format!("https://github.com/LaurentMaxhuni/bloop/releases/tag/v{version}")
+}
+
 pub fn installer_name(version: &Version) -> String {
-    format!("bloop-setup-{version}.exe")
+    installer_name_for(&CURRENT, version)
+}
+
+pub fn installer_name_for(names: &AssetNames, version: &Version) -> String {
+    format!("{}{version}{}", names.prefix, names.suffix)
 }
 
 #[derive(Deserialize)]
@@ -106,6 +143,15 @@ struct ApiAsset {
 /// Reads GitHub's "latest release" JSON. `Ok(None)` means there is nothing newer to install
 /// (or the release is incomplete); `Err` means the reply wasn't a release at all.
 pub fn parse_release(json: &[u8], current: &Version) -> Result<Option<Release>, Error> {
+    parse_release_for(json, current, &CURRENT)
+}
+
+/// [`parse_release`] for a given platform's asset names.
+pub fn parse_release_for(
+    json: &[u8],
+    current: &Version,
+    names: &AssetNames,
+) -> Result<Option<Release>, Error> {
     let release: ApiRelease = serde_json::from_slice(json)
         .map_err(|_| Error::Protocol("GitHub returned an unexpected reply.".into()))?;
     if release.draft || release.prerelease {
@@ -114,12 +160,12 @@ pub fn parse_release(json: &[u8], current: &Version) -> Result<Option<Release>, 
     let Some(version) = Version::parse(&release.tag_name).filter(|v| v > current) else {
         return Ok(None);
     };
-    let name = installer_name(&version);
+    let name = installer_name_for(names, &version);
     let find = |wanted: &str| release.assets.iter().find(|a| a.name == wanted);
     let (Some(installer), Some(checksum)) = (find(&name), find(&format!("{name}.sha256"))) else {
         return Ok(None);
     };
-    if installer.size == 0 || installer.size > MAX_INSTALLER {
+    if installer.size == 0 || installer.size > names.max_size {
         return Ok(None);
     }
     Ok(Some(Release {
@@ -291,7 +337,7 @@ pub async fn download_from(
     tokio::fs::create_dir_all(dir).await?;
     let part = dir.join(format!("{name}.part"));
     let target = dir.join(&name);
-    let limit = release.size.min(MAX_INSTALLER);
+    let limit = release.size.min(CURRENT.max_size);
     let result: Result<[u8; 32], Error> = async {
         let mut response = client
             .get(&release.installer_url)
@@ -363,18 +409,30 @@ pub async fn download_from(
 /// The newest already-downloaded installer newer than `current` whose bytes still match its
 /// saved checksum. Unfinished `.part` files never count.
 pub fn ready(dir: &Path, current: &Version) -> Option<(Version, std::path::PathBuf)> {
+    ready_for(dir, current, &CURRENT)
+}
+
+/// [`ready`] for a given platform's asset names.
+pub fn ready_for(
+    dir: &Path,
+    current: &Version,
+    names: &AssetNames,
+) -> Option<(Version, std::path::PathBuf)> {
     let mut found: Vec<(Version, std::path::PathBuf)> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
         .filter_map(|entry| {
             let file = entry.file_name().to_string_lossy().into_owned();
-            let version = Version::parse(file.strip_prefix("bloop-setup-")?.strip_suffix(".exe")?)?;
+            let version = Version::parse(
+                file.strip_prefix(names.prefix)?
+                    .strip_suffix(names.suffix)?,
+            )?;
             (version > *current).then_some((version, entry.path()))
         })
         .collect();
     found.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     found.into_iter().find(|(version, path)| {
-        let name = installer_name(version);
+        let name = installer_name_for(names, version);
         let sidecar = std::fs::read_to_string(dir.join(format!("{name}.sha256"))).ok();
         let expected = sidecar.and_then(|text| parse_checksum(&text, &name));
         expected.is_some() && sha256_file(path).ok() == expected
@@ -424,9 +482,10 @@ mod tests {
             ("bloop-setup-0.3.0.exe", 6_500_000),
             ("bloop-setup-0.3.0.exe.sha256", 90),
         ];
-        let release = parse_release(
+        let release = parse_release_for(
             release_json("v0.3.0", false, false, &both).as_bytes(),
             &current,
+            &WINDOWS,
         )
         .unwrap()
         .unwrap();
@@ -439,7 +498,7 @@ mod tests {
         );
         assert!(release.checksum_url.ends_with(".exe.sha256"));
 
-        let none = |json: String| parse_release(json.as_bytes(), &current).unwrap();
+        let none = |json: String| parse_release_for(json.as_bytes(), &current, &WINDOWS).unwrap();
         assert!(
             none(release_json("v0.3.0", true, false, &both)).is_none(),
             "draft"
@@ -474,6 +533,73 @@ mod tests {
             "too big"
         );
         assert!(parse_release(b"<html>rate limited</html>", &current).is_err());
+    }
+
+    #[test]
+    fn release_page_names_the_tag() {
+        assert_eq!(
+            release_page(&v("0.6.0")),
+            "https://github.com/LaurentMaxhuni/bloop/releases/tag/v0.6.0"
+        );
+    }
+
+    #[test]
+    fn linux_asset_names() {
+        let version = v("0.6.0");
+        assert_eq!(
+            installer_name_for(&LINUX, &version),
+            "bloop-0.6.0-x86_64.AppImage"
+        );
+        assert_eq!(
+            installer_name_for(&WINDOWS, &version),
+            "bloop-setup-0.6.0.exe"
+        );
+    }
+
+    #[test]
+    fn each_platform_picks_its_own_asset() {
+        let current = v("0.5.0");
+        let json = release_json(
+            "v0.6.0",
+            false,
+            false,
+            &[
+                ("bloop-setup-0.6.0.exe", 7_000_000),
+                ("bloop-setup-0.6.0.exe.sha256", 90),
+                ("bloop-0.6.0-x86_64.AppImage", 90_000_000),
+                ("bloop-0.6.0-x86_64.AppImage.sha256", 100),
+            ],
+        );
+        let windows = parse_release_for(json.as_bytes(), &current, &WINDOWS)
+            .unwrap()
+            .unwrap();
+        assert!(windows.installer_url.ends_with("/bloop-setup-0.6.0.exe"));
+        let linux = parse_release_for(json.as_bytes(), &current, &LINUX)
+            .unwrap()
+            .unwrap();
+        assert!(
+            linux
+                .installer_url
+                .ends_with("/bloop-0.6.0-x86_64.AppImage")
+        );
+        assert_eq!(
+            linux.size, 90_000_000,
+            "AppImage may exceed the Windows cap"
+        );
+        let only_windows = release_json(
+            "v0.6.0",
+            false,
+            false,
+            &[
+                ("bloop-setup-0.6.0.exe", 7_000_000),
+                ("bloop-setup-0.6.0.exe.sha256", 90),
+            ],
+        );
+        assert!(
+            parse_release_for(only_windows.as_bytes(), &current, &LINUX)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -95,6 +95,7 @@ fn chat_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chat> {
 
 const CHAT_COLUMNS: &str = "id, title, profile, destination, updated";
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn load_chatgpt() -> Result<Option<Vec<u8>>, String> {
     let path = data_path()?;
     if !path.exists() {
@@ -109,6 +110,7 @@ pub(crate) fn load_chatgpt() -> Result<Option<Vec<u8>>, String> {
         .map_err(|e| e.to_string())
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn save_chatgpt(protected: &[u8]) -> Result<(), String> {
     let connection = connect(&data_path()?)?;
     connection

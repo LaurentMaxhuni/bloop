@@ -38,6 +38,7 @@
       <li><strong>bloop.exe</strong> and the installer <strong>bloop-setup-&lt;version&gt;.exe</strong>, for each release published on <a href="https://github.com/LaurentMaxhuni/bloop/releases">GitHub Releases</a>.</li>
       <li>Both are built by <a href="https://github.com/LaurentMaxhuni/bloop/blob/main/.github/workflows/release.yml">GitHub Actions</a> from a version tag of the public repository <a href="https://github.com/LaurentMaxhuni/bloop">LaurentMaxhuni/bloop</a>. Nothing built on a personal computer is signed.</li>
       <li>The uninstaller that Inno Setup writes during installation is not signed.</li>
+      <li>The Linux AppImage <strong>bloop-&lt;version&gt;-x86_64.AppImage</strong> (from 0.6.0) is built by the same workflow from the same tag. It is not signed; check it against its <code>.sha256</code> file.</li>
       <li>bloop is open source under the <a href="https://github.com/LaurentMaxhuni/bloop/blob/main/LICENSE">MIT licence</a>, and so are all the components built into it.</li>
     </ul>
 
@@ -59,7 +60,7 @@
     </ul>
 
     <h2>Check a download</h2>
-    <p>Each release lists a <code>.sha256</code> file next to the installer. In PowerShell, <code>Get-FileHash .\bloop-setup-&lt;version&gt;.exe</code> should print the same value. Once releases are signed, <code>Get-AuthenticodeSignature</code> shows the signature too.</p>
+    <p>Each release lists a <code>.sha256</code> file next to the installer. In PowerShell, <code>Get-FileHash .\bloop-setup-&lt;version&gt;.exe</code> should print the same value. Once releases are signed, <code>Get-AuthenticodeSignature</code> shows the signature too. On Linux, download the AppImage and its <code>.sha256</code> file into one folder and run <code>sha256sum -c bloop-&lt;version&gt;-x86_64.AppImage.sha256</code>. Every version and its checksum is on the <a href="downloads.html">downloads page</a>.</p>
   </div>
 </main>
 </body>

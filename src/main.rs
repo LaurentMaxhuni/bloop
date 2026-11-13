@@ -10,6 +10,12 @@ mod ui;
 use iced::Color;
 
 fn main() {
+    // Before any thread starts: pick X11 (XWayland on Wayland desktops).
+    #[cfg(target_os = "linux")]
+    {
+        platform::linux::init_backend();
+        bloop::cli::set_child_env_hook(platform::linux::child_env_tokio);
+    }
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -19,8 +25,8 @@ fn main() {
     // A second copy (e.g. installer launch while autostart runs) exits quietly.
     let launch = bloop::launch::launch_kind(std::env::args());
     let Some(_instance) = platform::single_instance() else {
-        if bloop::launch::signals_running_copy(launch) {
-            platform::signal_running_copy();
+        if let Some(request) = bloop::launch::request(launch) {
+            platform::signal_running_copy(request);
         }
         return;
     };

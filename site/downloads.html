@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Download bloop — every version</title>
+<meta name="description" content="Download bloop for Windows (installer) or Linux (AppImage), the latest version or any earlier one, each with its SHA-256 checksum.">
+<link rel="canonical" href="https://laurentmaxhuni.github.io/bloop/downloads.html">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<script>
+  // Apply the remembered theme before first paint, as on the home page.
+  try { const t = localStorage.getItem('bloop-theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch {}
+  try { const a = localStorage.getItem('bloop-accent'); if (a) document.documentElement.dataset.accent = a; } catch {}
+</script>
+<link rel="stylesheet" href="styles.css">
+<style>
+  .dl { padding: 56px 0 72px; }
+  .dl h1 { font-size: clamp(34px, 6vw, 52px); max-width: none; }
+  .dl h2 { font-size: 22px; margin: 52px 0 12px; max-width: none; }
+  .dl p, .dl li { color: var(--muted-strong); font-size: 16px; line-height: 1.65; }
+  .dl .lead { max-width: 62ch; margin-top: 12px; }
+  .dl strong { color: var(--fg); }
+  .dl .back { display: inline-flex; margin-bottom: 28px; font-size: 14px; color: var(--muted-strong); text-decoration: none; }
+  .dl .back:hover { color: var(--fg); }
+
+  .platforms { display: grid; gap: 16px; margin-top: 32px; }
+  @media (min-width: 760px) { .platforms { grid-template-columns: 1fr 1fr; } }
+  .platform { display: flex; flex-direction: column; gap: 10px; padding: 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--card); box-shadow: var(--shadow); }
+  .platform h3 { font-size: 19px; margin: 0; }
+  .platform p { margin: 0; font-size: 15px; }
+  .platform .btn { align-self: flex-start; margin-top: 6px; }
+  .platform .file { font: 13px/1.4 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+
+  .versions { list-style: none; padding: 0; margin: 20px 0 0; display: grid; gap: 12px; }
+  .release { padding: 16px 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); }
+  .release-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; }
+  .release-head h3 { font-size: 18px; margin: 0; }
+  .release-head time { color: var(--muted); font-size: 14px; }
+  .release-head .notes { margin-left: auto; font-size: 14px; }
+  .badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--accent); color: var(--accent-fg); }
+  .files { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 6px; }
+  .files li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; font-size: 14px; }
+  .files .os { min-width: 64px; color: var(--muted); }
+  .files .name { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+  .files .size, .files .sum { color: var(--muted); font-size: 13px; }
+  .files .none { color: var(--muted); }
+  .status { margin-top: 14px; font-size: 14px; color: var(--muted); }
+
+  .dl pre { margin: 10px 0 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--secondary); overflow-x: auto; }
+  .dl pre code { background: none; border: 0; padding: 0; white-space: pre; font-size: 13px; line-height: 1.6; }
+  .dl ul.plain { padding-left: 20px; max-width: 70ch; }
+  .dl ul.plain li + li { margin-top: 6px; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></symbol>
+</svg>
+<main class="dl">
+  <div class="wrap">
+    <a class="back" href="./">← bloop</a>
+    <p class="eyebrow">bloop</p>
+    <h1>Download bloop</h1>
+    <p class="lead">Free and open source. Pick your platform for the latest version, or any earlier one below. Every file comes from <a href="https://github.com/LaurentMaxhuni/bloop/releases">GitHub Releases</a>, built by GitHub Actions from a version tag, with a SHA-256 checksum next to it.</p>
+
+    <div class="platforms">
+      <section class="platform" aria-labelledby="win-title">
+        <h3 id="win-title">Windows</h3>
+        <p>Windows 10 or 11 with a DirectX 12 graphics driver. One installer; bloop updates itself after that.</p>
+        <a class="btn btn-primary btn-lg" data-latest="windows" href="https://github.com/LaurentMaxhuni/bloop/releases/download/v0.5.1/bloop-setup-0.5.1.exe">
+          <svg class="i"><use href="#i-download"/></svg><span>Download for Windows</span>
+        </a>
+        <span class="file" data-latest-file="windows">bloop-setup-0.5.1.exe · 8.1 MB</span>
+      </section>
+      <section class="platform" aria-labelledby="linux-title">
+        <h3 id="linux-title">Linux</h3>
+        <p>x86_64 AppImage for GNOME, KDE Plasma, Xfce, Hyprland, Sway and other desktops. glibc 2.35 or newer and a Vulkan or OpenGL driver.</p>
+        <a class="btn btn-primary btn-lg" data-latest="linux" href="https://github.com/LaurentMaxhuni/bloop/releases" hidden>
+          <svg class="i"><use href="#i-download"/></svg><span>Download for Linux</span>
+        </a>
+        <span class="file" data-latest-file="linux">The first Linux build arrives with bloop 0.6.0.</span>
+      </section>
+    </div>
+
+    <h2 id="all">All versions</h2>
+    <ol class="versions" data-versions>
+      <li class="release">
+        <div class="release-head"><h3>0.5.1</h3><span class="badge">Latest</span><time datetime="2026-11-12">12 Nov 2026</time><a class="notes" href="https://github.com/LaurentMaxhuni/bloop/releases/tag/v0.5.1">Release notes</a></div>
+        <ul class="files">
+          <li><span class="os">Windows</span><a class="name" href="https://github.com/LaurentMaxhuni/bloop/releases/download/v0.5.1/bloop-setup-0.5.1.exe">bloop-setup-0.5.1.exe</a><span class="size">8.1 MB</span><a class="sum" href="https://github.com/LaurentMaxhuni/bloop/releases/download/v0.5.1/bloop-setup-0.5.1.exe.sha256">SHA-256</a></li>
+          <li><span class="os">Linux</span><span class="none">Not available for this version</span></li>
+        </ul>
+      </li>
+      <li class="release">
+        <div class="release-head"><h3>0.5.0</h3><time datetime="2026-11-12">12 Nov 2026</time><a class="notes" href="https://github.com/LaurentMaxhuni/bloop/releases/tag/v0.5.0">Release notes</a></div>
+        <ul class="files">
+          <li><span class="os">Windows</span><a class="name" href="https://github.com/LaurentMaxhuni/bloop/releases/download/v0.5.0/bloop-setup-0.5.0.exe">bloop-setup-0.5.0.exe</a><span class="size">8.1 MB</span><a class="sum" href="https://github.com/LaurentMaxhuni/bloop/releases/download/v0.5.0/bloop-setup-0.5.0.exe.sha256">SHA-256</a></li>
+          <li><span class="os">Linux</span><span class="none">Not available for this version</span></li>
+        </ul>
+      </li>
+      <li class="release">
+        <div class="release-head"><h3>0.4.0</h3><time datetime="2026-11-11">11 Nov 2026</time><a class="notes" href="https://github.com/LaurentMaxhuni/bloop/releases/tag/v0.4.0">Release notes</a></div>
+        <ul class="files">
+          <li><span class="os">Windows</span><a class="name" href="https://github.com/LaurentMaxhuni/bloop/releases/download/v0.4.0/bloop-setup-0.4.0.exe">bloop-setup-0.4.0.exe</a><span class="size">7.9 MB</span><a class="sum" href="https://github.com/LaurentMaxhuni/bloop/releases/download/v0.4.0/bloop-setup-0.4.0.exe.sha256">SHA-256</a></li>
+          <li><span class="os">Linux</span><span class="none">Not available for this version</span></li>
+        </ul>
+      </li>
+      <li class="release">
+        <div class="release-head"><h3>0.3.1</h3><time datetime="2026-11-07">7 Nov 2026</time><a class="notes" href="https://github.com/LaurentMaxhuni/bloop/releases/tag/v0.3.1">Release notes</a></div>
+        <ul class="files">
+          <li><span class="os">Windows</span><a class="name" href="https://github.com/LaurentMaxhuni/bloop/releases/download/v0.3.1/bloop-setup-0.3.1.exe">bloop-setup-0.3.1.exe</a><span class="size">6.6 MB</span><a class="sum" href="https://github.com/LaurentMaxhuni/bloop/releases/download/v0.3.1/bloop-setup-0.3.1.exe.sha256">SHA-256</a></li>
+          <li><span class="os">Linux</span><span class="none">Not available for this version</span></li>
+        </ul>
+      </li>
+      <li class="release">
+        <div class="release-head"><h3>0.3.0</h3><time datetime="2026-11-07">7 Nov 2026</time><a class="notes" href="https://github.com/LaurentMaxhuni/bloop/releases/tag/v0.3.0">Release notes</a></div>
+        <ul class="files">
+          <li><span class="os">Windows</span><a class="name" href="https://github.com/LaurentMaxhuni/bloop/releases/download/v0.3.0/bloop-setup-0.3.0.exe">bloop-setup-0.3.0.exe</a><span class="size">6.6 MB</span><a class="sum" href="https://github.com/LaurentMaxhuni/bloop/releases/download/v0.3.0/bloop-setup-0.3.0.exe.sha256">SHA-256</a></li>
+          <li><span class="os">Linux</span><span class="none">Not available for this version</span></li>
+        </ul>
+      </li>
+    </ol>
+    <p class="status" data-versions-status>Older versions don't update themselves to anything but the latest release: installing one is for going back on purpose.</p>
+
+    <h2 id="install">Install</h2>
+    <p><strong>Windows:</strong> run the installer. bloop isn't code-signed yet, so SmartScreen may say "unknown publisher": choose <strong>More info → Run anyway</strong>. When it finishes, <strong>Launch bloop</strong> opens setup.</p>
+    <p><strong>Linux:</strong> make the AppImage executable and run it. Keep it in a folder you can write to (for example <code>~/Applications</code>) so it can update itself. On first run it adds itself to your app menu.</p>
+    <pre><code>chmod +x bloop-*-x86_64.AppImage
+./bloop-*-x86_64.AppImage</code></pre>
+    <ul class="plain">
+      <li>Saved API keys and the ChatGPT sign-in go in your keyring (GNOME Keyring, KWallet or KeePassXC).</li>
+      <li>GNOME shows the tray icon with the AppIndicator extension (Ubuntu includes it).</li>
+      <li>Hyprland, Sway and i3 need one config line to float the notch; bloop shows it with a Copy button.</li>
+    </ul>
+
+    <h2 id="verify">Check a download</h2>
+    <p>Each file has a <code>.sha256</code> file next to it. Compare them before you run it:</p>
+    <pre><code># Windows (PowerShell): the hash must match the .sha256 file
+Get-FileHash .\bloop-setup-&lt;version&gt;.exe
+
+# Linux: download both files into one folder, then
+sha256sum -c bloop-&lt;version&gt;-x86_64.AppImage.sha256</code></pre>
+    <p>bloop's own updater does the same check before it installs anything. More in the <a href="code-signing.html">code signing policy</a>.</p>
+  </div>
+</main>
+<script type="module" src="downloads.js"></script>
+</body>
+</html>

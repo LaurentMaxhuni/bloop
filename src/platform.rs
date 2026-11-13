@@ -1,3 +1,6 @@
+#[cfg(any(target_os = "linux", test))]
+pub mod linux;
+
 use bloop::config::NotchPosition;
 use iced::{Point, Size, futures::SinkExt};
 
@@ -29,7 +32,9 @@ pub fn show_fatal(message: &str) {
             );
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    linux::portal::show_fatal(message);
+    #[cfg(not(any(windows, target_os = "linux")))]
     eprintln!("bloop could not start: {message}");
 }
 
@@ -42,6 +47,12 @@ pub enum Event {
     Quit,
     Warning(String),
     ShortcutApplied,
+    /// Linux Wayland: the desktop manages the shortcuts; `(id, key combination)` as reported.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    ShortcutsManagedBySystem(Vec<(String, String)>),
+    /// A lasting note about this desktop (e.g. no tray), shown on the Shortcut & startup page.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Note(String),
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +61,8 @@ pub struct Controller {
     sender: std::sync::mpsc::Sender<Command>,
     #[cfg(windows)]
     thread_id: u32,
+    #[cfg(target_os = "linux")]
+    linux: tokio::sync::mpsc::UnboundedSender<linux::shortcuts::Command>,
 }
 
 #[cfg(windows)]
@@ -71,14 +84,20 @@ impl Controller {
     pub fn ask_shortcut(&self, value: String) {
         #[cfg(windows)]
         self.send(Command::AskShortcut(value));
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        let _ = self
+            .linux
+            .send(linux::shortcuts::Command::AskShortcut(value));
+        #[cfg(not(any(windows, target_os = "linux")))]
         let _ = value;
     }
 
     pub fn shortcut(&self, value: String) {
         #[cfg(windows)]
         self.send(Command::Shortcut(value));
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        let _ = self.linux.send(linux::shortcuts::Command::Shortcut(value));
+        #[cfg(not(any(windows, target_os = "linux")))]
         let _ = value;
     }
 
@@ -98,14 +117,14 @@ impl Controller {
 }
 
 pub fn validate_shortcut(value: &str) -> Result<(), String> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     {
         value
             .parse::<global_hotkey::hotkey::HotKey>()
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = value;
         Ok(())
@@ -161,7 +180,11 @@ pub fn save_file_dialog(suggested_name: &str) -> Result<Option<std::path::PathBu
             ))
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::portal::save_file_dialog(suggested_name)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = suggested_name;
         Err("The Save dialog is only available on Windows.".into())
@@ -218,13 +241,38 @@ pub fn events() -> impl iced::futures::Stream<Item = Event> {
                 }
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         {
-            let _ = output
-                .send(Event::Warning(
-                    "Linux tray and global shortcut are not implemented yet.".into(),
-                ))
-                .await;
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let (commands, inbox) = tokio::sync::mpsc::unbounded_channel();
+            let _ = sender.send(Event::Ready(Controller { linux: commands }));
+            if linux::session() == linux::Session::WaylandOnly {
+                let _ = sender.send(Event::Note(
+                    "Install XWayland for the notch to stay on top.".into(),
+                ));
+            }
+            // Stop both when the subscription ends.
+            struct Abort(Vec<tokio::task::JoinHandle<()>>);
+            impl Drop for Abort {
+                fn drop(&mut self) {
+                    self.0.iter().for_each(tokio::task::JoinHandle::abort);
+                }
+            }
+            let _tasks = Abort(vec![
+                tokio::spawn(linux::portal::watch_settings()),
+                tokio::spawn(linux::tray::run(sender.clone())),
+                tokio::spawn(linux::shortcuts::run(sender, inbox)),
+            ]);
+            while let Some(event) = receiver.recv().await {
+                if output.send(event).await.is_err() {
+                    break;
+                }
+            }
+            std::future::pending::<()>().await;
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            let _ = &mut output;
             std::future::pending::<()>().await;
         }
     })
@@ -233,13 +281,13 @@ pub fn events() -> impl iced::futures::Stream<Item = Event> {
 #[cfg(windows)]
 const WAKE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 42;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[derive(Default)]
-struct Shortcuts([Option<global_hotkey::hotkey::HotKey>; 2]);
+pub(crate) struct Shortcuts([Option<global_hotkey::hotkey::HotKey>; 2]);
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 impl Shortcuts {
-    fn event(&self, id: u32) -> Option<Event> {
+    pub(crate) fn event(&self, id: u32) -> Option<Event> {
         if self.0[0].is_some_and(|key| key.id() == id) {
             Some(Event::Toggle)
         } else if self.0[1].is_some_and(|key| key.id() == id) {
@@ -249,7 +297,7 @@ impl Shortcuts {
         }
     }
 
-    fn apply(
+    pub(crate) fn apply(
         &mut self,
         slot: usize,
         value: &str,
@@ -474,10 +522,53 @@ pub fn shape(window: &dyn iced::window::Window, outline: &[(f32, f32)]) {
             let _ = unsafe { DeleteObject(region.into()) };
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    linux::x11::shape(window, outline);
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (window, outline);
     }
+}
+
+/// Linux: how this copy takes an update (replace its AppImage, or only link to the release).
+#[cfg(target_os = "linux")]
+fn linux_install_mode() -> bloop::linux_update::InstallMode {
+    let appimage = std::env::var_os("APPIMAGE")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from);
+    let writable = appimage
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .and_then(|dir| std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok())
+        // SAFETY: access only reads the NUL-terminated path for the duration of the call.
+        .is_some_and(|dir| unsafe { libc::access(dir.as_ptr(), libc::W_OK) } == 0);
+    bloop::linux_update::install_mode(appimage.as_deref(), writable)
+}
+
+/// False when this copy can only point at the release page (Linux, not run as a writable
+/// AppImage). Windows always installs updates itself.
+pub fn can_self_update() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        matches!(
+            linux_install_mode(),
+            bloop::linux_update::InstallMode::Replace { .. }
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+/// Linux: marks the still-hidden notch as a utility window kept out of the taskbar and pager.
+/// Other platforms set this up through the window settings.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn prepare_notch(window: &dyn iced::window::Window) {
+    #[cfg(target_os = "linux")]
+    linux::x11::prepare_notch(window);
+    #[cfg(not(target_os = "linux"))]
+    let _ = window;
 }
 
 /// Opens a link from a reply in the default browser. Only web and mail links: a reply
@@ -506,7 +597,11 @@ pub fn open_url(url: &str) -> Result<(), String> {
         }
         Ok(())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::portal::open_url(url.trim())
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Err("Opening links isn't supported on this platform yet.".into())
     }
@@ -532,7 +627,11 @@ pub fn fullscreen_active() -> bool {
             .contains(&state)
         })
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::x11::fullscreen_active()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         false
     }
@@ -548,7 +647,7 @@ pub enum Target {
     Active,
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 #[derive(Debug, PartialEq, Eq)]
 struct PhysicalRect {
     x: i32,
@@ -557,7 +656,7 @@ struct PhysicalRect {
     height: i32,
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn physical_rect(
     area: [i32; 4],
     scale: f32,
@@ -684,7 +783,15 @@ pub fn place_on(
             }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // The pointer is only fresh under XWayland while it is over an X11 window, so Wayland
+        // sessions keep the notch on its current monitor.
+        let use_pointer =
+            matches!(target, Target::Active) && linux::session() == linux::Session::X11;
+        linux::x11::place(window, canvas, position, use_pointer);
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     let _ = (window, canvas, position, target);
 }
 
@@ -729,7 +836,17 @@ pub fn place(size: Size, position: NotchPosition) -> Option<Point> {
         // Flush with the top edge so it reads as a notch.
         Some(Point::new(x, area.top as f32 / scale))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        let ([left, top, right, _bottom], _) = linux::x11::primary_area()?;
+        let x = match position {
+            NotchPosition::Centre => (left + right) / 2.0 - size.width / 2.0,
+            NotchPosition::Left => left + EDGE_INSET,
+            NotchPosition::Right => right - EDGE_INSET - size.width,
+        };
+        Some(Point::new(x, top))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (size, position);
         None
@@ -748,10 +865,33 @@ pub struct Instance {
     handle: windows::Win32::Foundation::HANDLE,
     #[cfg(windows)]
     open_event: Option<windows::Win32::Foundation::HANDLE>,
+    /// The socket's folder, when this copy owns the instance socket.
+    #[cfg(target_os = "linux")]
+    socket_dir: Option<std::path::PathBuf>,
+    /// The instance lock, held until this copy exits.
+    #[cfg(target_os = "linux")]
+    _lock: Option<std::fs::File>,
+}
+
+/// The instance socket's listener, handed to [`open_requests`].
+#[cfg(target_os = "linux")]
+static LISTENER: std::sync::Mutex<Option<std::os::unix::net::UnixListener>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(target_os = "linux")]
+fn linux_socket_dir() -> std::path::PathBuf {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from);
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    linux::instance::socket_dir(runtime.as_deref(), uid)
 }
 
 impl Drop for Instance {
     fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(dir) = &self.socket_dir {
+            linux::instance::remove(dir);
+        }
         #[cfg(windows)]
         // SAFETY: both handles are ours (CreateMutexW / CreateEventW) and closed exactly once here.
         unsafe {
@@ -774,14 +914,45 @@ pub fn single_instance() -> Option<Instance> {
     {
         instance_named(MUTEX_NAME, OPEN_EVENT_NAME)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        let dir = linux_socket_dir();
+        match linux::instance::bind(&dir) {
+            Ok(Some(owner)) => {
+                if let Ok(mut slot) = LISTENER.lock() {
+                    *slot = Some(owner.listener);
+                }
+                Some(Instance {
+                    socket_dir: Some(dir),
+                    _lock: Some(owner.lock),
+                })
+            }
+            Ok(None) => None,
+            Err(error) => {
+                // Run anyway: a broken socket must not stop bloop from starting.
+                tracing::warn!("single-instance socket unavailable: {error}");
+                Some(Instance {
+                    socket_dir: None,
+                    _lock: None,
+                })
+            }
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Some(Instance {})
     }
 }
 
-/// Asks the running bloop to open its app window (best effort).
-pub fn signal_running_copy() {
+/// Passes this launch's request to the running bloop (best effort). Windows always opens the
+/// app window, as before.
+pub fn signal_running_copy(request: bloop::launch::Request) {
+    #[cfg(target_os = "linux")]
+    if let Err(error) = linux::instance::send(&linux_socket_dir(), request) {
+        tracing::warn!("could not reach the running copy: {error}");
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = request;
     #[cfg(windows)]
     {
         use windows::Win32::{
@@ -820,19 +991,40 @@ pub fn signal_running_copy() {
 }
 
 /// Yields `()` each time a second launch asks this copy to open its window.
-pub fn open_requests() -> impl iced::futures::Stream<Item = ()> {
+pub fn open_requests() -> impl iced::futures::Stream<Item = bloop::launch::Request> {
     iced::stream::channel(4, async |mut output| {
         #[cfg(windows)]
         {
             let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
             std::thread::spawn(move || wait_for_open_requests(sender));
             while receiver.recv().await.is_some() {
-                if output.send(()).await.is_err() {
+                if output.send(bloop::launch::Request::Open).await.is_err() {
                     break;
                 }
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            let listener = LISTENER.lock().ok().and_then(|mut slot| slot.take());
+            if let Some(listener) = listener {
+                let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+                std::thread::spawn(move || {
+                    for stream in listener.incoming().flatten() {
+                        if let Some(request) = linux::instance::receive(stream)
+                            && sender.send(request).is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                while let Some(request) = receiver.recv().await {
+                    if output.send(request).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = &mut output;
         }
@@ -980,7 +1172,11 @@ pub fn autostart() -> bool {
     {
         run_value(RUN_KEY).is_some()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::desktop::autostart()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         false
     }
@@ -991,7 +1187,11 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
     {
         set_run_value(RUN_KEY, enable)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::desktop::set_autostart(enable)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = enable;
         Err("Start with Windows is only available on Windows.".into())
@@ -999,6 +1199,7 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
 }
 
 /// The Run-key command: autostart launches quietly, without opening the app window.
+#[cfg(any(windows, test))]
 fn run_command(exe: &std::path::Path) -> String {
     format!("\"{}\" --background", exe.display())
 }
@@ -1007,6 +1208,7 @@ fn run_command(exe: &std::path::Path) -> String {
 /// entry (`"<exe>"`). Absent means autostart is off; a value naming another exe belongs to
 /// another copy (the installed one, when this is a dev build) and is left alone, or every
 /// copy launched once would take over sign-in and the installed copy would stop updating.
+#[cfg(any(windows, test))]
 fn needs_migration(current: Option<&str>, exe: &std::path::Path) -> bool {
     let legacy = format!("\"{}\"", exe.display());
     current.is_some_and(|value| value.trim().eq_ignore_ascii_case(&legacy))
@@ -1017,6 +1219,11 @@ pub fn migrate_autostart() {
     #[cfg(windows)]
     if let Err(error) = migrate_run_value(RUN_KEY) {
         tracing::warn!("could not migrate the autostart entry: {error}");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::desktop::migrate_autostart();
+        linux::desktop::ensure_launcher_entry();
     }
 }
 
@@ -1134,7 +1341,11 @@ pub fn reduce_motion_system() -> bool {
         };
         ok.is_ok() && !enabled.as_bool()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::portal::reduce_motion_system()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         false
     }
@@ -1164,7 +1375,11 @@ pub fn light_theme_system() -> bool {
         };
         status.is_ok() && value == 1
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::portal::light_theme_system()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         false
     }
@@ -1177,22 +1392,36 @@ pub fn light_theme_system() -> bool {
 /// closes (some launchers and terminals do this), setup is started outside that job; a job
 /// that forbids breaking away gets setup as a normal child instead.
 pub fn launch_installer(path: &std::path::Path) -> Result<(), String> {
-    #[cfg(windows)]
+    #[cfg(target_os = "linux")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-        if bloop::update::installer_command(path)
-            .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
-            .spawn()
-            .is_ok()
-        {
-            return Ok(());
-        }
+        use bloop::linux_update::{InstallMode, relaunch_command, replace};
+        let InstallMode::Replace { appimage } = linux_install_mode() else {
+            return Err("This copy of bloop can't update itself.".into());
+        };
+        replace(path, &appimage).map_err(|e| format!("Couldn't replace bloop: {e}"))?;
+        let mut command = relaunch_command(&appimage, std::process::id());
+        linux::child_env(&mut command);
+        command.spawn().map(drop).map_err(|e| e.to_string())
     }
-    bloop::update::installer_command(path)
-        .spawn()
-        .map(drop)
-        .map_err(|e| e.to_string())
+    #[cfg(not(target_os = "linux"))]
+    {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+            if bloop::update::installer_command(path)
+                .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        bloop::update::installer_command(path)
+            .spawn()
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]

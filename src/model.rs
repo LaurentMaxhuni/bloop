@@ -208,7 +208,9 @@ mod tests {
                     .contains("<instructions>\nBe brief.\n</instructions>")
             );
             for (pair, i) in messages[1..messages.len() - 1]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .zip(15 - count..15)
             {
                 assert_eq!(

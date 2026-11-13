@@ -560,8 +560,11 @@ if (finalCta && bloops.final) {
 /* ------------------------------------------------ Live download link */
 
 const RELEASE_API = 'https://api.github.com/repos/LaurentMaxhuni/bloop/releases/latest';
-const CACHE_KEY = 'bloop-release';
+const CACHE_KEY = 'bloop-release-v2';
 const CACHE_MS = 10 * 60 * 1000;
+// Linux visitors get the AppImage once a release has one; everyone else the Windows installer.
+const LINUX = /Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
+const ASSETS = { windows: /^bloop-setup-(.+)\.exe$/, linux: /^bloop-(.+)-x86_64\.AppImage$/ };
 
 async function latestRelease() {
   try {
@@ -575,27 +578,31 @@ async function latestRelease() {
     const res = await fetch(RELEASE_API, { signal: controller.signal, headers: { Accept: 'application/vnd.github+json' } });
     if (!res.ok) throw new Error(`GitHub API ${res.status}`);
     const json = await res.json();
+    const release = { at: Date.now() };
     for (const asset of json.assets ?? []) {
-      const m = /^bloop-setup-(.+)\.exe$/.exec(asset.name);
-      if (m) {
-        const release = { at: Date.now(), version: m[1], mb: (asset.size / 1048576).toFixed(1), url: asset.browser_download_url };
-        try { sessionStorage.setItem(CACHE_KEY, JSON.stringify(release)); } catch {}
-        return release;
+      for (const [platform, pattern] of Object.entries(ASSETS)) {
+        const m = pattern.exec(asset.name);
+        if (m) release[platform] = { version: m[1], mb: (asset.size / 1048576).toFixed(1), url: asset.browser_download_url };
       }
     }
-    throw new Error('no installer asset');
+    if (!release.windows && !release.linux) throw new Error('no download asset');
+    try { sessionStorage.setItem(CACHE_KEY, JSON.stringify(release)); } catch {}
+    return release;
   } finally {
     clearTimeout(timer);
   }
 }
 
-latestRelease().then((r) => {
-  if (!/^https:\/\/github\.com\/LaurentMaxhuni\/bloop\/releases\/download\//.test(r.url)) return;
+latestRelease().then((release) => {
+  const linux = LINUX && release.linux;
+  const r = linux ? release.linux : release.windows;
+  if (!r || !/^https:\/\/github\.com\/LaurentMaxhuni\/bloop\/releases\/download\//.test(r.url)) return;
   for (const a of $$('[data-download]')) a.href = r.url;
   for (const m of $$('[data-download-meta]')) {
     m.textContent = `v${r.version} · ${r.mb} MB`;
     m.hidden = false;
   }
+  if (linux) for (const l of $$('[data-download-label]')) l.textContent = 'Download for Linux';
   for (const v of $$('[data-version]')) v.textContent = r.version;
 }).catch(() => {
   // Keep the Releases page link and the plain label.
