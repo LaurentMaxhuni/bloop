@@ -744,6 +744,10 @@ impl Island {
                                 self.chat = chat;
                                 self.turns = turns;
                                 self.recall = None;
+                                // An empty chat left on a deleted profile (older bloop).
+                                if self.turns.is_empty() {
+                                    self.chat.profile = self.usable_profile(self.chat.profile);
+                                }
                             }
                             None => {
                                 self.chat.id = model::new_chat_id(0);
@@ -1173,7 +1177,7 @@ impl Island {
                 return self.persist();
             }
             Message::NewChatKey(id) => {
-                if self.window == Some(id) && self.is_open() && !self.turns.is_empty() {
+                if self.window == Some(id) && self.is_open() && self.can_start_new_chat() {
                     return self.update(Message::NewChat);
                 }
             }
@@ -1587,6 +1591,11 @@ impl Island {
             parts.push(model.to_owned());
         }
         parts.join(" · ")
+    }
+
+    /// New chat has something to replace: turns, or a chat whose profile was deleted.
+    fn can_start_new_chat(&self) -> bool {
+        !self.turns.is_empty() || self.config.with_profile(self.chat.profile).is_none()
     }
 
     /// `id` when that profile still exists, else the default.
@@ -2688,7 +2697,7 @@ impl Island {
             "All chats",
             Message::ShowChats,
         ));
-        if idle && !self.turns.is_empty() {
+        if idle && self.can_start_new_chat() {
             footer = footer.push(self.small_button(
                 Icon::MessageSquarePlus,
                 "New chat",
@@ -4029,6 +4038,36 @@ mod tests {
             app.config.default_profile, 0,
             "a missing profile can't be starred"
         );
+    }
+
+    #[test]
+    fn deleting_the_chats_profile_never_strands_the_notch() {
+        // An empty chat on the deleted profile moves to the default.
+        let mut app = ready();
+        let cloud = with_cloud_profile(&mut app);
+        app.draft_config.profiles = app.config.profiles.clone();
+        let _ = app.update(Message::PickProfile(cloud));
+        assert_eq!(app.chat.profile, cloud);
+        let _ = app.update(Message::DeleteProfile(cloud));
+        let _ = app.update(Message::DeleteProfileConfirm);
+        assert!(app.config.profiles.is_empty());
+        assert_eq!(app.chat.profile, 0);
+        assert!(app.config.with_profile(app.chat.profile).is_some());
+        assert!(!app.can_start_new_chat(), "nothing to replace");
+
+        // A chat with turns keeps its history, and New chat gets it going again.
+        let mut app = ready();
+        let cloud = with_cloud_profile(&mut app);
+        app.draft_config.profiles = app.config.profiles.clone();
+        let _ = app.update(Message::PickProfile(cloud));
+        exchange(&mut app, "hi", "ok");
+        let _ = app.update(Message::DeleteProfile(cloud));
+        let _ = app.update(Message::DeleteProfileConfirm);
+        assert_eq!(app.chat.profile, cloud);
+        assert!(app.can_start_new_chat());
+        let _ = app.update(Message::NewChat);
+        assert_eq!(app.chat.profile, 0);
+        assert!(app.turns.is_empty());
     }
 
     #[test]

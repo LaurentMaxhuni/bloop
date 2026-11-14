@@ -18,7 +18,9 @@ use bloop::{
 };
 use iced::{
     Alignment, Element, Length, Task,
-    widget::{Space, button, column, container, row, scrollable, text, text_editor, toggler},
+    widget::{
+        Space, button, column, container, pick_list, row, scrollable, text, text_editor, toggler,
+    },
 };
 
 /// Sidebar width and the page content's maximum width, in logical pixels.
@@ -700,10 +702,23 @@ impl Island {
                     Some(Message::SetDefaultProfile(id)),
                 )
             };
+            let title: Element<'_, Message> = if id == default {
+                row![
+                    text(name).size(14).font(MEDIUM),
+                    container(text("Default").size(11))
+                        .padding([1, 8])
+                        .style(style::badge(t)),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into()
+            } else {
+                text(name).size(14).font(MEDIUM).into()
+            };
             let mut line = row![
                 star,
                 column![
-                    text(name).size(14).font(MEDIUM),
+                    title,
                     text(self.describe_model(&config, None))
                         .size(12)
                         .color(t.muted_foreground),
@@ -765,7 +780,23 @@ impl Island {
             Variant::Outline,
             (!full && self.profile_edit != ProfileEdit::New).then_some(Message::NewProfile),
         );
-        field("Profiles", list.push(add))
+        let mut section = column![].spacing(12);
+        if !self.config.profiles.is_empty() {
+            let options = self.profile_options();
+            let selected = options.iter().find(|o| o.id == default).cloned();
+            section = section.push(field(
+                "New chats start on",
+                pick_list(options, selected, |option| {
+                    Message::SetDefaultProfile(option.id)
+                })
+                .text_size(14)
+                .padding([8, 12])
+                .width(Length::Fill)
+                .style(style::select(t))
+                .menu_style(style::menu(t)),
+            ));
+        }
+        section.push(field("Profiles", list.push(add))).into()
     }
 
     /// An icon in the icon font, or `word` until it loads.
@@ -830,6 +861,12 @@ impl Island {
         self.draft_config.default_profile = self.config.default_profile;
         if self.profile_edit == ProfileEdit::Existing(id) {
             self.edit_profile(0);
+        }
+        // An empty chat on it just moves to the default; one with turns keeps its
+        // history where it was sent and offers New chat instead.
+        if self.chat.profile == id && self.turns.is_empty() {
+            self.chat.profile = self.config.default_profile();
+            self.chat.destination.clear();
         }
         self.persist()
     }

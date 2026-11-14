@@ -348,6 +348,20 @@ the one being edited open; `default_profile` round-trips and a dangling one load
 Not verified: the new icons, tooltips and profile rows weren't looked at in a running
 bloop, because a debug copy was running and a second one would only signal it.
 
+## Deleting the chat's profile, default picker (2026-11-14)
+
+Bug: deleting the profile the notch's chat used left the chat on a missing profile. With
+no saved profiles left the menu disappeared, New chat only showed once the chat had turns,
+and every prompt answered "profile was deleted". Now an empty chat moves to the default
+profile on delete (and on load), New chat shows whenever the chat's profile is gone, and
+the Model page has a "New chats start on" menu plus a Default tag beside the starred row.
+
+Passed: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
+`deleting_the_chats_profile_never_strands_the_notch` covers both the empty chat and the
+chat with turns.
+
+Not verified: the new menu and tag weren't looked at in a running bloop.
+
 ## Self-update end to end (2026-11-12)
 
 Automated: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean.
