@@ -1,7 +1,7 @@
 //! Assistant replies as rich content: Markdown with syntax-highlighted code blocks and
 //! laid-out math. A [`Reply`] keeps its parsed Markdown and extends it as text streams in.
 
-use super::Message;
+use super::{Message, TOOLTIP_DELAY, TOOLTIP_GAP};
 use crate::icons::{self, Icon};
 use crate::style::{RADIUS, Tokens};
 use bloop::math::{self, Limits, Node, Spacing};
@@ -178,7 +178,9 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
                         ..Default::default()
                     }),
                 tooltip::Position::Bottom,
-            ),
+            )
+            .gap(TOOLTIP_GAP)
+            .delay(TOOLTIP_DELAY),
         ]
         .align_y(Alignment::Center);
         let body = column(lines.iter().map(|line| {

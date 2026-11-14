@@ -581,3 +581,43 @@ pid, which in principle could reach a reused group id once every process in it h
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` (321 passed,
 2 ignored) pass on Linux; `cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D
 warnings` passes, which checks the Windows code but not the MSVC build CI runs.
+
+## Recording a shortcut (2026-11-14)
+
+Shortcut & startup has a **Record** button beside each shortcut field. While it records, the
+field becomes a box with a focus-ring border reading "Press keys…", then the modifiers held
+("Ctrl+…"), then the combination ("Ctrl+Shift+K · Enter to save"); the hint under it changes
+too. Enter, Esc or **Done** stops it. A combination that differs from the saved one is checked
+with the same rules as Save (`validate_shortcuts`, shared with `settings_to_save`: it parses,
+and the two shortcuts differ) and is then saved and registered at once; otherwise the error
+shows where Save shows it and nothing is saved. Enter and Esc never become part of the
+shortcut, even with a modifier held. A key without Ctrl, Alt or Super is refused, so a plain
+letter or Shift+letter can't take over typing everywhere. Keys are named by their physical
+position (`Code`, as `global_hotkey` registers them), so `Ctrl+Q` means the same key on any
+layout. Leaving the page or closing the window drops an unfinished recording. The key listener
+is subscribed only while recording, and only key presses in the app window count.
+
+Seven state tests in `ui::tests::shortcut_recording` feed `RecordKey` events through `update`:
+Enter saves and queues one settings save; Esc with Alt held saves `Alt+7`, not `Alt+Escape`;
+re-recording the saved combination or stopping with nothing pressed saves nothing; keys without
+Ctrl/Alt/Super are refused; the other shortcut's combination shows "The two shortcuts need to
+be different." and leaves config and draft alone; a key in the notch window is ignored and
+leaving the page cancels; and recorded names (`Super+F5`, `Alt+Space`, `Ctrl+Shift+Slash`, an
+AZERTY A as `Ctrl+Q`) are what the parser accepts. `cargo fmt --check`, `cargo clippy
+--all-targets -- -D warnings` and `cargo test` (336 passed, 5 ignored) pass on Windows.
+
+Not checked: the page wasn't opened in a running build, because the installed copy was running
+and a dev build would only signal it; key presses weren't simulated on the desktop. Not checked
+on Linux. Known limits: a combination another program (or bloop itself) already holds as a
+global hotkey is taken by Windows before the app window sees it, so it can't be recorded, and a
+combination Windows refuses at registration still shows the existing "unavailable" warning
+after saving. `Alt+Ctrl+B` and `Ctrl+Alt+B` aren't recognised as the same in the UI's
+different-shortcuts check; the platform thread still refuses the duplicate.
+
+## Tooltips wait before showing (2026-11-14)
+
+Every tooltip (the icon buttons' `tip` and the code block's Copy) now shows after 700 ms of
+hovering (`TOOLTIP_DELAY`) instead of at once, below its control with a 4 px gap. Iced 0.14's
+`Tooltip::delay` schedules one redraw for when the time is up, so there's no polling while the
+pointer rests. fmt, clippy and `cargo test` (336 passed, 5 ignored) pass. Not looked at in a
+running build: the installed copy was running.

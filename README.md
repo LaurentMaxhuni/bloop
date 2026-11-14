@@ -107,7 +107,8 @@ Desktop notes:
   Model, Shortcut & startup and About pages. First launch walks you through setup; after that,
   the notch's settings icon or the tray's **Settings** bring it back. Closing it leaves bloop
   running; quit from the tray. The notch opens on the monitor you're working on when you use
-  the shortcut.
+  the shortcut. On **Shortcut & startup**, type a shortcut or click **Record** and press it
+  (Ctrl, Alt or Super plus a key); Enter or Esc saves it.
 - **Updates.** bloop checks GitHub Releases 30 s after start and every 6 h (switchable); a
   failed check is retried after 5 min, then less often. It checks the download's SHA-256 and
   offers "Update ready — click to restart". Setup's log is `updates\install.log` in the data

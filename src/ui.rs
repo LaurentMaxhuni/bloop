@@ -6,7 +6,7 @@ mod onboarding;
 mod rich;
 
 pub use chats::ChatAction;
-pub use dashboard::{AppPage, ProfileEdit};
+pub use dashboard::{AppPage, ProfileEdit, RecordInput, Recording, ShortcutSlot};
 
 use crate::{
     icons::{self, Icon},
@@ -165,6 +165,10 @@ pub enum Message {
     ChatGptRefreshModels,
     ChatGptModels(Result<Vec<ChatGptModel>, String>),
     Shortcut(String),
+    /// Start recording a shortcut from key presses, or stop and save it.
+    RecordShortcut(ShortcutSlot),
+    /// A key event in a window while a shortcut is recording.
+    RecordKey(window::Id, RecordInput),
     SaveSettings,
     Theme,
     /// Start a fresh chat; the current one stays in the chat list.
@@ -284,6 +288,8 @@ pub struct Island {
     recall: Option<usize>,
     status: String,
     desktop_warning: String,
+    /// A shortcut being recorded on the Shortcut & startup page.
+    recording: Option<Recording>,
     /// Linux Wayland: shortcuts as the desktop reports them, `(id, key combination)`.
     system_shortcuts: Vec<(String, String)>,
     /// Lasting notes about this desktop (no tray, no XWayland).
@@ -409,6 +415,7 @@ impl Island {
             recall: None,
             status: String::new(),
             desktop_warning: String::new(),
+            recording: None,
             system_shortcuts: Vec::new(),
             desktop_notes: Vec::new(),
             storage_warning: String::new(),
@@ -707,6 +714,25 @@ impl Island {
                 _ => None,
             }),
         ];
+        if self.recording.is_some() && self.app_window.is_some() {
+            // Only while recording, so ordinary typing never wakes this listener.
+            events.push(iced::event::listen_with(|event, _, id| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key,
+                    physical_key,
+                    modifiers,
+                    repeat: false,
+                    ..
+                }) => Some(Message::RecordKey(
+                    id,
+                    RecordInput::Press(key, physical_key, modifiers),
+                )),
+                iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) => {
+                    Some(Message::RecordKey(id, RecordInput::Modifiers(modifiers)))
+                }
+                _ => None,
+            }));
+        }
         if self.presence.next_deadline().is_some() {
             events.push(iced::time::every(Duration::from_millis(50)).map(Message::Deadline));
         }
@@ -873,6 +899,7 @@ impl Island {
             Message::CloseRequested(id) => {
                 if self.app_window == Some(id) {
                     self.app_window = None;
+                    self.recording = None;
                     let close = window::close(id);
                     if self.onboarding.take().is_some() {
                         // Setup stays pending (`onboarded` is still false); the notch takes over.
@@ -888,6 +915,7 @@ impl Island {
             Message::WindowClosed(id) => {
                 if self.app_window == Some(id) {
                     self.app_window = None;
+                    self.recording = None;
                 }
                 if self.window == Some(id) {
                     self.window = None;
@@ -1172,6 +1200,12 @@ impl Island {
             Message::ChatGptSignIn(_) | Message::ChatGptSignOut | Message::ChatGptRefreshModels => {
             }
             Message::Shortcut(value) => self.draft_config.shortcut = value,
+            Message::RecordShortcut(slot) => return self.toggle_recording(slot),
+            Message::RecordKey(id, input) => {
+                if self.app_window == Some(id) && self.page == AppPage::Shortcut {
+                    return self.record_input(input);
+                }
+            }
             Message::Instructions(action) => {
                 let edited = action.is_edit();
                 self.instructions_editor.perform(action);
@@ -1514,7 +1548,13 @@ impl Island {
                 }
                 return self.apply_live(|c| c.auto_update = on);
             }
-            Message::ShowPage(page) => self.page = page,
+            Message::ShowPage(page) => {
+                // Leaving the page drops an unfinished recording.
+                if page != self.page {
+                    self.recording = None;
+                }
+                self.page = page;
+            }
             Message::SetTheme(theme) => return self.apply_live(|c| c.theme = theme),
             Message::SetContext(context) => return self.apply_live(|c| c.context = context),
             Message::SetAccent(accent) => return self.apply_live(|c| c.accent = accent),
@@ -2337,7 +2377,7 @@ impl Island {
         self.tip(button, tip)
     }
 
-    /// `content` with `tip` shown below it on hover.
+    /// `content` with `tip` shown below it after a moment's hover.
     fn tip<'a>(
         &self,
         content: impl Into<Element<'a, Message>>,
@@ -2351,6 +2391,8 @@ impl Island {
                 .style(style::card(t, t.background)),
             widget::tooltip::Position::Bottom,
         )
+        .gap(TOOLTIP_GAP)
+        .delay(TOOLTIP_DELAY)
         .into()
     }
 
@@ -3092,6 +3134,12 @@ fn place(rect: iced::Rectangle, inner: Element<'_, Message>) -> Element<'_, Mess
         .height(Length::Fill)
         .into()
 }
+
+/// How long the pointer rests on a control before its tooltip shows. Iced redraws once
+/// when the time is up, so waiting costs nothing while idle.
+const TOOLTIP_DELAY: Duration = Duration::from_millis(700);
+/// Space between a control and the tooltip below it, in logical pixels.
+const TOOLTIP_GAP: f32 = 4.0;
 
 fn field<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     column![text(label).size(13).font(MEDIUM), control.into()]
@@ -4826,5 +4874,197 @@ mod tests {
         let notch = app.window.unwrap();
         let _ = app.update(Message::CloseRequested(notch));
         assert!(app.quitting);
+    }
+
+    mod shortcut_recording {
+        use super::*;
+        use iced::keyboard::{
+            Key, Modifiers,
+            key::{Code, Named, NativeCode, Physical},
+        };
+
+        /// Settings saves queue as jobs, and the app window shows Shortcut & startup.
+        fn recording_app() -> Island {
+            let mut app = queued_storage();
+            app.app_window = Some(window::Id::unique());
+            app.page = AppPage::Shortcut;
+            app
+        }
+
+        fn press(app: &mut Island, key: Key, code: Code, modifiers: Modifiers) {
+            let id = app.app_window.unwrap();
+            let input = RecordInput::Press(key, Physical::Code(code), modifiers);
+            let _ = app.update(Message::RecordKey(id, input));
+        }
+
+        fn letter(app: &mut Island, c: &str, code: Code, modifiers: Modifiers) {
+            press(app, Key::Character(c.into()), code, modifiers);
+        }
+
+        fn named(app: &mut Island, named: Named, code: Code, modifiers: Modifiers) {
+            press(app, Key::Named(named), code, modifiers);
+        }
+
+        fn saved_shortcuts(app: &Island) -> Vec<(String, String)> {
+            app.jobs
+                .iter()
+                .filter_map(|job| match job {
+                    jobs::Job::Save { config, .. } => {
+                        Some((config.shortcut.clone(), config.ask_shortcut.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn enter_saves_the_recorded_combination() {
+            let mut app = recording_app();
+            let _ = app.update(Message::RecordShortcut(ShortcutSlot::Toggle));
+            assert_eq!(app.recording.as_ref().unwrap().label(), "Press keys…");
+            named(
+                &mut app,
+                Named::Control,
+                Code::ControlLeft,
+                Modifiers::empty(),
+            );
+            assert_eq!(app.recording.as_ref().unwrap().label(), "Ctrl+…");
+            letter(
+                &mut app,
+                "K",
+                Code::KeyK,
+                Modifiers::CTRL | Modifiers::SHIFT,
+            );
+            assert_eq!(
+                app.recording.as_ref().unwrap().captured.as_deref(),
+                Some("Ctrl+Shift+K")
+            );
+            // Nothing is saved until recording stops.
+            assert_eq!(app.config.shortcut, "Ctrl+Alt+B");
+            assert!(saved_shortcuts(&app).is_empty());
+            named(&mut app, Named::Enter, Code::Enter, Modifiers::empty());
+            assert!(app.recording.is_none());
+            assert_eq!(app.config.shortcut, "Ctrl+Shift+K");
+            assert_eq!(app.draft_config.shortcut, "Ctrl+Shift+K");
+            assert_eq!(
+                saved_shortcuts(&app),
+                [("Ctrl+Shift+K".into(), "Ctrl+Alt+Shift+A".into())]
+            );
+        }
+
+        #[test]
+        fn escape_saves_and_is_never_part_of_the_shortcut() {
+            let mut app = recording_app();
+            let _ = app.update(Message::RecordShortcut(ShortcutSlot::Ask));
+            letter(&mut app, "7", Code::Digit7, Modifiers::ALT);
+            // Escape with a modifier held still stops: it never becomes Alt+Escape.
+            named(&mut app, Named::Escape, Code::Escape, Modifiers::ALT);
+            assert!(app.recording.is_none());
+            assert_eq!(app.config.ask_shortcut, "Alt+7");
+            assert_eq!(app.config.shortcut, "Ctrl+Alt+B");
+            assert_eq!(
+                saved_shortcuts(&app),
+                [("Ctrl+Alt+B".into(), "Alt+7".into())]
+            );
+        }
+
+        #[test]
+        fn stopping_with_nothing_new_saves_nothing() {
+            let mut app = recording_app();
+            let _ = app.update(Message::RecordShortcut(ShortcutSlot::Toggle));
+            named(&mut app, Named::Escape, Code::Escape, Modifiers::empty());
+            assert!(app.recording.is_none());
+            let _ = app.update(Message::RecordShortcut(ShortcutSlot::Toggle));
+            letter(&mut app, "b", Code::KeyB, Modifiers::CTRL | Modifiers::ALT);
+            // Done (the button) stops it the same way Enter does.
+            let _ = app.update(Message::RecordShortcut(ShortcutSlot::Toggle));
+            assert!(app.recording.is_none());
+            assert_eq!(app.config.shortcut, "Ctrl+Alt+B");
+            assert!(saved_shortcuts(&app).is_empty());
+        }
+
+        #[test]
+        fn a_key_without_ctrl_alt_or_super_is_refused() {
+            let mut app = recording_app();
+            let _ = app.update(Message::RecordShortcut(ShortcutSlot::Toggle));
+            letter(&mut app, "b", Code::KeyB, Modifiers::empty());
+            letter(&mut app, "B", Code::KeyB, Modifiers::SHIFT);
+            assert_eq!(app.status, "Hold Ctrl, Alt or Super with the key.");
+            assert_eq!(app.recording.as_ref().unwrap().captured, None);
+            named(&mut app, Named::Enter, Code::Enter, Modifiers::empty());
+            assert_eq!(app.config.shortcut, "Ctrl+Alt+B");
+            assert!(saved_shortcuts(&app).is_empty());
+        }
+
+        #[test]
+        fn the_other_shortcuts_combination_shows_the_save_error_and_is_not_saved() {
+            let mut app = recording_app();
+            let _ = app.update(Message::RecordShortcut(ShortcutSlot::Toggle));
+            let all = Modifiers::CTRL | Modifiers::ALT | Modifiers::SHIFT;
+            letter(&mut app, "A", Code::KeyA, all);
+            named(&mut app, Named::Enter, Code::Enter, Modifiers::empty());
+            assert!(app.recording.is_none());
+            assert_eq!(app.status, "The two shortcuts need to be different.");
+            assert_eq!(app.config.shortcut, "Ctrl+Alt+B");
+            assert_eq!(app.draft_config.shortcut, "Ctrl+Alt+B");
+            assert!(saved_shortcuts(&app).is_empty());
+        }
+
+        #[test]
+        fn keys_elsewhere_are_ignored_and_leaving_the_page_cancels() {
+            let mut app = recording_app();
+            let _ = app.update(Message::RecordShortcut(ShortcutSlot::Toggle));
+            // A key press in the notch is not the app window's.
+            let notch = app.window.unwrap();
+            let input = RecordInput::Press(
+                Key::Character("j".into()),
+                Physical::Code(Code::KeyJ),
+                Modifiers::CTRL,
+            );
+            let _ = app.update(Message::RecordKey(notch, input));
+            assert_eq!(app.recording.as_ref().unwrap().captured, None);
+            letter(&mut app, "j", Code::KeyJ, Modifiers::CTRL);
+            let _ = app.update(Message::ShowPage(AppPage::About));
+            assert!(app.recording.is_none());
+            assert_eq!(app.config.shortcut, "Ctrl+Alt+B");
+            assert!(saved_shortcuts(&app).is_empty());
+        }
+
+        #[test]
+        fn key_names_match_what_the_shortcut_parser_reads() {
+            use dashboard::{RecordedKey, record_key};
+            let combo =
+                |key: Key, code, modifiers| match record_key(&key, Physical::Code(code), modifiers)
+                {
+                    RecordedKey::Combo(shortcut) => shortcut,
+                    other => panic!("{other:?}"),
+                };
+            let f5 = Key::Named(Named::F5);
+            assert_eq!(combo(f5, Code::F5, Modifiers::LOGO), "Super+F5");
+            let space = Key::Named(Named::Space);
+            assert_eq!(combo(space, Code::Space, Modifiers::ALT), "Alt+Space");
+            // The physical key names it: AZERTY's A sits where QWERTY has Q.
+            let a = Key::Character("a".into());
+            assert_eq!(combo(a, Code::KeyQ, Modifiers::CTRL), "Ctrl+Q");
+            let slash = Key::Character("/".into());
+            let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
+            assert_eq!(combo(slash, Code::Slash, ctrl_shift), "Ctrl+Shift+Slash");
+            assert_eq!(
+                record_key(
+                    &Key::Named(Named::Super),
+                    Physical::Code(Code::SuperLeft),
+                    Modifiers::CTRL
+                ),
+                RecordedKey::Held("Ctrl+Super".into())
+            );
+            assert!(matches!(
+                record_key(
+                    &Key::Unidentified,
+                    Physical::Unidentified(NativeCode::Unidentified),
+                    Modifiers::CTRL
+                ),
+                RecordedKey::Invalid(_)
+            ));
+        }
     }
 }
