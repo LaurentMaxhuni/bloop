@@ -2,6 +2,7 @@
 //! Appearance applies live; the Model and Shortcut & startup pages keep a Save button.
 
 use super::{Island, Message, UpdateState, field};
+use crate::mascot::Mood;
 use crate::platform;
 use crate::{
     icons::{self, Icon},
@@ -17,13 +18,150 @@ use bloop::{
     update::Version,
 };
 use iced::{
-    Alignment, Element, Length, Task,
+    Alignment, Border, Element, Length, Task,
+    keyboard::{Key, Modifiers, key},
     widget::{Space, button, column, container, row, scrollable, text, text_editor, toggler},
 };
 
 /// Sidebar width and the page content's maximum width, in logical pixels.
 const SIDEBAR_WIDTH: f32 = 200.0;
 const CONTENT_MAX_WIDTH: f32 = 640.0;
+
+/// Which of the two global shortcuts a recording replaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutSlot {
+    /// Opens and closes the notch.
+    Toggle,
+    /// Ask about the clipboard.
+    Ask,
+}
+
+/// A shortcut being recorded from key presses in the app window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recording {
+    pub slot: ShortcutSlot,
+    /// The modifiers held right now, such as `Ctrl+Alt`.
+    pub held: String,
+    /// The last valid combination pressed; saved when recording stops.
+    pub captured: Option<String>,
+}
+
+impl Recording {
+    pub fn new(slot: ShortcutSlot) -> Self {
+        Self {
+            slot,
+            held: String::new(),
+            captured: None,
+        }
+    }
+
+    /// What the recording box shows.
+    pub fn label(&self) -> String {
+        match &self.captured {
+            Some(keys) => format!("{keys} · Enter to save"),
+            None if !self.held.is_empty() => format!("{}+…", self.held),
+            None => "Press keys…".into(),
+        }
+    }
+}
+
+/// A keyboard event the recording listens to.
+#[derive(Debug, Clone)]
+pub enum RecordInput {
+    Press(Key, key::Physical, Modifiers),
+    Modifiers(Modifiers),
+}
+
+/// What one key press means while recording.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecordedKey {
+    /// Escape or Enter: stop recording.
+    Stop,
+    /// Only modifiers so far; the text shows the ones held.
+    Held(String),
+    /// A usable combination, in the form `platform::validate_shortcut` accepts.
+    Combo(String),
+    /// Not a usable shortcut; the text says why.
+    Invalid(String),
+}
+
+/// `Ctrl+Alt+Shift+Super`, in that order, for the modifiers in `modifiers`.
+pub fn modifier_names(modifiers: Modifiers) -> String {
+    [
+        (modifiers.control(), "Ctrl"),
+        (modifiers.alt(), "Alt"),
+        (modifiers.shift(), "Shift"),
+        (modifiers.logo(), "Super"),
+    ]
+    .iter()
+    .filter(|(held, _)| *held)
+    .map(|(_, name)| *name)
+    .collect::<Vec<_>>()
+    .join("+")
+}
+
+/// Turns one key press into a shortcut. The physical key names it, so the shortcut means the
+/// same key whatever the keyboard layout; `global_hotkey` registers keys the same way.
+pub fn record_key(key: &Key, physical: key::Physical, mut modifiers: Modifiers) -> RecordedKey {
+    use key::Named;
+    let named = match key {
+        Key::Named(named) => Some(*named),
+        _ => None,
+    };
+    match named {
+        Some(Named::Escape | Named::Enter) => return RecordedKey::Stop,
+        // A modifier's own press may arrive before the modifier state includes it.
+        Some(Named::Control) => modifiers |= Modifiers::CTRL,
+        Some(Named::Alt | Named::AltGraph) => modifiers |= Modifiers::ALT,
+        Some(Named::Shift) => modifiers |= Modifiers::SHIFT,
+        Some(Named::Super | Named::Meta | Named::Hyper) => modifiers |= Modifiers::LOGO,
+        _ => {}
+    }
+    if matches!(
+        named,
+        Some(
+            Named::Control
+                | Named::Alt
+                | Named::AltGraph
+                | Named::Shift
+                | Named::Super
+                | Named::Meta
+                | Named::Hyper
+        )
+    ) {
+        return RecordedKey::Held(modifier_names(modifiers));
+    }
+    let key::Physical::Code(code) = physical else {
+        return RecordedKey::Invalid("bloop can't use that key in a shortcut.".into());
+    };
+    if !(modifiers.control() || modifiers.alt() || modifiers.logo()) {
+        return RecordedKey::Invalid("Hold Ctrl, Alt or Super with the key.".into());
+    }
+    let name = format!("{code:?}");
+    let name = name
+        .strip_prefix("Key")
+        .or_else(|| name.strip_prefix("Digit"))
+        .filter(|rest| rest.len() == 1)
+        .unwrap_or(&name);
+    let shortcut = format!("{}+{name}", modifier_names(modifiers));
+    match platform::validate_shortcut(&shortcut) {
+        Ok(()) => RecordedKey::Combo(shortcut),
+        Err(error) => RecordedKey::Invalid(error),
+    }
+}
+
+/// Both shortcuts parse, and they differ. Save and recording check the same rules.
+pub(super) fn validate_shortcuts(config: &Config) -> Result<(), String> {
+    platform::validate_shortcut(&config.shortcut)?;
+    let ask = config.ask_shortcut.trim();
+    if !ask.is_empty() {
+        platform::validate_shortcut(ask)?;
+        if ask.eq_ignore_ascii_case(config.shortcut.trim()) {
+            return Err("The two shortcuts need to be different.".into());
+        }
+    }
+    Ok(())
+}
 
 /// Which dashboard page is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -923,14 +1061,7 @@ impl Island {
             }
         }
         config.validate()?;
-        platform::validate_shortcut(&config.shortcut)?;
-        let ask = config.ask_shortcut.trim();
-        if !ask.is_empty() {
-            platform::validate_shortcut(ask)?;
-            if ask.eq_ignore_ascii_case(config.shortcut.trim()) {
-                return Err("The two shortcuts need to be different.".into());
-            }
-        }
+        validate_shortcuts(&config)?;
         Ok(config)
     }
 
@@ -952,27 +1083,149 @@ impl Island {
         self.instructions_editor = text_editor::Content::with_text(&self.draft_config.instructions);
     }
 
+    /// Starts recording `slot`, or stops and saves when it is already recording.
+    pub(super) fn toggle_recording(&mut self, slot: ShortcutSlot) -> Task<Message> {
+        if self.recording.as_ref().is_some_and(|r| r.slot == slot) {
+            return self.finish_recording();
+        }
+        self.status.clear();
+        self.recording = Some(Recording::new(slot));
+        Task::none()
+    }
+
+    /// One key event from the app window while recording.
+    pub(super) fn record_input(&mut self, input: RecordInput) -> Task<Message> {
+        let Some(recording) = self.recording.as_mut() else {
+            return Task::none();
+        };
+        match input {
+            RecordInput::Modifiers(modifiers) => recording.held = modifier_names(modifiers),
+            RecordInput::Press(key, physical, modifiers) => {
+                match record_key(&key, physical, modifiers) {
+                    RecordedKey::Stop => return self.finish_recording(),
+                    RecordedKey::Held(held) => recording.held = held,
+                    RecordedKey::Combo(shortcut) => {
+                        recording.captured = Some(shortcut);
+                        self.status.clear();
+                    }
+                    RecordedKey::Invalid(error) => self.status = error,
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// Stops recording. A combination that differs from the saved one is validated, then
+    /// saved and registered at once; an invalid one shows why and changes nothing.
+    pub(super) fn finish_recording(&mut self) -> Task<Message> {
+        let Some(recording) = self.recording.take() else {
+            return Task::none();
+        };
+        let Some(shortcut) = recording.captured else {
+            return Task::none();
+        };
+        let mut config = self.config.clone();
+        let (saved, draft) = match recording.slot {
+            ShortcutSlot::Toggle => (&mut config.shortcut, &mut self.draft_config.shortcut),
+            ShortcutSlot::Ask => (
+                &mut config.ask_shortcut,
+                &mut self.draft_config.ask_shortcut,
+            ),
+        };
+        if *saved == shortcut {
+            *draft = shortcut;
+            return Task::none();
+        }
+        *saved = shortcut.clone();
+        if let Err(error) = validate_shortcuts(&config) {
+            self.status = error;
+            self.react(Mood::Oops, 1.2);
+            return Task::none();
+        }
+        *draft = shortcut;
+        self.config = config;
+        self.status.clear();
+        self.react(Mood::Happy, 1.2);
+        self.apply_shortcuts();
+        self.persist()
+    }
+
+    /// The text field and its Record button, or the recording box while it listens.
+    fn shortcut_control<'a>(
+        &'a self,
+        slot: ShortcutSlot,
+        placeholder: &'a str,
+        value: &'a str,
+        on_input: fn(String) -> Message,
+    ) -> Element<'a, Message> {
+        let t = self.tokens();
+        match &self.recording {
+            Some(recording) if recording.slot == slot => row![
+                container(text(recording.label()).size(14))
+                    .padding([8, 12])
+                    .width(Length::Fill)
+                    .style(move |_| container::Style {
+                        border: Border {
+                            color: t.ring,
+                            width: 2.0,
+                            radius: 8.0.into(),
+                        },
+                        ..Default::default()
+                    }),
+                self.button("Done", Variant::Primary)
+                    .on_press(Message::RecordShortcut(slot)),
+            ],
+            _ => row![
+                self.input(placeholder, value, on_input).width(Length::Fill),
+                self.button("Record", Variant::Outline)
+                    .on_press_maybe((!self.loading).then_some(Message::RecordShortcut(slot))),
+            ],
+        }
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
     fn shortcut_page(&self) -> Element<'_, Message> {
         let t = self.tokens();
+        let hint = |slot| {
+            if self.recording.as_ref().is_some_and(|r| r.slot == slot) {
+                "Hold Ctrl, Alt or Super and press a key. Enter or Esc saves it."
+            } else {
+                ""
+            }
+        };
+        let toggle_hint = match hint(ShortcutSlot::Toggle) {
+            "" => "Opens and closes the notch from anywhere.",
+            recording => recording,
+        };
+        let ask_hint = match hint(ShortcutSlot::Ask) {
+            "" => {
+                "Copy some text, press this, and ask about it: the notch opens with the text attached. Leave it empty to turn it off."
+            }
+            recording => recording,
+        };
         let mut page = column![
             field(
                 "Global shortcut",
-                self.input("Ctrl+Alt+B", &self.draft_config.shortcut, Message::Shortcut),
+                self.shortcut_control(
+                    ShortcutSlot::Toggle,
+                    "Ctrl+Alt+B",
+                    &self.draft_config.shortcut,
+                    Message::Shortcut,
+                ),
             ),
-            text("Opens and closes the notch from anywhere.")
-                .size(12)
-                .color(t.muted_foreground),
+            text(toggle_hint).size(12).color(t.muted_foreground),
             field(
                 "Ask about clipboard",
-                self.input(
+                self.shortcut_control(
+                    ShortcutSlot::Ask,
                     "Ctrl+Alt+Shift+A",
                     &self.draft_config.ask_shortcut,
                     Message::AskShortcut,
                 ),
             ),
-            text("Copy some text, press this, and ask about it: the notch opens with the text attached. Leave it empty to turn it off.")
-                .size(12)
-                .color(t.muted_foreground),
+            text(ask_hint).size(12).color(t.muted_foreground),
         ]
         .spacing(16);
         if !self.system_shortcuts.is_empty() {
