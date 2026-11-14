@@ -1,6 +1,6 @@
 [package]
 name = "bloop"
-version = "0.5.1"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.92"
 description = "A local-first native AI desktop notch"
@@ -26,8 +26,22 @@ ring = "0.17"
 # Select only DirectX 12 instead of loading unused GPU backends on Windows.
 wgpu = { version = "27", default-features = false, features = ["std", "wgsl", "dx12"] }
 tray-icon = "0.26"
-global-hotkey = "0.9"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_Security", "Win32_System_Registry", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_UI_Controls_Dialogs"] }
+
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+global-hotkey = "0.9"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux draws through X11 (XWayland on Wayland desktops) with a Wayland fallback.
+iced = { version = "0.14", default-features = false, features = ["wgpu-bare", "tokio", "crisp", "canvas", "markdown", "highlighter", "x11", "wayland"] }
+# Vulkan first, OpenGL ES as the fallback.
+wgpu = { version = "27", default-features = false, features = ["std", "wgsl", "vulkan", "gles"] }
+x11rb = { version = "0.13", features = ["shape", "randr"] }
+ksni = { version = "0.3", default-features = false, features = ["tokio"] }
+ashpd = { version = "0.14", default-features = false, features = ["tokio", "global_shortcuts", "settings", "file_chooser"] }
+oo7 = { version = "0.7", default-features = false, features = ["tokio", "native_crypto"] }
+libc = "0.2"
+png = "0.18"
 
 [profile.release]
 lto = "thin"

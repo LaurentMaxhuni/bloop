@@ -515,3 +515,123 @@ delete, and never below a saved profile's id on load), and `next_profile_id` cou
 (104 library, 141 app, integration suites). Limitation: a config saved by 0.5.0 or older
 after deleting its top profile has no record of that id; the first delete with this build
 starts recording.
+
+## Linux port (2026-11-13)
+
+Automated: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`
+pass on Windows (local) and on Ubuntu 22.04 (CI job `linux`), and the same job builds the
+AppImage. Pure Linux logic (backend choice, shape rectangles, scale factor, monitor choice and
+work areas, shortcut triggers, tiling detection, desktop-file quoting, theme values, file URIs,
+update decisions, keyring vault) is also tested on Windows.
+
+Manual checks per desktop. Values: pass, fail, not possible on this desktop, or not yet checked.
+None of these have been run on real desktops yet.
+
+| Check | GNOME Wayland | KDE Plasma Wayland | Hyprland or Sway | Xfce (X11) |
+|---|---|---|---|---|
+| Notch at Centre / Left / Right | not yet checked | not yet checked | not yet checked | not yet checked |
+| Stays on top of normal windows | not yet checked | not yet checked | not yet checked | not yet checked |
+| Shape and click-through outside it | not yet checked | not yet checked | not yet checked | not yet checked |
+| Not in taskbar / Alt-Tab | not yet checked | not yet checked | not yet checked | not yet checked |
+| Hides for a fullscreen X11 app | not yet checked | not yet checked | not yet checked | not yet checked |
+| Hidden by a fullscreen Wayland app | not yet checked | not yet checked | not yet checked | not possible on this desktop |
+| Tray icon and menu | not yet checked | not yet checked | not yet checked | not yet checked |
+| Toggle shortcut | not yet checked | not yet checked | not yet checked | not yet checked |
+| Ask-about-clipboard shortcut | not yet checked | not yet checked | not yet checked | not yet checked |
+| Prompt has focus after the shortcut | not yet checked | not yet checked | not yet checked | not yet checked |
+| Second launch, `--toggle`, `--ask` | not yet checked | not yet checked | not yet checked | not yet checked |
+| Start on login | not yet checked | not yet checked | not yet checked | not yet checked |
+| API key and ChatGPT sign-in in the keyring | not yet checked | not yet checked | not yet checked | not yet checked |
+| Light/dark follows the system | not yet checked | not yet checked | not yet checked | not yet checked |
+| Export chat (Save dialog) | not yet checked | not yet checked | not yet checked | not yet checked |
+| Links open in the browser | not yet checked | not yet checked | not yet checked | not yet checked |
+| Self-update of the AppImage | not yet checked | not yet checked | not yet checked | not yet checked |
+| Tiling rule card and rule work | not possible on this desktop | not possible on this desktop | not yet checked | not possible on this desktop |
+
+### Virtual X11 run and review fixes (2026-11-13)
+
+The real `bloop` binary ran in a cloud container: Xvfb (2560×1080, one RandR monitor), Openbox
+and then i3, a private D-Bus session with GNOME Keyring, Mesa software rendering (llvmpipe), no
+portal and no tray host. A scratch `BLOOP_DATA_DIR`, `HOME` and `XDG_RUNTIME_DIR` were used.
+Windows were checked with `xwininfo`/`xprop` and screenshots; clicks went only to that virtual
+display. This is not a real desktop: no GPU, compositor, Wayland, portal or tray.
+
+Bugs this found, each fixed and checked again the same way:
+- **Keyring prompts blocked startup.** Opening the app window read the key status on the UI
+  thread, and every read unlocked (or created) the default keyring. On a keyring that was never
+  set up, bloop showed no window until the system prompt was answered; each Cancel brought the
+  next prompt (six before the window appeared). Status checks now only search item attributes
+  (no unlock, nothing created); reading a secret unlocks only an existing, locked item; saving
+  still opens and creates the keyring. After the fix the setup window appeared at once with no
+  prompt. Covered by `status_checks_never_read_the_secret`.
+- **The notch never appeared.** It isn't resizable, so winit pins min = max = its 120×5 starting
+  size in `WM_NORMAL_HINTS`, and Openbox refused the resize to the 600×580 canvas. The window
+  sat at the centred x for 600 px with 120 px of width, so the outline fell outside it.
+  Placement now sets the size hints to the new size first; afterwards the window was 600×580 at
+  x = 980 with its shape (117×5) centred.
+- **wgpu panic opening the app window after the notch:** `Requested alpha mode PreMultiplied is
+  not in the list of supported alpha modes: [Opaque, Inherit]`. Iced picks one alpha mode from
+  the first surface; the opaque app window gets a visual without alpha. Opened the other way
+  round, the notch would have been drawn opaque. The app window is now transparent on Linux too
+  (it paints its own opaque background); both orders opened without a panic.
+
+Also checked: the notch's `_NET_WM_WINDOW_TYPE_UTILITY`, `SKIP_TASKBAR`, `SKIP_PAGER` and `ABOVE`;
+`bloop --toggle` opening the running copy's notch over other windows and `--ask` reaching it,
+with one process left; the socket and lock files in `$XDG_RUNTIME_DIR/bloop`; i3 floating the
+notch at the top centre without a rule; `--background` showing only the notch; the tray and
+portal being absent logged as such, without a crash.
+
+Review fixes in the same change: a single-instance `flock` replaces the stale-socket takeover
+(two copies starting together could both bind); a cleared Ask shortcut is ignored on the
+portal (a portal session can't unbind one shortcut); the notch stays hidden if presence hid it
+while it was prepared; a dev build no longer rewrites the launcher entry of another copy that
+still exists; GNOME's animation switch is followed while running; `update-desktop-database` is
+reaped; a release-page notice clears when nothing is newer.
+
+Known and left as they are: `_NET_WORKAREA` covers the whole desktop, so a panel on one monitor
+also offsets the notch on the others; the CLI's process group is killed with `killpg` on its
+pid, which in principle could reach a reused group id once every process in it has exited.
+
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` (321 passed,
+2 ignored) pass on Linux; `cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D
+warnings` passes, which checks the Windows code but not the MSVC build CI runs.
+
+## Recording a shortcut (2026-11-14)
+
+Shortcut & startup has a **Record** button beside each shortcut field. While it records, the
+field becomes a box with a focus-ring border reading "Press keys…", then the modifiers held
+("Ctrl+…"), then the combination ("Ctrl+Shift+K · Enter to save"); the hint under it changes
+too. Enter, Esc or **Done** stops it. A combination that differs from the saved one is checked
+with the same rules as Save (`validate_shortcuts`, shared with `settings_to_save`: it parses,
+and the two shortcuts differ) and is then saved and registered at once; otherwise the error
+shows where Save shows it and nothing is saved. Enter and Esc never become part of the
+shortcut, even with a modifier held. A key without Ctrl, Alt or Super is refused, so a plain
+letter or Shift+letter can't take over typing everywhere. Keys are named by their physical
+position (`Code`, as `global_hotkey` registers them), so `Ctrl+Q` means the same key on any
+layout. Leaving the page or closing the window drops an unfinished recording. The key listener
+is subscribed only while recording, and only key presses in the app window count.
+
+Seven state tests in `ui::tests::shortcut_recording` feed `RecordKey` events through `update`:
+Enter saves and queues one settings save; Esc with Alt held saves `Alt+7`, not `Alt+Escape`;
+re-recording the saved combination or stopping with nothing pressed saves nothing; keys without
+Ctrl/Alt/Super are refused; the other shortcut's combination shows "The two shortcuts need to
+be different." and leaves config and draft alone; a key in the notch window is ignored and
+leaving the page cancels; and recorded names (`Super+F5`, `Alt+Space`, `Ctrl+Shift+Slash`, an
+AZERTY A as `Ctrl+Q`) are what the parser accepts. `cargo fmt --check`, `cargo clippy
+--all-targets -- -D warnings` and `cargo test` (336 passed, 5 ignored) pass on Windows.
+
+Not checked: the page wasn't opened in a running build, because the installed copy was running
+and a dev build would only signal it; key presses weren't simulated on the desktop. Not checked
+on Linux. Known limits: a combination another program (or bloop itself) already holds as a
+global hotkey is taken by Windows before the app window sees it, so it can't be recorded, and a
+combination Windows refuses at registration still shows the existing "unavailable" warning
+after saving. `Alt+Ctrl+B` and `Ctrl+Alt+B` aren't recognised as the same in the UI's
+different-shortcuts check; the platform thread still refuses the duplicate.
+
+## Tooltips wait before showing (2026-11-14)
+
+Every tooltip (the icon buttons' `tip` and the code block's Copy) now shows after 700 ms of
+hovering (`TOOLTIP_DELAY`) instead of at once, below its control with a 4 px gap. Iced 0.14's
+`Tooltip::delay` schedules one redraw for when the time is up, so there's no polling while the
+pointer rests. fmt, clippy and `cargo test` (336 passed, 5 ignored) pass. Not looked at in a
+running build: the installed copy was running.

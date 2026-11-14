@@ -274,6 +274,29 @@ async fn signed_out_cli_gets_a_hint() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn find_in_needs_execute_bit() {
+    use std::os::unix::fs::PermissionsExt;
+    let scene = Scene::new("find-unix");
+    let (a, b) = (scene.file("a"), scene.file("b"));
+    std::fs::create_dir_all(a.join("codex")).unwrap(); // a directory, not a program
+    std::fs::create_dir_all(&b).unwrap();
+    let path = std::env::join_paths([&a, &b]).unwrap();
+    std::fs::write(
+        b.join("codex"),
+        "#!/bin/sh
+",
+    )
+    .unwrap();
+    std::fs::set_permissions(b.join("codex"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(cli::find_in("codex", &path), None, "not executable");
+    std::fs::set_permissions(b.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(cli::find_in("codex", &path), Some(b.join("codex")));
+    assert_eq!(cli::find_in("claude", &path), None);
+}
+
+#[cfg(windows)]
 #[test]
 fn find_in_prefers_exe_then_cmd() {
     let scene = Scene::new("find");

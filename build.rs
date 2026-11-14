@@ -46,9 +46,16 @@ BEGIN
 END
 "#
     );
-    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("bloop.rc");
-    std::fs::write(&out, rc).expect("write the resource script");
-    embed_resource::compile(&out, embed_resource::NONE)
-        .manifest_optional()
-        .unwrap();
+    // `embed-resource` is a Windows-only build dependency, so this part only exists in build
+    // scripts compiled on Windows (Windows builds are never cross-compiled).
+    #[cfg(windows)]
+    {
+        let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("bloop.rc");
+        std::fs::write(&out, rc).expect("write the resource script");
+        embed_resource::compile(&out, embed_resource::NONE)
+            .manifest_optional()
+            .unwrap();
+    }
+    #[cfg(not(windows))]
+    let _ = rc;
 }
