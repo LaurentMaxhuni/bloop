@@ -42,6 +42,19 @@ pub enum Done {
 }
 
 impl Job {
+    async fn run_blocking(self, run: impl FnOnce(Self) -> Done + Send + 'static) -> Done {
+        let chat = match &self {
+            Job::Save { chat, .. } => chat.clone(),
+            _ => None,
+        };
+        tokio::task::spawn_blocking(move || run(self))
+            .await
+            .unwrap_or_else(|error| Done::SaveFailed {
+                chat,
+                error: error.to_string(),
+            })
+    }
+
     fn run(self, path: &std::path::Path) -> Done {
         match self {
             Job::Save { config, chat } => {
@@ -132,29 +145,36 @@ impl Island {
         };
         self.saving = true;
         Task::perform(
-            async move {
-                tokio::task::spawn_blocking(move || job.run(&path))
-                    .await
-                    .unwrap_or_else(|e| Done::SaveFailed {
-                        chat: None,
-                        error: e.to_string(),
-                    })
-            },
+            job.run_blocking(move |job| job.run(&path)),
             Message::JobDone,
         )
     }
 
     fn drained(&mut self) -> Task<Message> {
-        if self.quitting && self.failed_saves.is_empty() {
-            return iced::exit();
+        if self.quitting {
+            if self.failed_saves.is_empty() {
+                return iced::exit();
+            }
+            self.storage_warning =
+                "Could not quit because some chats are unsaved. Quit again to retry saving.".into();
+            self.install_after_save = false;
+            return self.stop_quitting();
         }
-        self.quitting = false;
         // A reply in progress defers the update again; the save after it ends drains here.
         if self.install_after_save && self.request.is_none() {
             self.install_after_save = false;
             return self.install_update();
         }
         Task::none()
+    }
+
+    fn stop_quitting(&mut self) -> Task<Message> {
+        self.quitting = false;
+        if self.is_open() {
+            Task::none()
+        } else {
+            self.present(Event::Shortcut)
+        }
     }
 
     /// Whether every queued write has finished.
@@ -182,10 +202,7 @@ impl Island {
                 self.install_after_save = false;
                 if self.quitting {
                     // Stay open so nothing is lost; the warning offers quitting anyway.
-                    self.quitting = false;
-                    if !self.is_open() {
-                        follow_up = self.present(Event::Shortcut);
-                    }
+                    follow_up = self.stop_quitting();
                 }
             }
             Done::Renamed(id, title, result) => match result {
@@ -225,6 +242,61 @@ impl Island {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_delete_during_quit_reopens_the_notch_with_a_warning() {
+        let mut island = Island::new(bloop::launch::Launch::Manual).0;
+        island.window = Some(iced::window::Id::unique());
+        island.loading = false;
+        island.db_path = Some("unused.sqlite3".into());
+        let chat = Chat {
+            id: 42,
+            ..Chat::default()
+        };
+        let turns = vec![Turn {
+            user: "question".into(),
+            assistant: "unsaved reply".into(),
+            complete: true,
+        }];
+        island.failed_saves.insert(chat.id, (chat, turns));
+        island.deleting.insert(42);
+        island.saving = true; // Delete is already running.
+
+        let _ = island.update(Message::Quit);
+        assert!(island.quitting);
+        let _ = island.update(Message::JobDone(Done::Deleted(42, Err("disk full".into()))));
+        let feedback = island.update(Message::JobDone(Done::Saved(None)));
+
+        assert!(!island.quitting);
+        assert!(island.is_open());
+        assert!(island.storage_warning.contains("Could not quit"));
+        assert!(island.failed_saves.contains_key(&42));
+        assert!(feedback.units() > 0);
+    }
+
+    #[tokio::test]
+    async fn save_worker_panic_keeps_the_outgoing_snapshot() {
+        let mut island = Island::new(bloop::launch::Launch::Manual).0;
+        let id = island.chat.id;
+        let job = Job::Save {
+            config: Box::new(Config::default()),
+            chat: Some((
+                island.chat.clone(),
+                vec![Turn {
+                    user: "question".into(),
+                    assistant: "unsaved reply".into(),
+                    complete: true,
+                }],
+            )),
+        };
+        island.start_chat(0);
+        let done = job.run_blocking(|_| panic!("fixture worker panic")).await;
+        let _ = island.job_done(done);
+
+        assert_ne!(island.chat.id, id);
+        assert_eq!(island.failed_saves[&id].1[0].assistant, "unsaved reply");
+        assert!(island.storage_warning.contains("fixture worker panic"));
+    }
 
     #[test]
     fn export_reads_the_save_queued_before_it() {
