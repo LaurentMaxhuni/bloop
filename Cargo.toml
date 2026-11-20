@@ -7,7 +7,7 @@ description = "A local-first native AI desktop notch"
 license = "MIT"
 
 [dependencies]
-iced = { version = "0.14", default-features = false, features = ["wgpu-bare", "tokio", "crisp", "canvas", "markdown", "highlighter"] }
+iced = { version = "0.14", default-features = false, features = ["wgpu-bare", "tiny-skia", "tokio", "crisp", "canvas", "markdown", "highlighter"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
