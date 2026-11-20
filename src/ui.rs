@@ -315,6 +315,8 @@ pub struct Island {
     /// Search results; `None` lists every chat.
     chat_hits: Option<Vec<(Chat, String)>>,
     search_id: u64,
+    search_running: Option<u64>,
+    search_ready: bool,
     renaming: Option<(i64, String)>,
     confirm_delete: Option<i64>,
     deleting: std::collections::HashSet<i64>,
@@ -446,6 +448,8 @@ impl Island {
             chat_query: String::new(),
             chat_hits: None,
             search_id: 0,
+            search_running: None,
+            search_ready: false,
             renaming: None,
             confirm_delete: None,
             deleting: std::collections::HashSet::new(),
@@ -766,14 +770,21 @@ impl Island {
             // Redraw-synced frames, only while the notch is moving.
             events.push(window::frames().map(Message::Frame));
         }
-        let blinking = self.blink_until.is_some_and(|until| self.now < until);
-        if self.mood().animated() || blinking {
-            events.push(iced::time::every(Duration::from_millis(33)).map(Message::Tick));
-        } else {
-            // At rest: one cheap wake-up every few seconds for a blink / nap check.
-            events.push(iced::time::every(Duration::from_millis(3700)).map(Message::Blink));
+        if self.needs_mascot_clock() {
+            let blinking = self.blink_until.is_some_and(|until| self.now < until);
+            if self.mood().animated() || blinking {
+                events.push(iced::time::every(Duration::from_millis(33)).map(Message::Tick));
+            } else {
+                // At rest: one cheap wake-up every few seconds for a blink / nap check.
+                events.push(iced::time::every(Duration::from_millis(3700)).map(Message::Blink));
+            }
         }
         Subscription::batch(events)
+    }
+
+    fn needs_mascot_clock(&self) -> bool {
+        // The sliver draws no mascot. A hidden reply still needs its reveal ticks.
+        self.presence.shape() != Shape::Sliver || self.app_window.is_some() || self.reveal.is_some()
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -952,6 +963,18 @@ impl Island {
                 }
                 if self.window == Some(id) {
                     self.window = None;
+                    return Task::none();
+                }
+                // Iced has already dropped the app window's surface and renderer.
+                #[cfg(windows)]
+                if self.app_window.is_none()
+                    && self.window.is_some()
+                    && self.presence.shape() == Shape::Sliver
+                    && !self.animating()
+                    && self.request.is_none()
+                    && self.reveal.is_none()
+                {
+                    return Task::future(async { platform::optimize_idle_heaps() }).discard();
                 }
             }
             Message::Deadline(now) => return self.present_at(Event::Tick, now),
@@ -4124,6 +4147,25 @@ mod tests {
     }
 
     #[test]
+    fn mascot_clock_stops_when_collapsed_and_resumes_for_visible_or_pending_content() {
+        let mut app = ready();
+        assert!(!app.needs_mascot_clock());
+
+        let _ = app.update(Message::Toggle);
+        assert!(app.needs_mascot_clock());
+        let _ = app.update(Message::Toggle);
+        assert!(!app.needs_mascot_clock());
+
+        let _ = app.update(Message::OpenWindow);
+        assert!(app.needs_mascot_clock());
+        let _ = app.update(Message::CloseRequested(app.app_window.unwrap()));
+        assert!(!app.needs_mascot_clock());
+
+        app.reveal = Some(0);
+        assert!(app.needs_mascot_clock());
+    }
+
+    #[test]
     fn send_is_disabled_until_load_finishes() {
         let (mut app, _) = Island::new(Launch::Manual);
         app.input = "hello".into();
@@ -4429,6 +4471,50 @@ mod tests {
             ..Chat::default()
         };
         (chat, turns("other"))
+    }
+
+    #[test]
+    fn chat_search_waits_for_the_latest_input_and_runs_one_scan_at_a_time() {
+        let mut app = queued_storage();
+        let search = |query: &str| Message::Chat(ChatAction::Search(query.into()));
+        let ready = |id| Message::Chat(ChatAction::SearchReady(id));
+        let results = |id| Message::Chat(ChatAction::Results(id, Ok(vec![])));
+
+        let _ = app.update(search("m"));
+        let first = app.search_id;
+        let _ = app.update(search("ma"));
+        let second = app.search_id;
+        assert_eq!(app.search_running, None);
+        assert_eq!(app.update(ready(first)).units(), 0);
+        assert_eq!(app.update(ready(second)).units(), 1);
+        assert_eq!(app.search_running, Some(second));
+
+        let _ = app.update(search("march"));
+        let latest = app.search_id;
+        assert_eq!(app.update(ready(latest)).units(), 0);
+        assert_eq!(app.search_running, Some(second));
+        assert_eq!(app.update(results(second)).units(), 1);
+        assert!(app.chat_hits.is_none());
+        assert_eq!(app.search_running, Some(latest));
+        let _ = app.update(results(latest));
+        assert!(app.chat_hits.is_some());
+        assert_eq!(app.search_running, None);
+    }
+
+    #[test]
+    fn clearing_chat_search_discards_a_deferred_scan_and_its_previous_results() {
+        let mut app = queued_storage();
+        let _ = app.update(Message::Chat(ChatAction::Search("first".into())));
+        let first = app.search_id;
+        let _ = app.update(Message::Chat(ChatAction::SearchReady(first)));
+        let _ = app.update(Message::Chat(ChatAction::Search("next".into())));
+        let next = app.search_id;
+        let _ = app.update(Message::Chat(ChatAction::SearchReady(next)));
+        let _ = app.update(Message::Chat(ChatAction::Search(String::new())));
+        let stale = Message::Chat(ChatAction::Results(first, Ok(vec![])));
+        assert_eq!(app.update(stale).units(), 0);
+        assert!(app.chat_hits.is_none());
+        assert_eq!(app.search_running, None);
     }
 
     #[test]
@@ -4823,6 +4909,21 @@ mod tests {
         assert_eq!(app.app_window, Some(id));
         let _ = app.update(Message::WindowClosed(id));
         assert!(app.app_window.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn closing_app_window_reclaims_heap_only_when_notch_is_idle() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let first = app.app_window.unwrap();
+        let _ = app.update(Message::CloseRequested(first));
+        assert_eq!(app.update(Message::WindowClosed(first)).units(), 1);
+
+        let _ = app.update(Message::OpenWindow);
+        let second = app.app_window.unwrap();
+        let _ = app.update(Message::Toggle);
+        assert_eq!(app.update(Message::WindowClosed(second)).units(), 0);
     }
 
     #[test]

@@ -18,11 +18,14 @@ use iced::{
     Alignment, Element, Length, Task,
     widget::{self, Space, column, container, row, text},
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
+
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub enum ChatAction {
     Search(String),
+    SearchReady(u64),
     Results(u64, Result<Vec<(Chat, String)>, String>),
     /// Show this chat in the notch.
     Open(i64),
@@ -90,27 +93,45 @@ impl Island {
             ChatAction::Search(query) => {
                 self.chat_query = query;
                 self.search_id += 1;
+                self.search_ready = false;
                 if self.chat_query.trim().is_empty() {
                     self.chat_hits = None;
+                    return Task::none();
+                }
+                let id = self.search_id;
+                return Task::perform(
+                    async { tokio::time::sleep(SEARCH_DEBOUNCE).await },
+                    move |()| Message::Chat(ChatAction::SearchReady(id)),
+                );
+            }
+            ChatAction::SearchReady(id) if id == self.search_id => {
+                if self.search_running.is_some() {
+                    self.search_ready = true;
                     return Task::none();
                 }
                 let Some(path) = self.db_path.clone() else {
                     return Task::none();
                 };
-                let (id, query) = (self.search_id, self.chat_query.clone());
+                self.search_running = Some(id);
+                let query = self.chat_query.clone();
                 return Task::perform(
                     blocking(path, move |path| storage::search(path, &query)),
                     move |result| Message::Chat(ChatAction::Results(id, result)),
                 );
             }
-            ChatAction::Results(id, result) => {
+            ChatAction::Results(id, result) if self.search_running == Some(id) => {
+                self.search_running = None;
                 if id == self.search_id {
                     match result {
                         Ok(hits) => self.chat_hits = Some(hits),
                         Err(error) => self.chats_notice = format!("Search failed: {error}"),
                     }
                 }
+                if std::mem::take(&mut self.search_ready) {
+                    return self.chat_action(ChatAction::SearchReady(self.search_id));
+                }
             }
+            ChatAction::SearchReady(_) | ChatAction::Results(..) => {}
             ChatAction::Open(id) => {
                 if self.deleting.contains(&id) {
                     return Task::none();

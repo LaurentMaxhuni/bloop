@@ -13,6 +13,7 @@ const MAX_SETTINGS: usize = 32 * 1024;
 /// Largest serialized turns of one chat.
 const MAX_HISTORY: usize = 16 * 1024 * 1024;
 const MAX_TITLE: usize = 200;
+const MAX_SEARCH_HITS: usize = 100;
 
 pub fn data_path() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("BLOOP_DATA_DIR") {
@@ -337,36 +338,42 @@ pub fn delete_chat(path: &Path, id: i64) -> Result<(), String> {
     Ok(())
 }
 
-/// Chats whose title or text contains `query` (ignoring case), newest first, each with an
-/// excerpt of the first matching line. An empty query lists every chat.
+/// The newest 100 chats whose title or text contains `query` (ignoring case), each with
+/// an excerpt of the first matching line. An empty query lists every chat.
 pub fn search(path: &Path, query: &str) -> Result<Vec<(Chat, String)>, String> {
     let connection = connect(path)?;
     let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(list(&connection)?
+            .into_iter()
+            .map(|chat| (chat, String::new()))
+            .collect());
+    }
     let mut statement = connection
         .prepare(&format!(
             "SELECT {CHAT_COLUMNS}, turns FROM chats ORDER BY updated DESC, id DESC"
         ))
         .map_err(|e| e.to_string())?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((chat_from_row(row)?, row.get::<_, String>(5)?))
-        })
-        .map_err(|e| e.to_string())?;
+    let mut rows = statement.query([]).map_err(|e| e.to_string())?;
     let mut hits = Vec::new();
-    for row in rows {
-        let (chat, json) = row.map_err(|e| e.to_string())?;
-        if needle.is_empty() {
-            hits.push((chat, String::new()));
-            continue;
-        }
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let json = row.get_ref(5).map_err(|e| e.to_string())?;
         // A damaged chat is skipped rather than failing the whole search.
-        let Ok(turns) = parse_turns(&json) else {
+        let Ok(turns) = parse_turns(json.as_str().map_err(|e| e.to_string())?) else {
             continue;
         };
-        if let Some(snippet) = model::snippet(&turns, &needle) {
+        let chat = chat_from_row(row).map_err(|e| e.to_string())?;
+        let snippet = model::snippet(&turns, &needle).or_else(|| {
+            chat.title
+                .to_lowercase()
+                .contains(&needle)
+                .then(String::new)
+        });
+        if let Some(snippet) = snippet {
             hits.push((chat, snippet));
-        } else if chat.title.to_lowercase().contains(&needle) {
-            hits.push((chat, String::new()));
+            if hits.len() == MAX_SEARCH_HITS {
+                break;
+            }
         }
     }
     Ok(hits)
@@ -567,6 +574,28 @@ mod tests {
         delete_chat(&path, 2).unwrap();
         assert!(load_chat(&path, 2).is_err());
         assert_eq!(load(&path).unwrap().chats.len(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn search_bounds_the_newest_matches_without_limiting_the_chat_list() {
+        let path = temp("bounded-search");
+        let config = Config::default();
+        for id in 1..=102 {
+            let text = if id == 101 { "unrelated" } else { "matching" };
+            save(
+                &path,
+                &config,
+                Some((&chat(id, "Chat", 1), &[turn(text, "reply")])),
+            )
+            .unwrap();
+        }
+
+        let hits = search(&path, "MATCHING").unwrap();
+        assert_eq!(hits.len(), 100);
+        assert_eq!(hits[0].0.id, 102);
+        assert_eq!(hits[99].0.id, 2);
+        assert_eq!(search(&path, "").unwrap().len(), 102);
         std::fs::remove_file(path).unwrap();
     }
 }

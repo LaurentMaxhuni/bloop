@@ -878,6 +878,33 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
 
+/// Return unused heap pages after Iced drops a window's renderer and widget cache.
+#[cfg(windows)]
+pub fn optimize_idle_heaps() {
+    use windows::Win32::System::{
+        Memory::{HeapOptimizeResources, HeapSetInformation},
+        SystemServices::{
+            HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION, HEAP_OPTIMIZE_RESOURCES_INFORMATION,
+        },
+    };
+    let info = HEAP_OPTIMIZE_RESOURCES_INFORMATION {
+        Version: HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION,
+        Flags: 0,
+    };
+    // SAFETY: None selects this process's heaps. The versioned parameter lives across the call.
+    let result = unsafe {
+        HeapSetInformation(
+            None,
+            HeapOptimizeResources,
+            Some(std::ptr::from_ref(&info).cast()),
+            std::mem::size_of_val(&info),
+        )
+    };
+    if let Err(error) = result {
+        tracing::debug!("Could not reclaim free heap pages: {error}");
+    }
+}
+
 /// Holds the app-wide mutex the installer checks (`AppMutex=bloop-app`) and the
 /// auto-reset event a second launch signals to ask this copy to open its window.
 pub struct Instance {

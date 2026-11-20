@@ -100,7 +100,9 @@ impl Presence {
 
     /// The earliest moment a `Tick` could change something.
     pub fn next_deadline(&self) -> Option<Instant> {
-        [self.hover_at, self.leave_at, self.peek_until]
+        // A pinned peek can only expire after a reply event unpins it.
+        let peek = self.peek_until.filter(|_| !self.busy);
+        [self.hover_at, self.leave_at, peek]
             .into_iter()
             .flatten()
             .min()
@@ -442,6 +444,22 @@ mod tests {
         p.on(Event::CursorEntered, at(0));
         assert_eq!(p.next_deadline(), Some(at(150)));
         p.on(Event::Tick, at(150));
+        assert_eq!(p.next_deadline(), None);
+    }
+
+    #[test]
+    fn a_busy_peek_deadline_cannot_wake_the_notch() {
+        let mut p = Presence::new();
+        p.on(Event::Busy(true), at(0));
+        p.on(Event::Peek("Still working".into()), at(0));
+        p.on(Event::Tick, at(5_000));
+        assert_eq!(p.state(), State::Peek);
+        assert_eq!(p.next_deadline(), None);
+
+        p.on(Event::Busy(false), at(5_000));
+        assert_eq!(p.next_deadline(), Some(at(9_000)));
+        p.on(Event::Tick, at(9_000));
+        assert_eq!(p.state(), State::Sliver);
         assert_eq!(p.next_deadline(), None);
     }
 }

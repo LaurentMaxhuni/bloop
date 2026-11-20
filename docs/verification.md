@@ -46,6 +46,114 @@ Sandboxed MSVC archive writes and network access were blocked. Cargo dependency
 fetches, native builds/tests, and interactive launches were run with approved
 environment access. No changes to global Rust, Git, or Windows configuration.
 
+## Windows memory and idle CPU (2026-11-20)
+
+Release builds on Windows x64 (build 26300, Rust 1.97.1, Iced 0.14, wgpu 27 and
+DirectX 12). The control was `1425657` and the candidate was `e98dd60`. Both profiles used fresh
+`BLOOP_DATA_DIR` directories and excluded the installed process and fixture from all
+samples. Temporary instrumentation was applied to separate source copies and built
+with `cargo build --release --locked --offline --bin bloop --example stream_fixture`.
+
+- Enter the real Iced daemon in background mode before the single-instance and
+  autostart code. Disable tray and shortcut registration, external open requests,
+  ChatGPT account loading, and update checks. Ignore OS focus and cursor events in
+  the scratch instance to keep the scripted presence state deterministic.
+- Start `examples/stream_fixture.rs` on `127.0.0.1:11634`, with `onboarded = true`
+  and `auto_update = false`. For the long workload, send 192 paragraphs, one
+  NDJSON delta every 22 ms, followed by `done: true`. Each delta has an indexed
+  Markdown heading and a paragraph exercising bold, emphasis and line wrapping.
+  Each finished answer contains 54,610 bytes. The fixture starts with an empty
+  history and performs no inference.
+
+  ```rust
+  format!(
+      "### Local fixture section {i}\n\n\
+       Bloop is receiving a long deterministic reply over localhost. \
+       **Bold text**, _emphasis_, and inline code exercise the chat layout. \
+       The fixture repeats text and never calls a model. \
+       This paragraph keeps the line wrapping and paragraph measurement realistic.\n\n"
+  )
+  ```
+
+- Pause background startup before opening the notch to collect a reading with no
+  surface. Open the notch, expand with `Toggle`, collapse and open the app window,
+  expand again and send the fixture prompt. Wait for the stream and text reveal
+  to complete. Dismiss the notch, wait one second for the animation, and issue
+  `CloseRequested` for the app window. Repeat the open/reply/close sequence, then
+  expand and collapse the notch twice with the same two saved replies. Dispatch
+  Iced messages directly. No keyboard or mouse simulation is used.
+- Read `WorkingSet64`, `PrivateMemorySize64`, `TotalProcessorTime` and thread
+  count from `System.Diagnostics.Process` for the scratch PID. Refresh about
+  every 850 ms. Report the median after the first second and before the seventh
+  second of each marked phase (seven samples per phase). The memory columns use MiB and
+  exclude dedicated GPU VRAM. Enable `BLOOP_FRAME_LOG` for frame cadence.
+  Mark the phases at approximately 8, 25, 38, 51, 73, 87, 118, 132 and 146 seconds.
+  Read the scratch process handle at launch to capture its exit code.
+
+| State | Control working set | Control private | Final working set | Final private |
+| --- | ---: | ---: | ---: | ---: |
+| Before the first surface | 16.31 | 5.21 | 16.29 | 5.18 |
+| Idle, collapsed | 117.28 | 123.32 | 117.42 | 123.15 |
+| Notch expanded | 125.33 | 130.69 | 125.15 | 130.60 |
+| App window open, notch collapsed | 129.05 | 134.28 | 128.73 | 134.12 |
+| Long reply complete, both windows open | 156.45 | 169.36 | 156.25 | 169.45 |
+| App window closed, notch collapsed | 144.06 | 158.52 | 141.16 | 152.02 |
+| After reopening, replying and closing again | 151.06 | 164.47 | 150.13 | 161.07 |
+| After another expand/collapse | 152.86 | 167.89 | 153.64 | 169.75 |
+| After the next expand/collapse | 153.20 | 168.24 | 153.54 | 167.49 |
+
+After the first idle app close, the final build used 2.90 MiB less working set
+and 6.50 MiB less private memory. The second close saved 0.93 and 3.40 MiB,
+respectively. Both `HeapOptimizeResources` calls succeeded and took under 0.8 ms
+on the executor. Subsequent expands reused memory. Private bytes varied across
+the two expand/collapse cycles with the same history. This sample covers two
+replies and two further cycles. [Windows heap optimization API](https://learn.microsoft.com/windows/win32/api/heapapi/nf-heapapi-heapsetinformation)
+
+Both builds recorded 0 ms of process CPU time over about 5.2 seconds of the
+first idle sample. From launch through the settled collapsed marker, the
+control handled 28 mascot ticks and six blink messages, and the final build
+handled zero. The first expand recorded median frame intervals of 2.81 ms
+and 2.83 ms. Both scratch processes exited with code 0.
+
+The renderer startup delta includes DX12 and driver initialization, a shared
+device and queue, and the first swapchain and renderer. It added about 101 MiB
+of working set in each run. The 50 MB target remains open. The pre-surface phase
+includes SQLite loading and the text editor's initialized font system. Iced's
+`WindowManager` removes the app renderer, surface and widget caches on close. It
+keeps the compositor for the notch. Iced already requests one frame of maximum
+latency (two DX12 buffers). At 1× scale and four bytes per pixel, the raw buffer
+pair is about 2.66 MiB for the 600×580 notch or 4.26 MiB for the 900×620 app window,
+before GPU allocation overhead. These are raw texture sizes kept separate from
+the process counters.
+
+At the first repeat cycle, a separate `GPU Process Memory` counter snapshot for
+the control PID reported 44.64 MiB dedicated and 48.32 MiB shared across its
+adapter instances. Those are separate GPU accounting figures.
+
+Iced's shared color and mask atlases start at 256×256 and can grow with glyph
+use. The font database indexes system fonts and caches faces used for shaping.
+Bloop uses a roughly 10 KiB icon font and draws the mascot from paths, with no
+large mascot bitmap. Saved turns and parsed replies are retained for the active
+chat. The process counters combine driver, glyph, parser and stack memory.
+Tokio still starts two async workers and allows four blocking workers
+for the CLI pipe path.
+
+`cargo fmt --check`, `cargo clippy --offline --all-targets -- -D warnings`, and
+`cargo test --offline` passed. The full suite ran in the normal Windows session
+because the sandbox's logon token could not access the credential test vault.
+343 passed and five existing tests remained ignored.
+
+- Each search edit previously started a new SQLite scan before the generation check
+  could reject stale results. State tests cover debounce, clearing the field and
+  the single-scan limit. A 102-chat database test checks newest-first ordering,
+  the 100-result cap and access to the complete unfiltered list.
+- A busy peek's old deadline kept the 50 ms timer alive. A state test reproduces
+  the expired deadline, then checks that the pinned peek has no scheduled wakeup
+  and that completion starts a new expiry. A separate test covers the mascot
+  clock with the notch collapsed, a dashboard open and a pending reply reveal.
+- A close-event test covers scheduling heap reclamation only when the notch is
+  idle. The scratch release trace measures the actual Windows heap calls.
+
 ## Auto-hide notch (2026-11-06)
 
 Checked on Windows 11 (100 % scale) with a debug build and a scratch `BLOOP_DATA_DIR`,
