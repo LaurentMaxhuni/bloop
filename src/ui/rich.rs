@@ -34,6 +34,11 @@ pub struct Reply {
     source: String,
     prepared: String,
     content: markdown::Content,
+    /// The fence open at the end of `source`, when one is.
+    fence: Option<(char, usize)>,
+    /// The trailing line of `source` holds no `$`, `\` or backtick, so new text
+    /// can't open or close a conversion on it: plain prose appends stay O(delta).
+    tail_clean: bool,
 }
 
 impl Reply {
@@ -47,14 +52,58 @@ impl Reply {
         if text == self.source {
             return;
         }
+        if let Some(added) = self.try_fast(text) {
+            self.content.push_str(&added);
+            self.source = text.to_owned();
+            self.prepared.push_str(&added);
+            return;
+        }
         let prepared = math::prepare(text);
         match prepared.strip_prefix(self.prepared.as_str()) {
             Some(added) if text.starts_with(self.source.as_str()) => self.content.push_str(added),
             // A formula closed or a fence changed what came before: parse it all again.
             _ => self.content = markdown::Content::parse(&prepared),
         }
+        let (fence, tail) = math::state(text);
+        self.fence = fence;
+        self.tail_clean = !tail.contains(['$', '\\', '`']);
         self.source = text.to_owned();
         self.prepared = prepared;
+    }
+
+    /// Returns the newly prepared text when the update can extend the parse without
+    /// reparsing, so appending to prose and to a fence is O(delta).
+    fn try_fast(&mut self, text: &str) -> Option<String> {
+        // `update` is called with the reply's text so far, which grows while
+        // streaming: the new text extends `source`, so the delta is the tail and
+        // the length check is O(1).
+        let delta = text.get(self.source.len()..)?;
+        if delta.is_empty() {
+            return None;
+        }
+        if let Some((open, n)) = self.fence {
+            // Inside a fence everything is content, unless a closing fence arrives.
+            if !self.source.ends_with('\n') {
+                return None;
+            }
+            for line in delta.split_inclusive('\n') {
+                if let Some((c, mn, rest)) = math::fence_marker(line)
+                    && c == open
+                    && mn >= n
+                    && rest.trim().is_empty()
+                {
+                    return None; // The fence closes: the parse changes.
+                }
+            }
+            return Some(delta.to_owned());
+        }
+        // Prose: with a clean trailing line and a clean delta, the merged line
+        // converts to the tail plus `convert_prose(delta)`: nothing new can open
+        // or close a conversion, so the old parse extends by `added`.
+        if !self.tail_clean || delta.contains(['$', '\\', '`']) {
+            return None;
+        }
+        Some(math::convert_prose(delta))
     }
 
     pub fn view<'a>(
@@ -125,6 +174,20 @@ struct Viewer<'a> {
 impl<'a> markdown::Viewer<'a, Message> for Viewer<'a> {
     fn on_link_click(url: markdown::Uri) -> Message {
         Message::OpenLink(url)
+    }
+
+    /// Prose wraps between words, and falls back to glyphs when a single word is
+    /// too long (a URL or a path), so it never runs past the bubble.
+    fn paragraph(
+        &self,
+        settings: markdown::Settings,
+        text: &markdown::Text,
+    ) -> Element<'a, Message> {
+        rich_text(text.spans(settings.style))
+            .size(settings.text_size)
+            .wrapping(text::Wrapping::WordOrGlyph)
+            .on_link_click(Self::on_link_click)
+            .into()
     }
 
     fn code_block(
@@ -568,5 +631,99 @@ mod tests {
         assert_eq!(italic('π'), '𝜋');
         assert_eq!(italic('Γ'), 'Γ');
         assert_eq!(italic('1'), '1');
+    }
+
+    /// Streaming every prefix of a reply must never panic, and the prepared text
+    /// must always be the full `prepare` of the text seen so far.
+    #[test]
+    fn streaming_updates_match_a_full_prepare() {
+        let texts = [
+            "Hello **world**\n\n- one\n- two\n\nArea $$A = \\pi r^2$$\n\nDone.",
+            "```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n",
+            "text with $x^2$ math and `code` and \\[y\\]\n",
+            "a\r\nb\r\n```\r\ncode\r\n```\r\n",
+            "line1\nline2\n",
+            "# Head\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+            "😀 emoji RTL text 向文本 $5 and $10\n",
+        ];
+        for text in texts {
+            let mut reply = Reply::default();
+            for end in 0..=text.len() {
+                if !text.is_char_boundary(end) {
+                    continue;
+                }
+                reply.update(&text[..end]);
+                let _ = reply.content.items();
+                assert_eq!(reply.prepared, math::prepare(&reply.source), "at {end}");
+            }
+            reply.update(text);
+            assert_eq!(reply.prepared, math::prepare(&reply.source));
+        }
+    }
+
+    /// Fuzz: random cumulative updates must never panic or diverge from `prepare`.
+    #[test]
+    fn fuzz_streaming_never_panics_or_diverges() {
+        let alphabet: [&str; 12] = [
+            "$", "\\", "`", "{", "}", "$x^2$", "\\[y\\]", "\n", "a", "🌍", "|", "-",
+        ];
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..400 {
+            let len = (next() % 80) as usize;
+            let mut text = String::new();
+            for _ in 0..len {
+                text.push_str(alphabet[(next() % alphabet.len() as u64) as usize]);
+            }
+            let mut reply = Reply::default();
+            for end in 0..=text.len() {
+                if !text.is_char_boundary(end) {
+                    continue;
+                }
+                reply.update(&text[..end]);
+                assert_eq!(
+                    reply.prepared,
+                    math::prepare(&reply.source),
+                    "at {end} in {text:?}"
+                );
+            }
+        }
+    }
+
+    /// Appending to clean prose takes the fast path: `try_fast` returns the new
+    /// prepared text without repreparing, and dirties make it give up.
+    #[test]
+    fn fast_path_extends_clean_prose_and_gives_up_on_dirt() {
+        let mut reply = Reply::new("Hello world\n");
+        assert!(reply.tail_clean);
+        // A clean delta: the fast path returns just the delta.
+        assert_eq!(reply.try_fast("Hello world\nand"), Some("and".to_owned()));
+        // A `$` in the delta: no fast path.
+        assert_eq!(reply.try_fast("Hello world\nand $x"), None);
+        // Once the source's tail is dirty, appends give up too.
+        reply.update("Hello world\nand $x");
+        assert!(!reply.tail_clean);
+        assert_eq!(reply.try_fast("Hello world\nand $x more"), None);
+        // Not an extension or nothing new: no fast path.
+        assert_eq!(reply.try_fast("other"), None);
+        assert_eq!(reply.try_fast(""), None);
+    }
+
+    /// A long plain reply streams as O(delta): appending after a clean tail must
+    /// extend `prepared` without re-preparing the earlier text.
+    #[test]
+    fn streaming_appends_extend_the_prepared_text() {
+        let mut reply = Reply::new("");
+        for chunk in ["Hello ", "world ", "and ", "friends"] {
+            let before = reply.prepared.clone();
+            reply.update(&format!("{before}{chunk}"));
+            assert_eq!(reply.prepared, math::prepare(&reply.source));
+        }
+        assert_eq!(reply.source, "Hello world and friends");
     }
 }
