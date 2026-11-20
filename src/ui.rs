@@ -136,7 +136,8 @@ pub enum Message {
     /// The conversation's scroll position or content size changed.
     Scrolled(scrollable::Viewport),
     /// Logical height of the work area the notch was just placed on, when the platform knows it.
-    WorkArea(Option<f32>),
+    /// Tagged with the placement that asked, so a late answer to an older one is dropped.
+    WorkArea(u32, Option<f32>),
     /// Mascot animation frame while it is moving.
     Tick(Instant),
     /// Low-frequency wake-up at rest so the mascot can blink.
@@ -779,7 +780,7 @@ impl Island {
                 | Message::Blink(_)
                 | Message::Frame(_)
                 | Message::Scrolled(_)
-                | Message::WorkArea(_)
+                | Message::WorkArea(..)
                 | Message::JobDone(_)
                 | Message::Deadline(_)
                 | Message::FullscreenPoll
@@ -955,8 +956,10 @@ impl Island {
                 viewport.bounds().height,
                 viewport.content_bounds().height,
             ),
-            Message::WorkArea(height) => {
-                if height == self.work_height {
+            Message::WorkArea(placement, height) => {
+                // A stale answer (a newer placement since), or a placement that didn't land:
+                // keep the last height a placement confirmed.
+                if placement != self.placements || height.is_none() || height == self.work_height {
                     return Task::none();
                 }
                 // The open panel never reaches past the taskbar on a short or scaled screen.
@@ -2296,7 +2299,7 @@ impl Island {
     }
 
     fn place_window(&mut self, target: platform::Target) -> Task<Message> {
-        self.placements += 1;
+        self.placements = self.placements.wrapping_add(1);
         let Some(id) = self.window else {
             return Task::none();
         };
@@ -2307,9 +2310,10 @@ impl Island {
         let canvas = Size::new(w, h);
         let position = self.config.notch_position;
         self.region = None;
+        let placement = self.placements;
         Task::batch([
             window::run(id, move |w| platform::place_on(w, canvas, position, target))
-                .map(Message::WorkArea),
+                .map(move |height| Message::WorkArea(placement, height)),
             self.update_region(),
         ])
     }
@@ -3235,22 +3239,25 @@ fn fit_line(line: &str, max: usize) -> std::borrow::Cow<'_, str> {
 /// Room left under the open panel on a work area too short for it, so its rounded bottom
 /// stays clear of the taskbar.
 const PANEL_GAP: f32 = 8.0;
-/// The panel never shrinks below this, even on a tiny work area: the prompt must fit.
+/// The panel gives up its gap before it shrinks below this; it never grows past the work
+/// area, though, since the native window is cut there.
 const MIN_PANEL_HEIGHT: f32 = 260.0;
 
-/// The open panel's height: `full`, or less when the work area is too short for it.
+/// The open panel's height: `full`, or less when the work area is too short for it. The
+/// work area is a hard ceiling: the native window, the canvas and the region all stop there.
 fn panel_height(full: f32, work: Option<f32>) -> f32 {
     match work {
-        Some(work) if work - PANEL_GAP < full => (work - PANEL_GAP).max(MIN_PANEL_HEIGHT),
+        Some(work) if work - PANEL_GAP < full => {
+            (work - PANEL_GAP).max(MIN_PANEL_HEIGHT).min(work).max(0.0)
+        }
         _ => full,
     }
 }
 
-/// The window's height: the full panel, or the work area when that's shorter, and always
-/// tall enough for the panel.
+/// The window's height: the full panel, or the work area when that's shorter. Never less
+/// than the panel, since the panel is capped by the same work area.
 fn canvas_height(full: f32, work: Option<f32>) -> f32 {
-    let panel = panel_height(full, work);
-    work.map_or(full, |work| work.min(full)).max(panel)
+    work.map_or(full, |work| work.min(full).max(0.0))
 }
 
 /// Whether the conversation sticks to its end while a reply grows. Only a change of scroll
@@ -3275,12 +3282,14 @@ impl Follow {
     /// Within this many pixels of the end still counts as at the end.
     const SLACK: f32 = 24.0;
 
+    /// `offset` is compared with the last offset that decided, not the last one seen, so
+    /// many sub-pixel steps still add up to a move.
     fn on_scroll(&mut self, offset: f32, visible: f32, content: f32) {
         let moved = self.offset.is_none_or(|last| (last - offset).abs() > 0.5);
         if moved {
             self.stick = content - (offset + visible) <= Self::SLACK;
+            self.offset = Some(offset);
         }
-        self.offset = Some(offset);
     }
 }
 
@@ -3666,14 +3675,38 @@ mod tests {
         // 1920 x 1080 at 200 % with a 48 px taskbar: 516 px.
         assert_eq!(panel_height(full, Some(516.0)), 508.0);
         assert_eq!(canvas_height(full, Some(516.0)), 516.0);
-        // Tinier than the smallest usable panel: the panel keeps its floor.
-        assert_eq!(panel_height(full, Some(200.0)), MIN_PANEL_HEIGHT);
+        // Short enough that the gap would leave less than the floor: the gap goes first.
+        assert_eq!(panel_height(full, Some(264.0)), MIN_PANEL_HEIGHT);
+        // Below the floor the work area still wins: the native window stops there.
+        assert_eq!(panel_height(full, Some(240.0)), 240.0);
+        assert_eq!(canvas_height(full, Some(240.0)), 240.0);
         for work in [
-            0.0, 100.0, 200.0, 267.0, 268.0, 300.0, 587.0, 588.0, 600.0, 5000.0,
+            0.0, 100.0, 200.0, 240.0, 259.0, 260.0, 267.0, 268.0, 300.0, 587.0, 588.0, 600.0,
+            5000.0,
         ] {
-            assert!(canvas_height(full, Some(work)) >= panel_height(full, Some(work)));
-            assert!(canvas_height(full, Some(work)) <= full.max(MIN_PANEL_HEIGHT));
+            let (panel, canvas) = (
+                panel_height(full, Some(work)),
+                canvas_height(full, Some(work)),
+            );
+            assert!(
+                panel <= canvas && canvas <= work && canvas <= full,
+                "{work}"
+            );
         }
+    }
+
+    #[test]
+    fn subpixel_scroll_steps_add_up_to_a_move() {
+        let mut follow = Follow::default();
+        follow.on_scroll(600.0, 400.0, 1000.0);
+        assert!(follow.stick);
+        // A touchpad creeping up 0.4 px at a time, 100 times: 40 px up, past the slack.
+        let mut offset = 600.0;
+        for _ in 0..100 {
+            offset -= 0.4;
+            follow.on_scroll(offset, 400.0, 1000.0);
+        }
+        assert!(!follow.stick, "40 px up still followed");
     }
 
     #[test]
@@ -3682,8 +3715,9 @@ mod tests {
         app.config.reduce_motion = ReduceMotion::On;
         let _ = app.present(Event::Shortcut);
         assert_eq!(app.size().height, 580.0);
+        let now = app.placements;
         let cuts = app.region_cuts;
-        let _ = app.update(Message::WorkArea(Some(516.0)));
+        let _ = app.update(Message::WorkArea(now, Some(516.0)));
         assert_eq!(app.size_for(Shape::Expanded).height, 508.0);
         assert_eq!(app.size().height, 508.0);
         assert_eq!(app.canvas_size().height, 516.0);
@@ -3691,12 +3725,47 @@ mod tests {
         assert_eq!(app.region.map(|(_, h, _)| h), Some(508));
         // The same report again changes nothing.
         let cuts = app.region_cuts;
-        let _ = app.update(Message::WorkArea(Some(516.0)));
+        let _ = app.update(Message::WorkArea(now, Some(516.0)));
         assert_eq!(app.region_cuts, cuts);
         // A taller monitor gives the full panel back.
-        let _ = app.update(Message::WorkArea(Some(1400.0)));
+        let _ = app.update(Message::WorkArea(now, Some(1400.0)));
         assert_eq!(app.size().height, 580.0);
         assert_eq!(app.canvas_size().height, 580.0);
+    }
+
+    #[test]
+    fn below_the_floor_window_canvas_and_region_agree() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::On;
+        let _ = app.present(Event::Shortcut);
+        let _ = app.update(Message::WorkArea(app.placements, Some(240.0)));
+        assert_eq!(app.canvas_size().height, 240.0);
+        assert_eq!(app.size().height, 240.0);
+        assert_eq!(app.region.map(|(_, h, _)| h), Some(240));
+    }
+
+    #[test]
+    fn stale_or_failed_placements_keep_the_confirmed_height() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::On;
+        let _ = app.present(Event::Shortcut);
+        let first = app.placements;
+        let _ = app.update(Message::Toggle);
+        let _ = app.update(Message::Toggle);
+        let latest = app.placements;
+        assert!(latest > first, "reopening re-places");
+        // The newer placement, on a tall monitor, answers first.
+        let _ = app.update(Message::WorkArea(latest, Some(1400.0)));
+        assert_eq!(app.work_height, Some(1400.0));
+        // The older one, from a short monitor, arrives late: dropped.
+        let _ = app.update(Message::WorkArea(first, Some(516.0)));
+        assert_eq!(app.work_height, Some(1400.0));
+        assert_eq!(app.size().height, 580.0);
+        // A placement that failed reports nothing: the last cap stays.
+        let _ = app.update(Message::WorkArea(latest, Some(516.0)));
+        let _ = app.update(Message::WorkArea(latest, None));
+        assert_eq!(app.work_height, Some(516.0));
+        assert_eq!(app.size().height, 508.0);
     }
 
     #[test]

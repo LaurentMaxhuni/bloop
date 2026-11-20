@@ -342,7 +342,10 @@ The window used to be a fixed 600 x 580 logical canvas. On a short or highly sca
 screen (1366 x 768 at 125 %, 1920 x 1080 at 200 %) that runs under the taskbar and hides
 the prompt. `platform::place_on` now cuts the window's height to the work area below
 its top and returns that area's logical height; the UI keeps it and sizes the open
-panel to it (8 px clear of the bottom, never below 260 px). Placement always asks for
+panel to it (8 px clear of the bottom; the gap goes before the panel drops below
+260 px, and the work area is a hard ceiling for window, panel and region alike).
+Each placement is numbered and only the latest one's answer counts; a placement that
+failed (`SetWindowPos` error) reports nothing, and the last confirmed height stays. Placement always asks for
 the full canvas, so moving from a short monitor to a tall one gives the full panel back
 without a second placement, and the work-area report arrives in the same task that
 moved the window, so there is no extra resize mid-animation. Only Windows reports a

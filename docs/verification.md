@@ -670,6 +670,12 @@ so none of these were screenshotted.
   the chevron button out. Not unit-tested (Iced's `Text` keeps its wrapping private and
   the app has no headless renderer); needs a screenshot check.
 
+Review follow-ups (same day): sub-pixel scroll steps now add up (`Follow` compares with
+the last deciding offset; `subpixel_scroll_steps_add_up_to_a_move`); below 260 px the work
+area caps panel, canvas and region together (`below_the_floor_window_canvas_and_region_agree`);
+late answers from older placements and failed placements no longer change the cap
+(`stale_or_failed_placements_keep_the_confirmed_height`).
+
 Not verified: any of the above on screen, Linux (the cross `cargo check` stops at C build
 scripts with no `x86_64-linux-gnu-gcc`; Linux returns no work height, so behaviour there
 is unchanged), reply text wrapping in `ui/rich.rs` (another lane).

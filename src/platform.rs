@@ -793,7 +793,8 @@ pub fn place_on(
                 )
             } {
                 tracing::warn!("Could not place notch: {error}");
-                break;
+                // The window didn't move: the target's work area says nothing about it.
+                return None;
             }
         }
         work_height
