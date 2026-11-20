@@ -19,6 +19,7 @@ pub enum Job {
         config: Box<Config>,
         chat: Option<(Chat, Vec<Turn>)>,
     },
+    Retry(i64, Box<Config>),
     Rename(i64, String),
     Delete(i64),
     /// Read a chat to show it in the notch.
@@ -29,30 +30,43 @@ pub enum Job {
 
 #[derive(Debug, Clone)]
 pub enum Done {
-    Saved(Result<(), String>),
-    Renamed(Result<(), String>),
+    Saved(Option<i64>),
+    SaveFailed {
+        chat: Option<(Chat, Vec<Turn>)>,
+        error: String,
+    },
+    Renamed(i64, String, Result<(), String>),
     Deleted(i64, Result<(), String>),
     Loaded(i64, Result<(Chat, Vec<Turn>), String>),
-    ForExport(Result<(Chat, Vec<Turn>), String>),
+    ForExport(i64, Result<(Chat, Vec<Turn>), String>),
 }
 
 impl Job {
     /// Whether the job only touches chat `id`, so deleting that chat makes it pointless.
     fn only_for_chat(&self, id: i64) -> bool {
-        matches!(self, Job::Rename(c, _) | Job::Load(c) | Job::Export(c) if *c == id)
+        matches!(self, Job::Retry(c, _) | Job::Rename(c, _) | Job::Load(c) | Job::Export(c) if *c == id)
     }
 
     fn run(self, path: &std::path::Path) -> Done {
         match self {
-            Job::Save { config, chat } => Done::Saved(storage::save(
-                path,
-                &config,
-                chat.as_ref().map(|(chat, turns)| (chat, turns.as_slice())),
-            )),
-            Job::Rename(id, title) => Done::Renamed(storage::rename_chat(path, id, &title)),
+            Job::Save { config, chat } => {
+                match storage::save(
+                    path,
+                    &config,
+                    chat.as_ref().map(|(chat, turns)| (chat, turns.as_slice())),
+                ) {
+                    Ok(()) => Done::Saved(chat.map(|(chat, _)| chat.id)),
+                    Err(error) => Done::SaveFailed { chat, error },
+                }
+            }
+            Job::Rename(id, title) => {
+                let result = storage::rename_chat(path, id, &title);
+                Done::Renamed(id, title, result)
+            }
             Job::Delete(id) => Done::Deleted(id, storage::delete_chat(path, id)),
             Job::Load(id) => Done::Loaded(id, storage::load_chat(path, id)),
-            Job::Export(id) => Done::ForExport(storage::load_chat(path, id)),
+            Job::Export(id) => Done::ForExport(id, storage::load_chat(path, id)),
+            Job::Retry(..) => unreachable!("retries resolve before running"),
         }
     }
 }
@@ -63,15 +77,25 @@ impl Island {
     /// turns queued saves of it into settings-only saves so their settings still land.
     pub(super) fn queue(&mut self, job: Job) -> Task<Message> {
         match &job {
-            Job::Save { chat, .. } => {
+            Job::Save { config, chat } => {
                 let id = chat.as_ref().map(|(chat, _)| chat.id);
                 self.jobs.retain(|queued| match queued {
                     Job::Save { chat: None, .. } => false,
                     Job::Save {
                         chat: Some((c, _)), ..
                     } => Some(c.id) != id,
+                    Job::Retry(c, _) => Some(*c) != id,
                     _ => true,
                 });
+                // A previous failure may belong to a chat that is no longer active.
+                for &failed_id in self.failed_saves.keys() {
+                    if Some(failed_id) != id && !self.jobs.iter().any(|job| {
+                        matches!(job, Job::Save { chat: Some((c, _)), .. } if c.id == failed_id)
+                            || matches!(job, Job::Delete(c) | Job::Retry(c, _) if *c == failed_id)
+                    }) {
+                        self.jobs.push_back(Job::Retry(failed_id, config.clone()));
+                    }
+                }
             }
             Job::Delete(id) => {
                 self.jobs.retain(|queued| !queued.only_for_chat(*id));
@@ -83,7 +107,7 @@ impl Island {
                     }
                 }
             }
-            Job::Rename(..) | Job::Load(_) | Job::Export(_) => {}
+            Job::Retry(..) | Job::Rename(..) | Job::Load(_) | Job::Export(_) => {}
         }
         self.jobs.push_back(job);
         self.next_job()
@@ -98,15 +122,29 @@ impl Island {
             self.jobs.clear();
             return self.drained();
         };
-        let Some(job) = self.jobs.pop_front() else {
-            return self.drained();
+        let job = loop {
+            match self.jobs.pop_front() {
+                Some(Job::Retry(id, config)) => {
+                    if let Some(chat) = self.failed_saves.get(&id).cloned() {
+                        break Job::Save {
+                            config,
+                            chat: Some(chat),
+                        };
+                    }
+                }
+                Some(job) => break job,
+                None => return self.drained(),
+            }
         };
         self.saving = true;
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || job.run(&path))
                     .await
-                    .unwrap_or_else(|e| Done::Saved(Err(e.to_string())))
+                    .unwrap_or_else(|e| Done::SaveFailed {
+                        chat: None,
+                        error: e.to_string(),
+                    })
             },
             Message::JobDone,
         )
@@ -133,8 +171,18 @@ impl Island {
         self.saving = false;
         let mut follow_up = Task::none();
         match done {
-            Done::Saved(Ok(())) => self.storage_warning.clear(),
-            Done::Saved(Err(error)) => {
+            Done::Saved(id) => {
+                if let Some(id) = id {
+                    self.failed_saves.remove(&id);
+                }
+                if self.failed_saves.is_empty() {
+                    self.storage_warning.clear();
+                }
+            }
+            Done::SaveFailed { chat, error } => {
+                if let Some(snapshot) = chat {
+                    self.failed_saves.insert(snapshot.0.id, snapshot);
+                }
                 self.storage_warning = format!("Could not save: {error}");
                 self.install_after_save = false;
                 if self.quitting {
@@ -145,17 +193,29 @@ impl Island {
                     }
                 }
             }
-            Done::Renamed(result) => {
-                if let Err(error) = result {
-                    self.chats_notice = format!("Couldn't rename the chat: {error}");
+            Done::Renamed(id, title, result) => match result {
+                Ok(()) => {
+                    if let Some((chat, _)) = self.failed_saves.get_mut(&id) {
+                        chat.title = title;
+                    }
                 }
-            }
+                Err(error) => self.chats_notice = format!("Couldn't rename the chat: {error}"),
+            },
             Done::Deleted(id, result) => match result {
-                Ok(()) => self.forget_chat(id),
+                Ok(()) => {
+                    self.failed_saves.remove(&id);
+                    self.forget_chat(id);
+                }
                 Err(error) => self.chats_notice = format!("Couldn't delete the chat: {error}"),
             },
-            Done::Loaded(id, result) => follow_up = self.opened_chat(id, result),
-            Done::ForExport(result) => follow_up = self.export_loaded(result),
+            Done::Loaded(id, result) => {
+                let result = self.failed_saves.get(&id).cloned().map_or(result, Ok);
+                follow_up = self.opened_chat(id, result);
+            }
+            Done::ForExport(id, result) => {
+                let result = self.failed_saves.get(&id).cloned().map_or(result, Ok);
+                follow_up = self.export_loaded(result);
+            }
         }
         Task::batch([follow_up, self.next_job()])
     }

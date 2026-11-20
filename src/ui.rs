@@ -313,6 +313,8 @@ pub struct Island {
     confirm_delete: Option<i64>,
     /// Storage jobs waiting their turn; `saving` is true while one runs.
     jobs: std::collections::VecDeque<jobs::Job>,
+    /// Latest turns that SQLite failed to save, including chats no longer in the notch.
+    failed_saves: std::collections::HashMap<i64, (Chat, Vec<Turn>)>,
     /// Restart to update once the queue is empty.
     install_after_save: bool,
     /// The chat the Chats page asked to open, until the queue has read it. Anything that
@@ -434,6 +436,7 @@ impl Island {
             renaming: None,
             confirm_delete: None,
             jobs: std::collections::VecDeque::new(),
+            failed_saves: std::collections::HashMap::new(),
             install_after_save: false,
             opening: None,
             legacy_key: false,
@@ -2207,6 +2210,10 @@ impl Island {
             self.install_after_save = true;
             return Task::none();
         }
+        if !self.failed_saves.is_empty() {
+            self.install_after_save = true;
+            return self.persist();
+        }
         let path = path.clone();
         if let (Some(db), false) = (&self.db_path, self.storage_disabled)
             && let Err(error) = storage::save(db, &self.config, Some((&self.chat, &self.turns)))
@@ -3564,7 +3571,10 @@ mod tests {
         let mut app = ready();
         app.quitting = true;
         app.saving = true;
-        let _ = app.update(Message::JobDone(jobs::Done::Saved(Err("disk full".into()))));
+        let _ = app.update(Message::JobDone(jobs::Done::SaveFailed {
+            chat: None,
+            error: "disk full".into(),
+        }));
         assert!(!app.quitting);
         assert_eq!(app.presence.state(), State::Open);
         assert!(app.storage_warning.contains("disk full"));
@@ -3997,13 +4007,45 @@ mod tests {
     }
 
     #[test]
+    fn failed_save_survives_switching_and_a_successful_unrelated_save() {
+        let mut app = queued_storage();
+        exchange(&mut app, "chat A", "unsaved reply");
+        let a = app.chat.id;
+        let snapshot = (app.chat.clone(), app.turns.clone());
+        let _ = app.update(Message::NewChat);
+        let _ = app.update(Message::Chat(ChatAction::Open(a)));
+
+        let _ = app.update(Message::JobDone(jobs::Done::SaveFailed {
+            chat: Some(snapshot),
+            error: "disk full".into(),
+        }));
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(None)));
+        assert!(app.storage_warning.contains("disk full"));
+
+        let _ = app.update(Message::JobDone(jobs::Done::Loaded(a, Ok(other_chat(a)))));
+        assert_eq!(app.turns[0].assistant, "unsaved reply");
+        let _ = app.update(Message::NewChat);
+        app.saving = true;
+        let _ = app.update(Message::Quit);
+        assert!(
+            app.jobs
+                .iter()
+                .any(|job| matches!(job, jobs::Job::Retry(id, _) if *id == a))
+        );
+
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(Some(a))));
+        assert!(!app.failed_saves.contains_key(&a));
+        assert!(app.storage_warning.is_empty());
+    }
+
+    #[test]
     fn a_deferred_update_survives_a_reply() {
         let mut app = queued_storage();
         app.install_after_save = true;
         app.input = "hi".into();
         let _task = app.update(Message::Send);
         app.jobs.clear();
-        let _ = app.update(Message::JobDone(jobs::Done::Saved(Ok(()))));
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(None)));
         assert!(app.install_after_save, "still waiting for the reply");
         let id = app.request_id;
         let _ = app.update(Message::Finished(id, Ok(())));
@@ -4011,7 +4053,7 @@ mod tests {
             !app.idle_storage(),
             "the save after the reply is under way and drains to the update"
         );
-        let _ = app.update(Message::JobDone(jobs::Done::Saved(Ok(()))));
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(None)));
         assert!(!app.install_after_save, "the update was attempted");
     }
 
