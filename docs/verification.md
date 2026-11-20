@@ -635,3 +635,53 @@ hovering (`TOOLTIP_DELAY`) instead of at once, below its control with a 4 px gap
 `Tooltip::delay` schedules one redraw for when the time is up, so there's no polling while the
 pointer rests. fmt, clippy and `cargo test` (336 passed, 5 ignored) pass. Not looked at in a
 running build: the installed copy was running.
+
+## Breaking bug audit and fixes (2026-11-20)
+
+The numbered findings and baseline locations are in [the audit](bug-audit-2026-11-20.md).
+Branch `fix-colead` covers findings 1–5, 7–14, and 18. The coordinator routed findings 6,
+15, 16, and 17 to the rich-text, visual, and memory workers.
+
+| Finding | Fix and regression evidence |
+| --- | --- |
+| 1. Failed save | The job retains the failed snapshot. `failed_save_survives_switching_and_a_successful_unrelated_save` proves that opening the chat recovers the latest reply, an unrelated save leaves the warning visible, and Quit schedules recovery. |
+| 2. Failed delete | The chat remains active and writes stay queued until SQLite confirms deletion. `failed_delete_keeps_the_active_transcript` and `deleting_a_chat_waits_for_its_save_and_for_confirmation_from_storage` cover both outcomes and prevent a new reply while deletion is pending. |
+| 3. Damaged turns | Startup keeps valid settings, opens the newest readable chat, and leaves damaged rows in place. `damaged_history_keeps_settings_and_other_chats_usable` uses a SQLite file with malformed legacy and current history. |
+| 4. Legacy ID collision | The migration claims the old history and uses a SQLite-assigned ID in one transaction. `repeated_migration_of_the_same_snapshot_keeps_existing_chats` replays a stale migration with an occupied maximum row ID and preserves a rename made after migration. |
+| 5. Unsavable settings | Settings and setup check the same serialization limit as storage. `oversized_settings_do_not_replace_the_live_config` verifies that a syntactically valid long endpoint leaves the live config intact. |
+| 7. CLI containment | Windows job assignment errors stop the request before sending the prompt. Pipe worker handles are aborted on every exit. `job_adoption_rejects_a_reaped_process` and the existing cancellation and CMD-shim fixtures exercise Windows process lifecycle. |
+| 8. CLI deadline | The absolute deadline also covers an async consumer waiting on stream output. `total_deadline_kills_cli_while_the_consumer_is_blocked` verifies the deadline error and termination of both fixture processes. |
+| 9. Startup cache | A blocking worker validates regular cache files within the installer and checksum size limits. `cached_installer_must_fit_the_asset_limit_even_with_a_valid_checksum` rejects an otherwise valid oversized candidate. |
+| 10. OAuth refresh | A refresh response preserves the saved refresh token until the server supplies a replacement. `refresh_preserves_the_existing_token_unless_the_server_rotates_it` covers both response shapes with fixture values. |
+| 11. Export ordering | Coalescing preserves the save before an export and still collapses later redundant saves. `export_reads_the_save_queued_before_it` checks the exact queue order. |
+| 12. Cancel hit region | Cancel returns the native window task when a busy peek collapses. `cancel_updates_the_hit_region_when_reduced_motion_collapses_the_peek` checks the state transition and the emitted task. |
+| 13. Launch crash | Native OS arguments let launch parsing ignore malformed Unicode. `non_unicode_args_do_not_prevent_recognizing_flags` verifies recognition of a valid flag alongside malformed arguments. |
+| 14. Stored integer overflow | Checked chat and profile IDs avoid wraparound, and relative timestamps use saturating subtraction. Tests cover a chat at `i64::MAX`, exhaustion at `u32::MAX`, and both timestamp extremes. |
+| 18. Obsolete AppImages | Cleanup removes recognized older files for the current platform. `update_cleanup_removes_only_older_assets_for_the_current_platform` covers Linux asset names, checksums, and partial downloads with Windows fixtures. |
+
+Windows passed `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
+(353 passed across seven suites, five ignored), and `cargo build`. The initial sandbox run
+could not write the two test credentials because it lacked a Windows logon session. The
+Credential Manager tests and full suite passed with access to that session.
+
+Verification used local fixtures and state tests. Live provider sign-in and inference, the
+real install/restart flow, physical desktop hit testing, and the Linux runtime were outside
+these runs. The Windows process tests exercise descendants created by the fixture after
+startup. Child creation and Win32 job assignment are still separate calls.
+
+
+### Review follow-up (2026-11-20)
+
+Windows CLI containment remains required before starting pipe workers or sending the prompt.
+When Windows refuses job creation or assignment, the error preserves the native HRESULT and
+suggests opening bloop directly if the launcher restricts child processes. The access-denied
+fixture checks both the code and the hint. Existing process-tree tests cover the containment
+and cancellation path.
+
+Storage regressions cover an unsuccessful delete during Quit, a blocking worker panic after
+switching chats, and a damaged-history notice that survives a successful save on the Chats
+page. Before the fix, the Quit test left the notch closed and the history notice test populated
+the write-failure warning.
+
+Windows passed `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test` (357 passed, five ignored).

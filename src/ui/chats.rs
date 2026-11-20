@@ -64,7 +64,7 @@ fn export_task(path: PathBuf, chat: Chat, turns: Vec<Turn>) -> Task<Message> {
 
 /// "Just now", "5 min ago", "3 h ago", "Yesterday", "4 days ago", "6 weeks ago".
 pub fn when(updated: i64, now: i64) -> String {
-    let seconds = (now - updated).max(0);
+    let seconds = now.saturating_sub(updated).max(0);
     let (minutes, hours, days) = (seconds / 60, seconds / 3600, seconds / 86_400);
     match () {
         _ if minutes < 1 => "Just now".into(),
@@ -112,6 +112,9 @@ impl Island {
                 }
             }
             ChatAction::Open(id) => {
+                if self.deleting.contains(&id) {
+                    return Task::none();
+                }
                 if self.request.is_some() {
                     self.chats_notice =
                         "Stop the reply in the notch before switching chats.".into();
@@ -149,6 +152,9 @@ impl Island {
                 let Some((id, title)) = self.renaming.clone() else {
                     return Task::none();
                 };
+                if self.deleting.contains(&id) {
+                    return Task::none();
+                }
                 let title = title.trim().to_owned();
                 if title.is_empty() {
                     self.chats_notice = "Give the chat a name.".into();
@@ -184,19 +190,17 @@ impl Island {
                 if self.chat_store().is_none() {
                     return Task::none();
                 }
-                if id == self.chat.id {
-                    if self.request.is_some() {
-                        self.chats_notice = "Stop the reply before deleting this chat.".into();
-                        return Task::none();
-                    }
-                    let profile = self.usable_profile(self.chat.profile);
-                    self.start_chat(profile);
+                if id == self.chat.id && self.request.is_some() {
+                    self.chats_notice = "Stop the reply before deleting this chat.".into();
+                    return Task::none();
+                }
+                if !self.deleting.insert(id) {
+                    return Task::none();
                 }
                 // Runs after any save of this chat already under way, never before it.
                 if self.opening == Some(id) {
                     self.opening = None;
                 }
-                self.forget_chat(id);
                 return self.queue(Job::Delete(id));
             }
             ChatAction::Export(id) => {
@@ -454,5 +458,11 @@ mod tests {
         assert_eq!(super::when(now - 4 * 86_400, now), "4 days ago");
         assert_eq!(super::when(now - 42 * 86_400, now), "6 weeks ago");
         assert_eq!(super::when(now + 50, now), "Just now");
+    }
+
+    #[test]
+    fn relative_times_accept_the_full_sqlite_integer_range() {
+        assert!(super::when(i64::MIN, 10).ends_with("weeks ago"));
+        assert_eq!(super::when(i64::MAX, 10), "Just now");
     }
 }

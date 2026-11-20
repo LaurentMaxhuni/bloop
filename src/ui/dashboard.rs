@@ -1064,7 +1064,11 @@ impl Island {
         let id = match self.profile_edit {
             ProfileEdit::Default => None,
             ProfileEdit::Existing(id) => Some(id),
-            ProfileEdit::New => Some(self.config.next_profile_id()),
+            ProfileEdit::New => Some(
+                self.config
+                    .next_profile_id()
+                    .ok_or("No unused profile IDs remain.")?,
+            ),
         };
         config.last_profile_id = self.config.last_profile_id;
         if self.profile_edit == ProfileEdit::New
@@ -1097,7 +1101,7 @@ impl Island {
                 None => config.profiles.push(profile),
             }
         }
-        config.validate()?;
+        bloop::storage::validate_config(&config)?;
         validate_shortcuts(&config)?;
         Ok(config)
     }

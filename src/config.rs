@@ -608,14 +608,14 @@ impl Config {
     }
 
     /// An id no profile has ever used, saved or deleted.
-    pub fn next_profile_id(&self) -> u32 {
+    pub fn next_profile_id(&self) -> Option<u32> {
         self.profiles
             .iter()
             .map(|p| p.id)
             .max()
             .unwrap_or(0)
             .max(self.last_profile_id)
-            + 1
+            .checked_add(1)
     }
 }
 
@@ -994,7 +994,7 @@ mod tests {
         use super::{Config, Profile, Provider};
         let mut config = Config::default();
         let work = Profile {
-            id: config.next_profile_id(),
+            id: config.next_profile_id().unwrap(),
             name: "Work".into(),
             provider: Provider::ChatGpt,
             endpoint: String::new(),
@@ -1056,5 +1056,14 @@ mod tests {
         let json = serde_json::to_string(&back).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(back.default_profile, 3);
+    }
+
+    #[test]
+    fn profile_id_exhaustion_does_not_reuse_a_deleted_id() {
+        let config = super::Config {
+            last_profile_id: u32::MAX,
+            ..super::Config::default()
+        };
+        assert_eq!(config.next_profile_id(), None);
     }
 }

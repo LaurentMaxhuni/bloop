@@ -249,6 +249,7 @@ pub enum Message {
     },
     /// Result of a check; `true` when the user asked for it.
     UpdateChecked(bool, Result<Option<Release>, String>),
+    UpdateCacheChecked(Option<(Version, PathBuf)>),
     UpdateProgress(Version, u8),
     UpdateReady(Result<(Version, PathBuf), String>),
     InstallUpdate,
@@ -311,8 +312,11 @@ pub struct Island {
     search_id: u64,
     renaming: Option<(i64, String)>,
     confirm_delete: Option<i64>,
+    deleting: std::collections::HashSet<i64>,
     /// Storage jobs waiting their turn; `saving` is true while one runs.
     jobs: std::collections::VecDeque<jobs::Job>,
+    /// Latest turns that SQLite failed to save, including chats no longer in the notch.
+    failed_saves: std::collections::HashMap<i64, (Chat, Vec<Turn>)>,
     /// Restart to update once the queue is empty.
     install_after_save: bool,
     /// The chat the Chats page asked to open, until the queue has read it. Anything that
@@ -433,7 +437,9 @@ impl Island {
             search_id: 0,
             renaming: None,
             confirm_delete: None,
+            deleting: std::collections::HashSet::new(),
             jobs: std::collections::VecDeque::new(),
+            failed_saves: std::collections::HashMap::new(),
             install_after_save: false,
             opening: None,
             legacy_key: false,
@@ -809,6 +815,9 @@ impl Island {
                     Ok(loaded) => {
                         self.config = loaded.config.clone();
                         self.draft_config = loaded.config;
+                        if let Some(warning) = loaded.warning {
+                            self.chats_notice = warning;
+                        }
                         self.instructions_editor =
                             text_editor::Content::with_text(&self.draft_config.instructions);
                         self.chats = loaded.chats;
@@ -823,8 +832,7 @@ impl Island {
                                 }
                             }
                             None => {
-                                self.chat.id = model::new_chat_id(0);
-                                self.chat.profile = self.config.default_profile();
+                                self.start_chat(self.config.default_profile());
                             }
                         }
                         self.sync_replies();
@@ -838,14 +846,19 @@ impl Island {
                 self.apply_shortcuts();
                 self.presence
                     .set_hover_delay(Duration::from_millis(self.config.hover_delay_ms.into()));
-                let ready = self
-                    .updates_dir()
-                    .and_then(|dir| update::ready(&dir, &Version::current()));
-                if let Some((version, path)) = ready {
-                    self.update_state = UpdateState::Ready(version, path);
-                    // Downloaded before a restart: say so once.
-                    self.update_peek_pending = true;
-                }
+                let cache = self.updates_dir().map_or_else(Task::none, |dir| {
+                    Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                update::ready(&dir, &Version::current())
+                            })
+                            .await
+                            .ok()
+                            .flatten()
+                        },
+                        Message::UpdateCacheChecked,
+                    )
+                });
                 let layout = self.relayout(false);
                 // First-run setup lives in the app window; the notch appears when it ends.
                 let (notch, windows) = match startup(self.launch, self.config.onboarded) {
@@ -853,7 +866,7 @@ impl Island {
                     Startup::Dashboard => (self.open_notch(), self.open_app_window()),
                     Startup::Onboarding => (Task::none(), self.start_setup()),
                 };
-                return Task::batch([layout, notch, windows]);
+                return Task::batch([layout, notch, windows, cache]);
             }
             Message::JobDone(done) => return self.job_done(done),
             Message::Platform(event) => match event {
@@ -1070,11 +1083,11 @@ impl Island {
                 }
             }
             Message::Cancel => {
-                self.cancel();
+                let collapse = self.cancel();
                 self.status = "Stopped. Partial reply kept out of model context.".into();
                 self.react(Mood::Mad, 1.2);
                 let update = self.peek_update_if_pending();
-                return Task::batch([self.persist(), update]);
+                return Task::batch([self.persist(), collapse.chain(update)]);
             }
             Message::Provider(provider) => {
                 if provider == self.draft_config.provider {
@@ -1361,16 +1374,16 @@ impl Island {
                 }
             }
             Message::Quit => {
-                self.cancel();
+                let collapse = self.cancel();
                 self.quitting = true;
                 let save = self.persist();
                 if self.idle_storage() {
                     return iced::exit();
                 }
-                return save;
+                return Task::batch([save, collapse]);
             }
             Message::QuitWithoutSaving => {
-                self.cancel();
+                let _ = self.cancel();
                 return iced::exit();
             }
             Message::OnboardNext => {
@@ -1518,6 +1531,16 @@ impl Island {
                     self.retry_update_later(Instant::now());
                 }
             },
+            Message::UpdateCacheChecked(Some((version, path)))
+                if matches!(self.update_state, UpdateState::Idle) =>
+            {
+                self.update_state = UpdateState::Ready(version, path);
+                self.update_peek_pending = true;
+                if self.window.is_some() {
+                    return self.peek_update_if_pending();
+                }
+            }
+            Message::UpdateCacheChecked(_) => {}
             Message::UpdateProgress(version, percent) => {
                 if let UpdateState::Downloading(current, _) = &self.update_state
                     && *current == version
@@ -1647,9 +1670,7 @@ impl Island {
             self.key_draft.clear();
         }
         let theme = self.config.theme;
-        if self
-            .draft_config
-            .validate()
+        if storage::validate_config(&self.draft_config)
             .and_then(|_| platform::validate_shortcut(&self.draft_config.shortcut))
             .is_ok()
         {
@@ -1729,8 +1750,14 @@ impl Island {
             .max()
             .unwrap_or(0)
             .max(self.chat.id);
+        let mut id = model::new_chat_id(newest);
+        if newest == i64::MAX {
+            while self.chat.id == id || self.chats.iter().any(|chat| chat.id == id) {
+                id = id.checked_add(1).unwrap_or(1);
+            }
+        }
         self.chat = Chat {
-            id: model::new_chat_id(newest),
+            id,
             profile,
             ..Chat::default()
         };
@@ -1775,6 +1802,10 @@ impl Island {
     /// Sends `prompt` as a new turn. With `replace_last`, the last turn is dropped first
     /// (Retry, Edit & resend), so it is neither shown twice nor sent back as context.
     fn send_prompt(&mut self, prompt: String, replace_last: bool) -> Task<Message> {
+        if self.deleting.contains(&self.chat.id) {
+            self.status = "Wait for the chat deletion to finish.".into();
+            return Task::none();
+        }
         self.recall = None;
         let Some(config) = self.config.with_profile(self.chat.profile) else {
             self.status =
@@ -1959,14 +1990,13 @@ impl Island {
         Some(field("API key", control))
     }
 
-    fn cancel(&mut self) {
+    fn cancel(&mut self) -> Task<Message> {
         if let Some(handle) = self.request.take() {
             handle.abort();
         }
         self.request_id += 1;
         self.finish_reveal();
-        // Only state changes matter here; this event never shows, hides or focuses the window.
-        let _ = self.present(Event::Cancelled);
+        self.present(Event::Cancelled)
     }
 
     fn persist(&mut self) -> Task<Message> {
@@ -1976,7 +2006,8 @@ impl Island {
         if self.db_path.is_none() {
             return Task::none();
         }
-        let chat = (!self.turns.is_empty()).then(|| (self.chat.clone(), self.turns.clone()));
+        let chat = (!self.turns.is_empty() && !self.deleting.contains(&self.chat.id))
+            .then(|| (self.chat.clone(), self.turns.clone()));
         self.queue(jobs::Job::Save {
             config: Box::new(self.config.clone()),
             chat,
@@ -2206,6 +2237,10 @@ impl Island {
             // Finish the queued writes first; `jobs` comes back here when they're done.
             self.install_after_save = true;
             return Task::none();
+        }
+        if !self.failed_saves.is_empty() {
+            self.install_after_save = true;
+            return self.persist();
         }
         let path = path.clone();
         if let (Some(db), false) = (&self.db_path, self.storage_disabled)
@@ -3543,9 +3578,24 @@ mod tests {
         let _ = app.update(Message::Toggle);
         app.input = "hello".into();
         let _task = app.update(Message::Send);
-        app.cancel();
+        let _ = app.cancel();
         let _ = app.update(Message::Focus(app.window.unwrap(), false));
         assert_eq!(app.presence.state(), State::Sliver);
+    }
+
+    #[test]
+    fn cancel_updates_the_hit_region_when_reduced_motion_collapses_the_peek() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::On;
+        let _ = app.update(Message::Toggle);
+        app.input = "hello".into();
+        let _ = app.update(Message::Send);
+        let _ = app.update(Message::Focus(app.window.unwrap(), false));
+        assert_eq!(app.presence.state(), State::Peek);
+
+        let task = app.update(Message::Cancel);
+        assert_eq!(app.presence.state(), State::Sliver);
+        assert!(task.units() > 0, "native hit region must be updated");
     }
 
     #[test]
@@ -3564,7 +3614,10 @@ mod tests {
         let mut app = ready();
         app.quitting = true;
         app.saving = true;
-        let _ = app.update(Message::JobDone(jobs::Done::Saved(Err("disk full".into()))));
+        let _ = app.update(Message::JobDone(jobs::Done::SaveFailed {
+            chat: None,
+            error: "disk full".into(),
+        }));
         assert!(!app.quitting);
         assert_eq!(app.presence.state(), State::Open);
         assert!(app.storage_warning.contains("disk full"));
@@ -3634,7 +3687,7 @@ mod tests {
         assert_eq!(app.mood(), Mood::Mad);
         app.input = "again".into();
         let _task = app.update(Message::Send);
-        app.cancel();
+        let _ = app.cancel();
         assert_eq!(app.reply_mood(0).0, Mood::Sleepy);
         assert_eq!(app.reply_mood(1).0, Mood::Mad);
         let _ = app.update(Message::Tick(Instant::now() + NAP_AFTER * 2));
@@ -3696,6 +3749,21 @@ mod tests {
     }
 
     #[test]
+    fn damaged_history_notice_does_not_become_a_quit_warning() {
+        let mut app = ready();
+        let warning = "Could not open the newest saved conversation.";
+        let _ = app.update(Message::Loaded(Ok(storage::Loaded {
+            warning: Some(warning.into()),
+            ..Default::default()
+        })));
+        assert!(app.storage_warning.is_empty());
+        assert_eq!(app.chats_notice, warning);
+
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(None)));
+        assert_eq!(app.chats_notice, warning);
+    }
+
+    #[test]
     fn new_chat_keeps_the_old_one_in_the_list() {
         let mut app = ready();
         exchange(&mut app, "keep me", "saved");
@@ -3711,8 +3779,18 @@ mod tests {
         assert_eq!(app.chats[0].id, app.chat.id, "newest first");
     }
 
+    #[test]
+    fn largest_saved_chat_id_does_not_block_creating_another_chat() {
+        let mut app = ready();
+        app.chat.id = i64::MAX;
+        app.chats.push(app.chat.clone());
+        let _ = app.update(Message::NewChat);
+        assert!(app.chat.id > 0);
+        assert_ne!(app.chat.id, i64::MAX);
+    }
+
     fn with_cloud_profile(app: &mut Island) -> u32 {
-        let id = app.config.next_profile_id();
+        let id = app.config.next_profile_id().unwrap();
         app.config.profiles.push(bloop::config::Profile {
             id,
             name: "Cloud".into(),
@@ -3834,7 +3912,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_chat_drops_its_queued_saves_and_waits_for_the_running_one() {
+    fn deleting_a_chat_waits_for_its_save_and_for_confirmation_from_storage() {
         let mut app = ready();
         app.storage_disabled = false;
         app.db_path = Some(PathBuf::from("unused.sqlite3"));
@@ -3843,11 +3921,34 @@ mod tests {
         let a = app.chat.id;
         let _ = app.update(Message::Chat(ChatAction::Delete(a)));
         let _ = app.update(Message::Chat(ChatAction::DeleteConfirm));
-        assert_ne!(app.chat.id, a, "the notch moved to a new chat");
-        assert!(app.chats.iter().all(|c| c.id != a));
-        assert!(app.jobs.iter().all(|job| !matches!(job,
+        assert_eq!(app.chat.id, a);
+        assert!(app.chats.iter().any(|c| c.id == a));
+        assert!(app.jobs.iter().any(|job| matches!(job,
             jobs::Job::Save { chat: Some((c, _)), .. } if c.id == a)));
         assert!(matches!(app.jobs.back(), Some(jobs::Job::Delete(id)) if *id == a));
+        let _ = app.update(Message::JobDone(jobs::Done::Deleted(a, Ok(()))));
+        assert_ne!(app.chat.id, a);
+        assert!(app.chats.iter().all(|c| c.id != a));
+    }
+
+    #[test]
+    fn failed_delete_keeps_the_active_transcript() {
+        let mut app = queued_storage();
+        exchange(&mut app, "chat A", "latest reply");
+        let a = app.chat.id;
+        let _ = app.update(Message::Chat(ChatAction::Delete(a)));
+        let _ = app.update(Message::Chat(ChatAction::DeleteConfirm));
+        let _ = app.update(Message::Retry);
+        assert!(app.request.is_none());
+
+        let _ = app.update(Message::JobDone(jobs::Done::Deleted(
+            a,
+            Err("disk full".into()),
+        )));
+        assert_eq!(app.chat.id, a);
+        assert_eq!(app.turns[0].assistant, "latest reply");
+        assert!(app.chats.iter().any(|chat| chat.id == a));
+        assert!(!app.deleting.contains(&a));
     }
 
     #[test]
@@ -3986,7 +4087,7 @@ mod tests {
         let _ = app.update(Message::Chat(ChatAction::Delete(a)));
         let _ = app.update(Message::Chat(ChatAction::DeleteConfirm));
         assert!(app.jobs.iter().any(|job| matches!(job,
-            jobs::Job::Save { config, chat: None } if config.ask_shortcut == "Ctrl+Alt+Q")));
+            jobs::Job::Save { config, chat: Some((chat, _)) } if chat.id == a && config.ask_shortcut == "Ctrl+Alt+Q")));
     }
 
     #[test]
@@ -3997,13 +4098,45 @@ mod tests {
     }
 
     #[test]
+    fn failed_save_survives_switching_and_a_successful_unrelated_save() {
+        let mut app = queued_storage();
+        exchange(&mut app, "chat A", "unsaved reply");
+        let a = app.chat.id;
+        let snapshot = (app.chat.clone(), app.turns.clone());
+        let _ = app.update(Message::NewChat);
+        let _ = app.update(Message::Chat(ChatAction::Open(a)));
+
+        let _ = app.update(Message::JobDone(jobs::Done::SaveFailed {
+            chat: Some(snapshot),
+            error: "disk full".into(),
+        }));
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(None)));
+        assert!(app.storage_warning.contains("disk full"));
+
+        let _ = app.update(Message::JobDone(jobs::Done::Loaded(a, Ok(other_chat(a)))));
+        assert_eq!(app.turns[0].assistant, "unsaved reply");
+        let _ = app.update(Message::NewChat);
+        app.saving = true;
+        let _ = app.update(Message::Quit);
+        assert!(
+            app.jobs
+                .iter()
+                .any(|job| matches!(job, jobs::Job::Retry(id, _) if *id == a))
+        );
+
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(Some(a))));
+        assert!(!app.failed_saves.contains_key(&a));
+        assert!(app.storage_warning.is_empty());
+    }
+
+    #[test]
     fn a_deferred_update_survives_a_reply() {
         let mut app = queued_storage();
         app.install_after_save = true;
         app.input = "hi".into();
         let _task = app.update(Message::Send);
         app.jobs.clear();
-        let _ = app.update(Message::JobDone(jobs::Done::Saved(Ok(()))));
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(None)));
         assert!(app.install_after_save, "still waiting for the reply");
         let id = app.request_id;
         let _ = app.update(Message::Finished(id, Ok(())));
@@ -4011,8 +4144,19 @@ mod tests {
             !app.idle_storage(),
             "the save after the reply is under way and drains to the update"
         );
-        let _ = app.update(Message::JobDone(jobs::Done::Saved(Ok(()))));
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(None)));
         assert!(!app.install_after_save, "the update was attempted");
+    }
+
+    #[test]
+    fn oversized_settings_do_not_replace_the_live_config() {
+        let mut app = ready();
+        let original = app.config.endpoint.clone();
+        app.draft_config.endpoint = format!("http://127.0.0.1:11434/{}", "x".repeat(32 * 1024));
+        assert!(app.draft_config.validate().is_ok());
+        let _ = app.update(Message::SaveSettings);
+        assert_eq!(app.config.endpoint, original);
+        assert!(app.status.contains("too large to save"));
     }
 
     #[test]
@@ -4069,8 +4213,7 @@ mod tests {
         };
         let _ = app.update(Message::Loaded(Ok(storage::Loaded {
             config,
-            chats: Vec::new(),
-            current: None,
+            ..Default::default()
         })));
         assert_eq!(app.instructions_editor.text(), "I write Rust.\nBe brief.");
         let _ = app.update(Message::Instructions(text_editor::Action::SelectAll));
@@ -4102,7 +4245,7 @@ mod tests {
         // The counter survives a save and reload.
         let back: Config =
             serde_json::from_str(&serde_json::to_string(&app.config).unwrap()).unwrap();
-        assert!(back.next_profile_id() > later);
+        assert!(back.next_profile_id().unwrap() > later);
     }
 
     #[test]
@@ -4200,7 +4343,7 @@ mod tests {
     fn deleting_another_profile_keeps_the_one_being_edited() {
         let mut app = ready();
         let cloud = with_cloud_profile(&mut app);
-        let other = app.config.next_profile_id();
+        let other = app.config.next_profile_id().unwrap();
         app.config.profiles.push(bloop::config::Profile {
             id: other,
             name: "Other".into(),
