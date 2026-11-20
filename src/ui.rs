@@ -934,6 +934,18 @@ impl Island {
                 }
                 if self.window == Some(id) {
                     self.window = None;
+                    return Task::none();
+                }
+                // Iced has already dropped the app window's surface and renderer.
+                #[cfg(windows)]
+                if self.app_window.is_none()
+                    && self.window.is_some()
+                    && self.presence.shape() == Shape::Sliver
+                    && !self.animating()
+                    && self.request.is_none()
+                    && self.reveal.is_none()
+                {
+                    return Task::future(async { platform::optimize_idle_heaps() }).discard();
                 }
             }
             Message::Deadline(now) => return self.present_at(Event::Tick, now),
@@ -4364,6 +4376,21 @@ mod tests {
         assert_eq!(app.app_window, Some(id));
         let _ = app.update(Message::WindowClosed(id));
         assert!(app.app_window.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn closing_app_window_reclaims_heap_only_when_notch_is_idle() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let first = app.app_window.unwrap();
+        let _ = app.update(Message::CloseRequested(first));
+        assert_eq!(app.update(Message::WindowClosed(first)).units(), 1);
+
+        let _ = app.update(Message::OpenWindow);
+        let second = app.app_window.unwrap();
+        let _ = app.update(Message::Toggle);
+        assert_eq!(app.update(Message::WindowClosed(second)).units(), 0);
     }
 
     #[test]
