@@ -717,13 +717,29 @@ fn target_monitor(
     }
 }
 
-/// Place the undecorated notch in physical desktop pixels, on the window thread.
+/// Cuts the window's height to the work area (`[left, top, right, bottom]`, physical) so
+/// the open panel never runs under the taskbar or off a short screen, and returns the work
+/// area's height in logical units.
+#[cfg(any(windows, test))]
+fn fit_to_work_area(rect: &mut PhysicalRect, area: [i32; 4], scale: f32) -> Option<f32> {
+    // From the window's own top, so it holds wherever along the area the window starts.
+    let available = area[3] - rect.y;
+    if available <= 0 || !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    rect.height = rect.height.min(available);
+    Some(available as f32 / scale)
+}
+
+/// Place the undecorated notch in physical desktop pixels, on the window thread. Returns
+/// the logical height of the work area it landed on, where the platform cuts the window
+/// to it (Windows); `None` elsewhere.
 pub fn place_on(
     window: &dyn iced::window::Window,
     canvas: Size,
     position: NotchPosition,
     target: Target,
-) {
+) -> Option<f32> {
     #[cfg(windows)]
     {
         use iced::window::raw_window_handle::RawWindowHandle;
@@ -736,10 +752,10 @@ pub fn place_on(
             },
         };
         let Ok(handle) = window.window_handle() else {
-            return;
+            return None;
         };
         let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-            return;
+            return None;
         };
         let hwnd = HWND(handle.hwnd.get() as *mut _);
         let monitor = target_monitor(hwnd, target);
@@ -749,18 +765,16 @@ pub fn place_on(
         };
         // SAFETY: monitor is selected by Windows; cbSize describes valid writable storage.
         if !unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() } {
-            return;
+            return None;
         }
         let (mut xdpi, mut ydpi) = (96, 96);
         // SAFETY: valid monitor and output pointers; initialized DPI is retained on failure.
         let _ = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut xdpi, &mut ydpi) };
         let area = info.rcWork;
-        let rect = physical_rect(
-            [area.left, area.top, area.right, area.bottom],
-            xdpi.max(96) as f32 / 96.0,
-            canvas,
-            position,
-        );
+        let area = [area.left, area.top, area.right, area.bottom];
+        let scale = xdpi.max(96) as f32 / 96.0;
+        let mut rect = physical_rect(area, scale, canvas, position);
+        let work_height = fit_to_work_area(&mut rect, area, scale);
         // The first synchronous move lets winit handle WM_DPICHANGED (including its
         // suggested-rectangle resize). Reapply our exact rectangle after it returns.
         // No ASYNCWINDOWPOS: window::run executes on the owning event-loop thread.
@@ -782,6 +796,7 @@ pub fn place_on(
                 break;
             }
         }
+        work_height
     }
     #[cfg(target_os = "linux")]
     {
@@ -790,9 +805,13 @@ pub fn place_on(
         let use_pointer =
             matches!(target, Target::Active) && linux::session() == linux::Session::X11;
         linux::x11::place(window, canvas, position, use_pointer);
+        None
     }
     #[cfg(not(any(windows, target_os = "linux")))]
-    let _ = (window, canvas, position, target);
+    {
+        let _ = (window, canvas, position, target);
+        None
+    }
 }
 
 /// Centred top-of-screen origin for a window of `size` on the primary monitor.
@@ -1504,6 +1523,53 @@ mod tests {
             }
         );
     }
+    #[test]
+    fn the_window_never_runs_past_the_work_area() {
+        use super::*;
+        let canvas = Size::new(600.0, 580.0);
+        // (work area, scale, expected window height, expected logical work height)
+        for (area, scale, height, work) in [
+            // 1920 x 1080 at 100 %: room to spare.
+            ([0, 0, 1920, 1032], 1.0, 580, 1032.0),
+            // 1366 x 768 at 125 %, 50 px taskbar.
+            ([0, 0, 1366, 718], 1.25, 718, 574.4),
+            // 1920 x 1080 at 150 % and 175 %: the full panel fits.
+            ([0, 0, 1920, 1032], 1.5, 870, 688.0),
+            ([0, 0, 1920, 1032], 1.75, 1015, 589.714_3),
+            // 1920 x 1080 at 200 %: cut to the work area.
+            ([0, 0, 1920, 1032], 2.0, 1032, 516.0),
+            // A secondary monitor above and left of the primary, taskbar on top.
+            ([-2560, -1400, 0, -40], 2.0, 1160, 680.0),
+            ([-1920, -1040, 0, -40], 2.0, 1000, 500.0),
+        ] {
+            let mut rect = physical_rect(area, scale, canvas, NotchPosition::Centre);
+            assert_eq!(rect.y, area[1]);
+            let got = fit_to_work_area(&mut rect, area, scale).unwrap();
+            assert_eq!(rect.height, height, "{area:?} at {scale}");
+            assert!((got - work).abs() < 0.01, "{got} != {work}");
+            assert!(rect.y + rect.height <= area[3]);
+        }
+        // A window placed lower than the area's top only gets the room under it.
+        let mut rect = physical_rect([0, 0, 1920, 1032], 2.0, canvas, NotchPosition::Centre);
+        rect.y = 100;
+        assert_eq!(
+            fit_to_work_area(&mut rect, [0, 0, 1920, 1032], 2.0),
+            Some(466.0)
+        );
+        assert_eq!(rect.height, 932);
+        // Nonsense from the system leaves the rectangle alone.
+        for (area, scale) in [
+            ([0, 500, 1920, 500], 1.0),
+            ([0, 0, 1920, 1032], 0.0),
+            ([0, 0, 1920, 1032], f32::NAN),
+        ] {
+            let mut rect = physical_rect(area, 1.0, canvas, NotchPosition::Centre);
+            let before = rect.height;
+            assert_eq!(fit_to_work_area(&mut rect, area, scale), None);
+            assert_eq!(rect.height, before);
+        }
+    }
+
     #[test]
     fn fullscreen_query_does_not_panic() {
         let _ = super::fullscreen_active();

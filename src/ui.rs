@@ -133,6 +133,10 @@ pub enum Message {
     FullscreenPoll,
     PeekTest,
     Frame(Instant),
+    /// The conversation's scroll position or content size changed.
+    Scrolled(scrollable::Viewport),
+    /// Logical height of the work area the notch was just placed on, when the platform knows it.
+    WorkArea(Option<f32>),
     /// Mascot animation frame while it is moving.
     Tick(Instant),
     /// Low-frequency wake-up at rest so the mascot can blink.
@@ -337,6 +341,12 @@ pub struct Island {
     last_frame: Option<Instant>,
     /// Size and offset the click-through region was last cut for, in whole pixels.
     region: Option<(i32, i32, i32)>,
+    /// How many times the region was cut; lets tests see the final cut.
+    region_cuts: u32,
+    /// Logical height of the screen's work area under the notch, once placed.
+    work_height: Option<f32>,
+    /// Whether the conversation keeps to the newest text as a reply streams.
+    follow: Follow,
     /// Frame intervals while animating, written to `BLOOP_FRAME_LOG` when it settles.
     frame_log: Vec<f32>,
     /// Windows' "Animation effects" setting is off.
@@ -447,6 +457,9 @@ impl Island {
             spring: SizeSpring::new(SLIVER.width, SLIVER.height),
             last_frame: None,
             region: None,
+            region_cuts: 0,
+            work_height: None,
+            follow: Follow::default(),
             frame_log: Vec::new(),
             system_reduce: platform::reduce_motion_system(),
             icons_ready: false,
@@ -765,6 +778,8 @@ impl Island {
             Message::Tick(_)
                 | Message::Blink(_)
                 | Message::Frame(_)
+                | Message::Scrolled(_)
+                | Message::WorkArea(_)
                 | Message::JobDone(_)
                 | Message::Deadline(_)
                 | Message::FullscreenPoll
@@ -935,6 +950,21 @@ impl Island {
                 let peek = self.present(Event::Peek("Hi! This is a peek.".into()));
                 return Task::batch([close, peek]);
             }
+            Message::Scrolled(viewport) => self.follow.on_scroll(
+                viewport.absolute_offset().y,
+                viewport.bounds().height,
+                viewport.content_bounds().height,
+            ),
+            Message::WorkArea(height) => {
+                if height == self.work_height {
+                    return Task::none();
+                }
+                // The open panel never reaches past the taskbar on a short or scaled screen.
+                self.work_height = height;
+                self.retarget(self.presence.shape(), Instant::now());
+                self.region = None;
+                return self.update_region();
+            }
             Message::Frame(now) => {
                 if !self.animating() {
                     self.last_frame = None;
@@ -951,6 +981,12 @@ impl Island {
                 }
                 if std::env::var_os("BLOOP_FRAME_LOG").is_some() {
                     self.frame_log.push(dt);
+                }
+                if !self.animating() {
+                    // The last frame before the snap can round to the same whole pixels while
+                    // still a fraction short, which is a device pixel or two at 150-200 %:
+                    // cut the region to the exact final outline.
+                    self.region = None;
                 }
                 let region = self.update_region();
                 if self.animating() {
@@ -1864,7 +1900,7 @@ impl Island {
         let (task, handle) = Task::run(stream, |message| message).abortable();
         self.request = Some(handle);
         let busy = self.present(Event::Busy(true));
-        Task::batch([task, self.scroll(), busy])
+        Task::batch([task, self.scroll_to_end(), busy])
     }
 
     fn chatgpt_can_manage(&self) -> bool {
@@ -2052,7 +2088,10 @@ impl Island {
         let (w, h) = match shape {
             Shape::Sliver => NotchWidth::SLIVER,
             Shape::Compact => self.config.notch_width.compact(),
-            Shape::Expanded => self.config.notch_width.panel(),
+            Shape::Expanded => {
+                let (w, h) = self.config.notch_width.panel();
+                (w, panel_height(h, self.work_height))
+            }
         };
         Size::new(w, h)
     }
@@ -2062,7 +2101,7 @@ impl Island {
         // Always the widest panel: width changes then never resize the window, so the notch
         // stays inside it while it animates to the new width.
         let (w, h) = NotchWidth::L.panel();
-        Size::new(w, h)
+        Size::new(w, canvas_height(h, self.work_height))
     }
 
     /// Where a rect of `size` sits horizontally in the canvas for the notch position.
@@ -2261,11 +2300,16 @@ impl Island {
         let Some(id) = self.window else {
             return Task::none();
         };
-        let canvas = self.canvas_size();
+        // The full-height canvas: the platform cuts it to the work area of whichever monitor
+        // the notch lands on and reports that height back, so the window and `canvas_size`
+        // agree after a move between monitors of different height or scale.
+        let (w, h) = NotchWidth::L.panel();
+        let canvas = Size::new(w, h);
         let position = self.config.notch_position;
         self.region = None;
         Task::batch([
-            window::run(id, move |w| platform::place_on(w, canvas, position, target)).discard(),
+            window::run(id, move |w| platform::place_on(w, canvas, position, target))
+                .map(Message::WorkArea),
             self.update_region(),
         ])
     }
@@ -2286,6 +2330,7 @@ impl Island {
             return Task::none();
         }
         self.region = Some(key);
+        self.region_cuts = self.region_cuts.wrapping_add(1);
         let outline: Vec<(f32, f32)> =
             mascot::notch_outline(rect.size(), self.shoulder(), self.corner_radius())
                 .into_iter()
@@ -2336,8 +2381,19 @@ impl Island {
         (self.size().height * 0.6).clamp(3.0, SHOULDER)
     }
 
+    /// Keeps to the newest text, unless the user scrolled up to read something earlier.
     fn scroll(&self) -> Task<Message> {
-        widget::operation::snap_to("conversation", scrollable::RelativeOffset::END)
+        if self.follow.stick {
+            widget::operation::snap_to("conversation", scrollable::RelativeOffset::END)
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Jumps to the newest text and follows it again (a new prompt, another chat).
+    fn scroll_to_end(&mut self) -> Task<Message> {
+        self.follow = Follow::default();
+        self.scroll()
     }
 
     fn button<'a>(&self, label: &'a str, variant: Variant) -> button::Button<'a, Message> {
@@ -2538,18 +2594,34 @@ impl Island {
             .into()
     }
 
-    /// The pill shown on hover and for peeks.
+    /// The pill shown on hover and for peeks. A peek's message takes the wordmark's place,
+    /// so it has the room; anything still too long ends in "…" on one line instead of
+    /// wrapping past the pill's bottom.
     fn pill_content(&self) -> Element<'_, Message> {
         let t = self.tokens();
         let status = self.pill_status();
-        let header = row![
-            self.mascot(26.0),
-            text("bloop").size(14).font(MEDIUM),
-            Space::new().width(Length::Fill),
-            text(status).size(12).color(t.muted_foreground),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
+        let wordmark = self.presence.message().is_none();
+        let chars = pill_chars(self.size_for(Shape::Compact).width, wordmark);
+        let status = container(
+            text(fit_line(&status, chars).into_owned())
+                .size(PILL_TEXT)
+                .color(t.muted_foreground)
+                .wrapping(text::Wrapping::None),
+        )
+        .width(Length::Fill)
+        .align_x(if wordmark {
+            iced::alignment::Horizontal::Right
+        } else {
+            iced::alignment::Horizontal::Left
+        })
+        .clip(true);
+        let mut header = row![self.mascot(26.0)]
+            .spacing(8)
+            .align_y(Alignment::Center);
+        if wordmark {
+            header = header.push(text("bloop").size(14).font(MEDIUM));
+        }
+        let header = header.push(status);
         button(header)
             .on_press(Message::OpenClick)
             .style(style::btn(t, Variant::Bare))
@@ -2662,7 +2734,7 @@ impl Island {
         }
         let last = self.turns.len().saturating_sub(1);
         for (index, turn) in self.turns.iter().enumerate() {
-            let bubble = container(text(&turn.user).size(14))
+            let bubble = container(prose(&turn.user).size(14))
                 .padding([8, 12])
                 .max_width(380)
                 .style(style::bubble(t));
@@ -2717,6 +2789,7 @@ impl Island {
         let mut body = column![
             scrollable(history)
                 .id("conversation")
+                .on_scroll(Message::Scrolled)
                 .height(Length::Fill)
                 .direction(scrollable::Direction::Vertical(
                     scrollable::Scrollbar::new()
@@ -2730,7 +2803,7 @@ impl Island {
         for warning in [&self.storage_warning, &self.desktop_warning, &self.status] {
             if !warning.is_empty() {
                 body = body.push(
-                    container(text(warning).size(13).color(t.destructive))
+                    container(prose(warning).size(13).color(t.destructive))
                         .padding([8, 12])
                         .width(Length::Fill)
                         .style(style::card(t, t.background)),
@@ -2899,13 +2972,12 @@ impl Island {
             container(
                 column![
                     row![
-                        text(heading).size(12).font(MEDIUM),
-                        Space::new().width(Length::Fill),
+                        prose(heading).size(12).font(MEDIUM).width(Length::Fill),
                         self.small_button(Icon::X, "Remove", "Remove", Message::RemoveAttachment),
                     ]
                     .align_y(Alignment::Center),
-                    text(preview).size(12).color(t.muted_foreground),
-                    text(format!("Sends with your question to {}", self.badge_text()))
+                    prose(preview).size(12).color(t.muted_foreground),
+                    prose(format!("Sends with your question to {}", self.badge_text()))
                         .size(11)
                         .color(t.muted_foreground),
                 ]
@@ -3087,7 +3159,7 @@ impl Island {
             );
         }
         let mut fields = column![
-            text(summary).size(14),
+            prose(summary).size(14),
             text("ChatGPT receives your prompt and recent chat context.")
                 .size(12)
                 .color(t.muted_foreground),
@@ -3095,7 +3167,7 @@ impl Island {
         ]
         .spacing(10);
         if !self.chatgpt_notice.is_empty() {
-            fields = fields.push(text(&self.chatgpt_notice).size(13));
+            fields = fields.push(prose(&self.chatgpt_notice).size(13));
         }
         if self.chatgpt.plan_enabled {
             let slug = self.draft_config.model.trim();
@@ -3135,6 +3207,91 @@ impl Island {
         fields.into()
     }
 }
+
+/// Text size of the pill's status.
+const PILL_TEXT: f32 = 12.0;
+/// A generous average advance of Segoe UI at [`PILL_TEXT`], in pixels per character.
+const PILL_CHAR: f32 = 5.6;
+
+/// How many characters of status fit beside the mascot (and the wordmark) in a pill of
+/// `width`: the pill's padding, the 26 px mascot, the gaps and the ~38 px wordmark.
+fn pill_chars(width: f32, wordmark: bool) -> usize {
+    let used = SHOULDER * 2.0 + 28.0 + 26.0 + if wordmark { 16.0 + 38.0 } else { 8.0 };
+    ((width - used).max(0.0) / PILL_CHAR) as usize
+}
+
+/// `line` on one line of at most `max` characters, ending in "…" when it was cut.
+fn fit_line(line: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    let mut lines = line.lines();
+    let line = lines.next().unwrap_or_default();
+    let more = lines.next().is_some();
+    if !more && line.chars().count() <= max {
+        return line.into();
+    }
+    let kept: String = line.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", kept.trim_end()).into()
+}
+
+/// Room left under the open panel on a work area too short for it, so its rounded bottom
+/// stays clear of the taskbar.
+const PANEL_GAP: f32 = 8.0;
+/// The panel never shrinks below this, even on a tiny work area: the prompt must fit.
+const MIN_PANEL_HEIGHT: f32 = 260.0;
+
+/// The open panel's height: `full`, or less when the work area is too short for it.
+fn panel_height(full: f32, work: Option<f32>) -> f32 {
+    match work {
+        Some(work) if work - PANEL_GAP < full => (work - PANEL_GAP).max(MIN_PANEL_HEIGHT),
+        _ => full,
+    }
+}
+
+/// The window's height: the full panel, or the work area when that's shorter, and always
+/// tall enough for the panel.
+fn canvas_height(full: f32, work: Option<f32>) -> f32 {
+    let panel = panel_height(full, work);
+    work.map_or(full, |work| work.min(full)).max(panel)
+}
+
+/// Whether the conversation sticks to its end while a reply grows. Only a change of scroll
+/// offset (the user's wheel or scrollbar, or our own snap) decides; content growing under
+/// a still offset doesn't, so a reply streaming in never unsticks it by itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Follow {
+    stick: bool,
+    offset: Option<f32>,
+}
+
+impl Default for Follow {
+    fn default() -> Self {
+        Self {
+            stick: true,
+            offset: None,
+        }
+    }
+}
+
+impl Follow {
+    /// Within this many pixels of the end still counts as at the end.
+    const SLACK: f32 = 24.0;
+
+    fn on_scroll(&mut self, offset: f32, visible: f32, content: f32) {
+        let moved = self.offset.is_none_or(|last| (last - offset).abs() > 0.5);
+        if moved {
+            self.stick = content - (offset + visible) <= Self::SLACK;
+        }
+        self.offset = Some(offset);
+    }
+}
+
+/// Text the user or the outside world wrote: names, model ids, URLs, paths and errors.
+/// It wraps between words, and inside a word too long for the line (a URL, a path), so
+/// it never runs out of its bubble, card or window.
+pub(crate) fn prose<'a>(content: impl text::IntoFragment<'a>) -> widget::Text<'a> {
+    text(content).wrapping(PROSE_WRAPPING)
+}
+
+const PROSE_WRAPPING: text::Wrapping = text::Wrapping::WordOrGlyph;
 
 /// `inner` placed `rect.x` from the left of the canvas, top-aligned.
 fn place(rect: iced::Rectangle, inner: Element<'_, Message>) -> Element<'_, Message> {
@@ -3454,6 +3611,170 @@ mod tests {
         assert!(app.presence.message().is_some());
         let (w, h) = (app.spring.w.target, app.spring.h.target);
         assert_eq!(Size::new(w, h), app.size_for(Shape::Compact));
+    }
+
+    #[test]
+    fn scrolling_up_stops_following_and_growth_alone_never_does() {
+        let mut follow = Follow::default();
+        // At the end of a 1000 px conversation in a 400 px view.
+        follow.on_scroll(600.0, 400.0, 1000.0);
+        assert!(follow.stick);
+        // The reply grows under a still offset: keep following.
+        follow.on_scroll(600.0, 400.0, 1400.0);
+        assert!(follow.stick);
+        // The user scrolls up to read: stop.
+        follow.on_scroll(200.0, 400.0, 1400.0);
+        assert!(!follow.stick);
+        // More text arrives while they read: still stopped.
+        follow.on_scroll(200.0, 400.0, 1800.0);
+        assert!(!follow.stick);
+        // Back down to within the slack of the end: follow again.
+        follow.on_scroll(1390.0, 400.0, 1800.0);
+        assert!(follow.stick);
+    }
+
+    #[test]
+    fn chunks_leave_a_reader_alone_until_the_next_prompt() {
+        let mut app = ready();
+        app.input = "first".into();
+        let _ = app.update(Message::Send);
+        let id = app.request_id;
+        app.follow.on_scroll(600.0, 400.0, 1000.0);
+        app.follow.on_scroll(100.0, 400.0, 1000.0);
+        let _ = app.update(Message::Chunk(id, StreamEvent::Delta("more".into())));
+        let _ = app.update(Message::Finished(id, Ok(())));
+        assert!(!app.follow.stick, "a streamed reply pulled the reader down");
+        app.finish_reveal();
+        app.input = "second".into();
+        let _ = app.update(Message::Send);
+        assert_eq!(app.follow, Follow::default());
+    }
+
+    #[test]
+    fn panel_fits_short_work_areas() {
+        let full = 580.0;
+        assert_eq!(panel_height(full, None), full);
+        assert_eq!(canvas_height(full, None), full);
+        // Plenty of room, or exactly the gap to spare.
+        for work in [1032.0, full + PANEL_GAP] {
+            assert_eq!(panel_height(full, Some(work)), full);
+            assert_eq!(canvas_height(full, Some(work)), full);
+        }
+        // 1366 x 768 at 125 % with a 40 px taskbar: 582 px tall, so 6 px under the gap.
+        assert_eq!(panel_height(full, Some(582.0)), 574.0);
+        assert_eq!(canvas_height(full, Some(582.0)), 580.0);
+        // 1920 x 1080 at 200 % with a 48 px taskbar: 516 px.
+        assert_eq!(panel_height(full, Some(516.0)), 508.0);
+        assert_eq!(canvas_height(full, Some(516.0)), 516.0);
+        // Tinier than the smallest usable panel: the panel keeps its floor.
+        assert_eq!(panel_height(full, Some(200.0)), MIN_PANEL_HEIGHT);
+        for work in [
+            0.0, 100.0, 200.0, 267.0, 268.0, 300.0, 587.0, 588.0, 600.0, 5000.0,
+        ] {
+            assert!(canvas_height(full, Some(work)) >= panel_height(full, Some(work)));
+            assert!(canvas_height(full, Some(work)) <= full.max(MIN_PANEL_HEIGHT));
+        }
+    }
+
+    #[test]
+    fn a_short_work_area_shrinks_the_open_panel_and_recuts_the_region() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::On;
+        let _ = app.present(Event::Shortcut);
+        assert_eq!(app.size().height, 580.0);
+        let cuts = app.region_cuts;
+        let _ = app.update(Message::WorkArea(Some(516.0)));
+        assert_eq!(app.size_for(Shape::Expanded).height, 508.0);
+        assert_eq!(app.size().height, 508.0);
+        assert_eq!(app.canvas_size().height, 516.0);
+        assert!(app.region_cuts > cuts);
+        assert_eq!(app.region.map(|(_, h, _)| h), Some(508));
+        // The same report again changes nothing.
+        let cuts = app.region_cuts;
+        let _ = app.update(Message::WorkArea(Some(516.0)));
+        assert_eq!(app.region_cuts, cuts);
+        // A taller monitor gives the full panel back.
+        let _ = app.update(Message::WorkArea(Some(1400.0)));
+        assert_eq!(app.size().height, 580.0);
+        assert_eq!(app.canvas_size().height, 580.0);
+    }
+
+    #[test]
+    fn the_settling_frame_cuts_the_exact_final_region() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::Off;
+        let _ = app.present(Event::Shortcut);
+        app.spring.snap();
+        // A fraction short of the target, still moving: rounds to the final whole pixels.
+        app.spring.h.value -= 0.4;
+        app.spring.h.velocity = 12.0;
+        assert!(app.animating());
+        let _ = app.update_region();
+        assert_eq!(app.region.map(|(_, h, _)| h), Some(580));
+        let mut at = Instant::now();
+        let mut cut_at_settle = false;
+        for _ in 0..60 {
+            let cuts = app.region_cuts;
+            at = run_frames(&mut app, at, 1);
+            if !app.animating() {
+                cut_at_settle = app.region_cuts > cuts;
+                break;
+            }
+        }
+        assert!(!app.animating());
+        assert!(
+            cut_at_settle,
+            "the final frame kept a region cut short of the notch"
+        );
+        // Settled: later frames cut nothing.
+        let cuts = app.region_cuts;
+        run_frames(&mut app, at, 5);
+        assert_eq!(app.region_cuts, cuts);
+    }
+
+    #[test]
+    fn fit_line_cuts_on_characters_and_marks_the_cut() {
+        assert_eq!(fit_line("Ask anything", 20), "Ask anything");
+        assert_eq!(fit_line("Ask anything", 12), "Ask anything");
+        assert_eq!(fit_line("Ask anything", 8), "Ask any…");
+        assert_eq!(fit_line("Ask anything", 5), "Ask…");
+        assert_eq!(fit_line("Ask anything", 1), "…");
+        assert_eq!(fit_line("Ask anything", 0), "…");
+        assert_eq!(fit_line("", 0), "");
+        assert_eq!(fit_line("one\ntwo", 20), "one…");
+        assert_eq!(fit_line("更新已准备好请点击重新启动", 6), "更新已准备…");
+        assert_eq!(fit_line("👋🏽 hello", 3), "👋🏽…");
+        assert_eq!(fit_line("e\u{301}e\u{301}e\u{301}", 4), "e\u{301}e…");
+    }
+
+    #[test]
+    fn pill_statuses_fit_on_one_line() {
+        for width in NotchWidth::ALL {
+            let pill = width.compact().0;
+            for status in [
+                "Thinking…",
+                "Replying…",
+                "All done",
+                "Napping",
+                "Listening…",
+                "Ask anything",
+                "Update 10.10.10 ready",
+            ] {
+                assert!(
+                    status.chars().count() <= pill_chars(pill, true),
+                    "{status} {width:?}"
+                );
+            }
+        }
+        // The update peek fits whole in the default and wide pills.
+        let peek = "Update 0.6.1 ready — click to restart";
+        for width in [NotchWidth::M, NotchWidth::L] {
+            let chars = pill_chars(width.compact().0, false);
+            assert_eq!(fit_line(peek, chars), peek, "{width:?}");
+        }
+        // The narrow one cuts it on one line, never wraps it.
+        let cut = fit_line(peek, pill_chars(NotchWidth::S.compact().0, false));
+        assert!(cut.ends_with('…') && !cut.contains('\n'), "{cut}");
     }
 
     #[test]

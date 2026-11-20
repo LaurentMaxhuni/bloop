@@ -1,7 +1,7 @@
 //! The Chats page: every saved conversation, with search, open, rename, export and delete.
 //! Only the current chat is written by `persist`; the others change here directly.
 
-use super::{Island, Message, jobs::Job};
+use super::{Island, Message, jobs::Job, prose};
 use crate::{
     icons::Icon,
     platform,
@@ -238,7 +238,7 @@ impl Island {
                 self.turns = turns;
                 self.sync_replies();
                 self.chats_notice.clear();
-                let scroll = self.scroll();
+                let scroll = self.scroll_to_end();
                 Task::batch([self.show_notch(), scroll])
             }
             Err(error) => {
@@ -287,7 +287,7 @@ impl Island {
             .id("chat-search");
         let mut page = column![search].spacing(14);
         if !self.chats_notice.is_empty() {
-            page = page.push(text(&self.chats_notice).size(13).color(t.muted_foreground));
+            page = page.push(prose(&self.chats_notice).size(13).color(t.muted_foreground));
         }
         if self.storage_disabled {
             page = page.push(
@@ -350,7 +350,7 @@ impl Island {
             .spacing(6)
             .align_y(Alignment::Center)
             .into(),
-            _ => text(if chat.title.is_empty() {
+            _ => prose(if chat.title.is_empty() {
                 "Untitled chat"
             } else {
                 &chat.title
@@ -375,11 +375,11 @@ impl Island {
         }
         let mut details = column![
             title,
-            text(meta.join(" · ")).size(12).color(t.muted_foreground)
+            prose(meta.join(" · ")).size(12).color(t.muted_foreground)
         ]
         .spacing(4);
         if !snippet.is_empty() {
-            details = details.push(text(snippet).size(12).color(t.muted_foreground));
+            details = details.push(prose(snippet).size(12).color(t.muted_foreground));
         }
         let mut card = column![details].spacing(10);
         if self.confirm_delete == Some(chat.id) {
