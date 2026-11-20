@@ -1079,11 +1079,11 @@ impl Island {
                 }
             }
             Message::Cancel => {
-                self.cancel();
+                let collapse = self.cancel();
                 self.status = "Stopped. Partial reply kept out of model context.".into();
                 self.react(Mood::Mad, 1.2);
                 let update = self.peek_update_if_pending();
-                return Task::batch([self.persist(), update]);
+                return Task::batch([self.persist(), collapse.chain(update)]);
             }
             Message::Provider(provider) => {
                 if provider == self.draft_config.provider {
@@ -1370,16 +1370,16 @@ impl Island {
                 }
             }
             Message::Quit => {
-                self.cancel();
+                let collapse = self.cancel();
                 self.quitting = true;
                 let save = self.persist();
                 if self.idle_storage() {
                     return iced::exit();
                 }
-                return save;
+                return Task::batch([save, collapse]);
             }
             Message::QuitWithoutSaving => {
-                self.cancel();
+                let _ = self.cancel();
                 return iced::exit();
             }
             Message::OnboardNext => {
@@ -1970,14 +1970,13 @@ impl Island {
         Some(field("API key", control))
     }
 
-    fn cancel(&mut self) {
+    fn cancel(&mut self) -> Task<Message> {
         if let Some(handle) = self.request.take() {
             handle.abort();
         }
         self.request_id += 1;
         self.finish_reveal();
-        // Only state changes matter here; this event never shows, hides or focuses the window.
-        let _ = self.present(Event::Cancelled);
+        self.present(Event::Cancelled)
     }
 
     fn persist(&mut self) -> Task<Message> {
@@ -3559,9 +3558,24 @@ mod tests {
         let _ = app.update(Message::Toggle);
         app.input = "hello".into();
         let _task = app.update(Message::Send);
-        app.cancel();
+        let _ = app.cancel();
         let _ = app.update(Message::Focus(app.window.unwrap(), false));
         assert_eq!(app.presence.state(), State::Sliver);
+    }
+
+    #[test]
+    fn cancel_updates_the_hit_region_when_reduced_motion_collapses_the_peek() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::On;
+        let _ = app.update(Message::Toggle);
+        app.input = "hello".into();
+        let _ = app.update(Message::Send);
+        let _ = app.update(Message::Focus(app.window.unwrap(), false));
+        assert_eq!(app.presence.state(), State::Peek);
+
+        let task = app.update(Message::Cancel);
+        assert_eq!(app.presence.state(), State::Sliver);
+        assert!(task.units() > 0, "native hit region must be updated");
     }
 
     #[test]
@@ -3653,7 +3667,7 @@ mod tests {
         assert_eq!(app.mood(), Mood::Mad);
         app.input = "again".into();
         let _task = app.update(Message::Send);
-        app.cancel();
+        let _ = app.cancel();
         assert_eq!(app.reply_mood(0).0, Mood::Sleepy);
         assert_eq!(app.reply_mood(1).0, Mood::Mad);
         let _ = app.update(Message::Tick(Instant::now() + NAP_AFTER * 2));
