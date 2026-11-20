@@ -74,9 +74,17 @@ impl Reply {
     /// Returns the newly prepared text when the update can extend the parse without
     /// reparsing, so appending to prose and to a fence is O(delta).
     fn try_fast(&mut self, text: &str) -> Option<String> {
-        // `update` is called with the reply's text so far, which grows while
-        // streaming: the new text extends `source`, so the delta is the tail and
-        // the length check is O(1).
+        // While streaming, `update` gets the reply's text so far, which extends
+        // `source`, so the delta is the tail. A `Reply` is also reused for different
+        // text (switching chats reuses replies by index): anything that doesn't
+        // extend `source` must take the full parse, or the old text would keep the
+        // new text's tail.
+        if !text.starts_with(self.source.as_str()) {
+            return None;
+        }
+        // `fence` and `tail_clean` are left as they are on the fast path: a clean
+        // delta keeps the tail clean, and a fence that only closes on a dirty delta
+        // takes the full parse, which recomputes both.
         let delta = text.get(self.source.len()..)?;
         if delta.is_empty() {
             return None;
@@ -612,6 +620,24 @@ mod tests {
         )));
         // Same text: nothing to do.
         reply.update("Hello **world**\n\n- one\n- two\n\nArea $$A = \\pi r^2$$");
+    }
+
+    /// A reused `Reply` given longer text that doesn't extend the old text (another
+    /// chat opened in its place) must match a fresh parse, not keep the old text.
+    #[test]
+    fn longer_unrelated_text_replaces_the_old_reply() {
+        let mut reply = Reply::new("Hello there\n");
+        reply.update("Goodbye now, friend\n");
+        assert_eq!(reply.source, "Goodbye now, friend\n");
+        assert_eq!(reply.prepared, math::prepare("Goodbye now, friend\n"));
+        assert_eq!(
+            format!("{:?}", reply.content.items()),
+            format!("{:?}", Reply::new("Goodbye now, friend\n").content.items())
+        );
+        // The same inside a fence, where the fast path appends verbatim.
+        let mut reply = Reply::new("```\nold code\n");
+        reply.update("```\nnew code, longer\n");
+        assert_eq!(reply.prepared, math::prepare("```\nnew code, longer\n"));
     }
 
     #[test]

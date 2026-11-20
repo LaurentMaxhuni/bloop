@@ -905,3 +905,14 @@ Verification:
   long prose stream (no GUI run; the app can't be driven, and the installed copy
   may be running — per AGENTS.md I never close or signal it). State-level tests
   (`Reply::update`, `math::prepare`, `math::parse`) are the verification here.
+
+### Review follow-up: streaming fast path on reused replies (2026-11-20)
+
+A cross-review of the reply-rendering change found that `Reply::try_fast` took the new
+text's tail by length alone. A reused `Reply` given longer text that doesn't extend the
+old text (switching chats reuses replies by index in `sync_replies`) kept the old text
+with the new tail appended. `try_fast` now requires `text.starts_with(source)` and falls
+back to a full parse otherwise. `longer_unrelated_text_replaces_the_old_reply` fails
+without the guard and passes with it. The reviewer's split-point check (every two-way
+split of ten tricky inputs) matched a full parse everywhere; the one rendering
+difference, indented code blocks streamed in chunks, also appears at baseline `1425657`.
