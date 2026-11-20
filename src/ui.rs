@@ -750,14 +750,21 @@ impl Island {
             // Redraw-synced frames, only while the notch is moving.
             events.push(window::frames().map(Message::Frame));
         }
-        let blinking = self.blink_until.is_some_and(|until| self.now < until);
-        if self.mood().animated() || blinking {
-            events.push(iced::time::every(Duration::from_millis(33)).map(Message::Tick));
-        } else {
-            // At rest: one cheap wake-up every few seconds for a blink / nap check.
-            events.push(iced::time::every(Duration::from_millis(3700)).map(Message::Blink));
+        if self.needs_mascot_clock() {
+            let blinking = self.blink_until.is_some_and(|until| self.now < until);
+            if self.mood().animated() || blinking {
+                events.push(iced::time::every(Duration::from_millis(33)).map(Message::Tick));
+            } else {
+                // At rest: one cheap wake-up every few seconds for a blink / nap check.
+                events.push(iced::time::every(Duration::from_millis(3700)).map(Message::Blink));
+            }
         }
         Subscription::batch(events)
+    }
+
+    fn needs_mascot_clock(&self) -> bool {
+        // The sliver draws no mascot. A hidden reply still needs its reveal ticks.
+        self.presence.shape() != Shape::Sliver || self.app_window.is_some() || self.reveal.is_some()
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -3682,6 +3689,25 @@ mod tests {
         assert_eq!(app.mood(), Mood::Sleepy);
         let _ = app.update(Message::Toggle);
         assert_ne!(app.mood(), Mood::Sleepy);
+    }
+
+    #[test]
+    fn mascot_clock_stops_when_collapsed_and_resumes_for_visible_or_pending_content() {
+        let mut app = ready();
+        assert!(!app.needs_mascot_clock());
+
+        let _ = app.update(Message::Toggle);
+        assert!(app.needs_mascot_clock());
+        let _ = app.update(Message::Toggle);
+        assert!(!app.needs_mascot_clock());
+
+        let _ = app.update(Message::OpenWindow);
+        assert!(app.needs_mascot_clock());
+        let _ = app.update(Message::CloseRequested(app.app_window.unwrap()));
+        assert!(!app.needs_mascot_clock());
+
+        app.reveal = Some(0);
+        assert!(app.needs_mascot_clock());
     }
 
     #[test]
