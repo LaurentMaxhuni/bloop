@@ -249,6 +249,7 @@ pub enum Message {
     },
     /// Result of a check; `true` when the user asked for it.
     UpdateChecked(bool, Result<Option<Release>, String>),
+    UpdateCacheChecked(Option<(Version, PathBuf)>),
     UpdateProgress(Version, u8),
     UpdateReady(Result<(Version, PathBuf), String>),
     InstallUpdate,
@@ -847,14 +848,19 @@ impl Island {
                 self.apply_shortcuts();
                 self.presence
                     .set_hover_delay(Duration::from_millis(self.config.hover_delay_ms.into()));
-                let ready = self
-                    .updates_dir()
-                    .and_then(|dir| update::ready(&dir, &Version::current()));
-                if let Some((version, path)) = ready {
-                    self.update_state = UpdateState::Ready(version, path);
-                    // Downloaded before a restart: say so once.
-                    self.update_peek_pending = true;
-                }
+                let cache = self.updates_dir().map_or_else(Task::none, |dir| {
+                    Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                update::ready(&dir, &Version::current())
+                            })
+                            .await
+                            .ok()
+                            .flatten()
+                        },
+                        Message::UpdateCacheChecked,
+                    )
+                });
                 let layout = self.relayout(false);
                 // First-run setup lives in the app window; the notch appears when it ends.
                 let (notch, windows) = match startup(self.launch, self.config.onboarded) {
@@ -862,7 +868,7 @@ impl Island {
                     Startup::Dashboard => (self.open_notch(), self.open_app_window()),
                     Startup::Onboarding => (Task::none(), self.start_setup()),
                 };
-                return Task::batch([layout, notch, windows]);
+                return Task::batch([layout, notch, windows, cache]);
             }
             Message::JobDone(done) => return self.job_done(done),
             Message::Platform(event) => match event {
@@ -1527,6 +1533,16 @@ impl Island {
                     self.retry_update_later(Instant::now());
                 }
             },
+            Message::UpdateCacheChecked(Some((version, path)))
+                if matches!(self.update_state, UpdateState::Idle) =>
+            {
+                self.update_state = UpdateState::Ready(version, path);
+                self.update_peek_pending = true;
+                if self.window.is_some() {
+                    return self.peek_update_if_pending();
+                }
+            }
+            Message::UpdateCacheChecked(_) => {}
             Message::UpdateProgress(version, percent) => {
                 if let UpdateState::Downloading(current, _) = &self.update_state
                     && *current == version
