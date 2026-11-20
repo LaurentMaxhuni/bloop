@@ -112,6 +112,9 @@ impl Island {
                 }
             }
             ChatAction::Open(id) => {
+                if self.deleting.contains(&id) {
+                    return Task::none();
+                }
                 if self.request.is_some() {
                     self.chats_notice =
                         "Stop the reply in the notch before switching chats.".into();
@@ -149,6 +152,9 @@ impl Island {
                 let Some((id, title)) = self.renaming.clone() else {
                     return Task::none();
                 };
+                if self.deleting.contains(&id) {
+                    return Task::none();
+                }
                 let title = title.trim().to_owned();
                 if title.is_empty() {
                     self.chats_notice = "Give the chat a name.".into();
@@ -184,19 +190,17 @@ impl Island {
                 if self.chat_store().is_none() {
                     return Task::none();
                 }
-                if id == self.chat.id {
-                    if self.request.is_some() {
-                        self.chats_notice = "Stop the reply before deleting this chat.".into();
-                        return Task::none();
-                    }
-                    let profile = self.usable_profile(self.chat.profile);
-                    self.start_chat(profile);
+                if id == self.chat.id && self.request.is_some() {
+                    self.chats_notice = "Stop the reply before deleting this chat.".into();
+                    return Task::none();
+                }
+                if !self.deleting.insert(id) {
+                    return Task::none();
                 }
                 // Runs after any save of this chat already under way, never before it.
                 if self.opening == Some(id) {
                     self.opening = None;
                 }
-                self.forget_chat(id);
                 return self.queue(Job::Delete(id));
             }
             ChatAction::Export(id) => {

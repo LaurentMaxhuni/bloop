@@ -42,11 +42,6 @@ pub enum Done {
 }
 
 impl Job {
-    /// Whether the job only touches chat `id`, so deleting that chat makes it pointless.
-    fn only_for_chat(&self, id: i64) -> bool {
-        matches!(self, Job::Retry(c, _) | Job::Rename(c, _) | Job::Load(c) | Job::Export(c) if *c == id)
-    }
-
     fn run(self, path: &std::path::Path) -> Done {
         match self {
             Job::Save { config, chat } => {
@@ -73,8 +68,7 @@ impl Job {
 
 impl Island {
     /// Adds `job` to the queue and starts it if nothing is running. A save replaces queued
-    /// saves it makes redundant. A delete drops queued renames and reads of that chat, and
-    /// turns queued saves of it into settings-only saves so their settings still land.
+    /// saves it makes redundant. A delete runs after writes already queued for its chat.
     pub(super) fn queue(&mut self, job: Job) -> Task<Message> {
         match &job {
             Job::Save { config, chat } => {
@@ -89,7 +83,7 @@ impl Island {
                 });
                 // A previous failure may belong to a chat that is no longer active.
                 for &failed_id in self.failed_saves.keys() {
-                    if Some(failed_id) != id && !self.jobs.iter().any(|job| {
+                    if Some(failed_id) != id && !self.deleting.contains(&failed_id) && !self.jobs.iter().any(|job| {
                         matches!(job, Job::Save { chat: Some((c, _)), .. } if c.id == failed_id)
                             || matches!(job, Job::Delete(c) | Job::Retry(c, _) if *c == failed_id)
                     }) {
@@ -97,16 +91,9 @@ impl Island {
                     }
                 }
             }
-            Job::Delete(id) => {
-                self.jobs.retain(|queued| !queued.only_for_chat(*id));
-                for queued in &mut self.jobs {
-                    if let Job::Save { chat, .. } = queued
-                        && chat.as_ref().is_some_and(|(c, _)| c.id == *id)
-                    {
-                        *chat = None;
-                    }
-                }
-            }
+            Job::Delete(id) => self
+                .jobs
+                .retain(|job| !matches!(job, Job::Load(c) if c == id)),
             Job::Retry(..) | Job::Rename(..) | Job::Load(_) | Job::Export(_) => {}
         }
         self.jobs.push_back(job);
@@ -151,9 +138,10 @@ impl Island {
     }
 
     fn drained(&mut self) -> Task<Message> {
-        if self.quitting {
+        if self.quitting && self.failed_saves.is_empty() {
             return iced::exit();
         }
+        self.quitting = false;
         // A reply in progress defers the update again; the save after it ends drains here.
         if self.install_after_save && self.request.is_none() {
             self.install_after_save = false;
@@ -201,13 +189,19 @@ impl Island {
                 }
                 Err(error) => self.chats_notice = format!("Couldn't rename the chat: {error}"),
             },
-            Done::Deleted(id, result) => match result {
-                Ok(()) => {
-                    self.failed_saves.remove(&id);
-                    self.forget_chat(id);
+            Done::Deleted(id, result) => {
+                self.deleting.remove(&id);
+                match result {
+                    Ok(()) => {
+                        self.failed_saves.remove(&id);
+                        self.forget_chat(id);
+                        if self.chat.id == id {
+                            self.start_chat(self.usable_profile(self.chat.profile));
+                        }
+                    }
+                    Err(error) => self.chats_notice = format!("Couldn't delete the chat: {error}"),
                 }
-                Err(error) => self.chats_notice = format!("Couldn't delete the chat: {error}"),
-            },
+            }
             Done::Loaded(id, result) => {
                 let result = self.failed_saves.get(&id).cloned().map_or(result, Ok);
                 follow_up = self.opened_chat(id, result);

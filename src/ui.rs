@@ -311,6 +311,7 @@ pub struct Island {
     search_id: u64,
     renaming: Option<(i64, String)>,
     confirm_delete: Option<i64>,
+    deleting: std::collections::HashSet<i64>,
     /// Storage jobs waiting their turn; `saving` is true while one runs.
     jobs: std::collections::VecDeque<jobs::Job>,
     /// Latest turns that SQLite failed to save, including chats no longer in the notch.
@@ -435,6 +436,7 @@ impl Island {
             search_id: 0,
             renaming: None,
             confirm_delete: None,
+            deleting: std::collections::HashSet::new(),
             jobs: std::collections::VecDeque::new(),
             failed_saves: std::collections::HashMap::new(),
             install_after_save: false,
@@ -812,6 +814,10 @@ impl Island {
                     Ok(loaded) => {
                         self.config = loaded.config.clone();
                         self.draft_config = loaded.config;
+                        if let Some(warning) = loaded.warning {
+                            self.chats_notice = warning.clone();
+                            self.storage_warning = warning;
+                        }
                         self.instructions_editor =
                             text_editor::Content::with_text(&self.draft_config.instructions);
                         self.chats = loaded.chats;
@@ -1778,6 +1784,10 @@ impl Island {
     /// Sends `prompt` as a new turn. With `replace_last`, the last turn is dropped first
     /// (Retry, Edit & resend), so it is neither shown twice nor sent back as context.
     fn send_prompt(&mut self, prompt: String, replace_last: bool) -> Task<Message> {
+        if self.deleting.contains(&self.chat.id) {
+            self.status = "Wait for the chat deletion to finish.".into();
+            return Task::none();
+        }
         self.recall = None;
         let Some(config) = self.config.with_profile(self.chat.profile) else {
             self.status =
@@ -1979,7 +1989,8 @@ impl Island {
         if self.db_path.is_none() {
             return Task::none();
         }
-        let chat = (!self.turns.is_empty()).then(|| (self.chat.clone(), self.turns.clone()));
+        let chat = (!self.turns.is_empty() && !self.deleting.contains(&self.chat.id))
+            .then(|| (self.chat.clone(), self.turns.clone()));
         self.queue(jobs::Job::Save {
             config: Box::new(self.config.clone()),
             chat,
@@ -3844,7 +3855,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_chat_drops_its_queued_saves_and_waits_for_the_running_one() {
+    fn deleting_a_chat_waits_for_its_save_and_for_confirmation_from_storage() {
         let mut app = ready();
         app.storage_disabled = false;
         app.db_path = Some(PathBuf::from("unused.sqlite3"));
@@ -3853,11 +3864,34 @@ mod tests {
         let a = app.chat.id;
         let _ = app.update(Message::Chat(ChatAction::Delete(a)));
         let _ = app.update(Message::Chat(ChatAction::DeleteConfirm));
-        assert_ne!(app.chat.id, a, "the notch moved to a new chat");
-        assert!(app.chats.iter().all(|c| c.id != a));
-        assert!(app.jobs.iter().all(|job| !matches!(job,
+        assert_eq!(app.chat.id, a);
+        assert!(app.chats.iter().any(|c| c.id == a));
+        assert!(app.jobs.iter().any(|job| matches!(job,
             jobs::Job::Save { chat: Some((c, _)), .. } if c.id == a)));
         assert!(matches!(app.jobs.back(), Some(jobs::Job::Delete(id)) if *id == a));
+        let _ = app.update(Message::JobDone(jobs::Done::Deleted(a, Ok(()))));
+        assert_ne!(app.chat.id, a);
+        assert!(app.chats.iter().all(|c| c.id != a));
+    }
+
+    #[test]
+    fn failed_delete_keeps_the_active_transcript() {
+        let mut app = queued_storage();
+        exchange(&mut app, "chat A", "latest reply");
+        let a = app.chat.id;
+        let _ = app.update(Message::Chat(ChatAction::Delete(a)));
+        let _ = app.update(Message::Chat(ChatAction::DeleteConfirm));
+        let _ = app.update(Message::Retry);
+        assert!(app.request.is_none());
+
+        let _ = app.update(Message::JobDone(jobs::Done::Deleted(
+            a,
+            Err("disk full".into()),
+        )));
+        assert_eq!(app.chat.id, a);
+        assert_eq!(app.turns[0].assistant, "latest reply");
+        assert!(app.chats.iter().any(|chat| chat.id == a));
+        assert!(!app.deleting.contains(&a));
     }
 
     #[test]
@@ -3996,7 +4030,7 @@ mod tests {
         let _ = app.update(Message::Chat(ChatAction::Delete(a)));
         let _ = app.update(Message::Chat(ChatAction::DeleteConfirm));
         assert!(app.jobs.iter().any(|job| matches!(job,
-            jobs::Job::Save { config, chat: None } if config.ask_shortcut == "Ctrl+Alt+Q")));
+            jobs::Job::Save { config, chat: Some((chat, _)) } if chat.id == a && config.ask_shortcut == "Ctrl+Alt+Q")));
     }
 
     #[test]
@@ -4111,8 +4145,7 @@ mod tests {
         };
         let _ = app.update(Message::Loaded(Ok(storage::Loaded {
             config,
-            chats: Vec::new(),
-            current: None,
+            ..Default::default()
         })));
         assert_eq!(app.instructions_editor.text(), "I write Rust.\nBe brief.");
         let _ = app.update(Message::Instructions(text_editor::Action::SelectAll));
