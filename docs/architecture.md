@@ -335,3 +335,15 @@ the body so it hangs behind. To make Bloop more present, the open notch's header
 36 px (was 30), an empty chat greets you with a 72 px Bloop, and clicking it makes it laugh.
 Appearance changes apply and save at once, like the rest of that page.
 
+
+## The panel fits the work area (2026-11-20)
+
+The window used to be a fixed 600 x 580 logical canvas. On a short or highly scaled
+screen (1366 x 768 at 125 %, 1920 x 1080 at 200 %) that runs under the taskbar and hides
+the prompt. `platform::place_on` now cuts the window's height to the work area below
+its top and returns that area's logical height; the UI keeps it and sizes the open
+panel to it (8 px clear of the bottom, never below 260 px). Placement always asks for
+the full canvas, so moving from a short monitor to a tall one gives the full panel back
+without a second placement, and the work-area report arrives in the same task that
+moved the window, so there is no extra resize mid-animation. Only Windows reports a
+height for now; Linux returns `None` and keeps its behaviour.
