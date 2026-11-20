@@ -256,11 +256,7 @@ fn upsert(connection: &Connection, chat: &Chat, turns_json: &str) -> Result<(), 
 /// Saves settings and, when given, one chat, together in one transaction. A chat
 /// without turns is not written.
 pub fn save(path: &Path, config: &Config, chat: Option<(&Chat, &[Turn])>) -> Result<(), String> {
-    config.validate()?;
-    let settings = serde_json::to_string(config).map_err(|e| e.to_string())?;
-    if settings.len() > MAX_SETTINGS {
-        return Err("Saved data exceeds supported limits.".into());
-    }
+    let settings = settings_json(config)?;
     let chat = match chat {
         Some((chat, turns)) if !turns.is_empty() => {
             validate_chat(chat)?;
@@ -286,6 +282,22 @@ pub fn save(path: &Path, config: &Config, chat: Option<(&Chat, &[Turn])>) -> Res
         upsert(&transaction, chat, &json)?;
     }
     transaction.commit().map_err(|e| e.to_string())
+}
+
+/// Checks that settings can be adopted without preventing future database writes.
+pub fn validate_config(config: &Config) -> Result<(), String> {
+    settings_json(config).map(drop)
+}
+
+fn settings_json(config: &Config) -> Result<String, String> {
+    config.validate()?;
+    let settings = serde_json::to_string(config).map_err(|e| e.to_string())?;
+    if settings.len() > MAX_SETTINGS {
+        return Err(
+            "Settings are too large to save. Shorten long fields such as endpoint URLs.".into(),
+        );
+    }
+    Ok(settings)
 }
 
 /// One saved chat with its turns.

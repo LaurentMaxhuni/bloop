@@ -1656,9 +1656,7 @@ impl Island {
             self.key_draft.clear();
         }
         let theme = self.config.theme;
-        if self
-            .draft_config
-            .validate()
+        if storage::validate_config(&self.draft_config)
             .and_then(|_| platform::validate_shortcut(&self.draft_config.shortcut))
             .is_ok()
         {
@@ -4089,6 +4087,17 @@ mod tests {
         );
         let _ = app.update(Message::JobDone(jobs::Done::Saved(None)));
         assert!(!app.install_after_save, "the update was attempted");
+    }
+
+    #[test]
+    fn oversized_settings_do_not_replace_the_live_config() {
+        let mut app = ready();
+        let original = app.config.endpoint.clone();
+        app.draft_config.endpoint = format!("http://127.0.0.1:11434/{}", "x".repeat(32 * 1024));
+        assert!(app.draft_config.validate().is_ok());
+        let _ = app.update(Message::SaveSettings);
+        assert_eq!(app.config.endpoint, original);
+        assert!(app.status.contains("too large to save"));
     }
 
     #[test]

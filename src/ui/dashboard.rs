@@ -1097,7 +1097,7 @@ impl Island {
                 None => config.profiles.push(profile),
             }
         }
-        config.validate()?;
+        bloop::storage::validate_config(&config)?;
         validate_shortcuts(&config)?;
         Ok(config)
     }
