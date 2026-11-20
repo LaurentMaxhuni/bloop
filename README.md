@@ -224,7 +224,8 @@ Only one bloop runs at a time, so quit the installed copy before launching a dev
 - Linux: on Wayland desktops a shortcut can open the notch without giving the prompt keyboard
   focus (the desktop decides); click the notch to type. Fullscreen hiding sees only X11 apps
   there. Per-desktop results: [verification notes](docs/verification.md#linux-port-2026-11-13).
-- Memory use is about 100 MiB working set (GPU renderer); the provisional 50 MB target isn't met.
+- A collapsed Windows DirectX 12 scratch profile measured 117.42 MiB working set and
+  123.15 MiB private bytes. The provisional 50 MB target remains open.
   See [verification notes](docs/verification.md).
 - Screen-reader support is incomplete.
 - Math covers common LaTeX; unknown commands show as written and big brackets aren't stretched

@@ -113,14 +113,32 @@ The first measured GPU baseline exceeds the provisional 50 MB target. A future
 software compositor must preserve alpha correctly before replacing DirectX.
 
 App window (2026-11-09): bloop is now an `iced::daemon` with two windows: the notch (always
-present) and a decorated app window (900 × 620, min 720 × 520) created on demand and closed
-for real, so it costs nothing while hidden. It replaces the in-notch hub and hosts onboarding.
+present) and a decorated app window (900 × 620, min 720 × 520) created on demand and
+dropped on close. It replaces the in-notch hub and hosts onboarding.
 Window ids route cursor, focus and drawing to the right window; closing the app window never
 quits, Quit lives in the tray. `launch.rs` decides what to open: first run shows only the
 window (finishing or closing it brings up the notch; unfinished setup resumes next launch);
 a manual launch opens notch and window; `--background` (the HKCU Run value and the update
 relaunch) opens the notch only. A second launch signals the named event `Local\bloop-open`
 and exits; the running copy opens or focuses the window. `bloop-app` stays the installer mutex.
+
+Windows memory and idle timers (2026-11-20). Iced shares one wgpu device, queue and
+text atlas across window renderers. Its close action removes the decorated window's
+surface, renderer and widget cache. The notch keeps the compositor alive. Iced already
+requests wgpu's memory-use allocation mode and a maximum frame latency of one. Keeping
+system font fallback preserves multilingual replies and Windows glyphs. See
+`docs/verification.md` for the renderer startup delta and retained memory after streaming.
+
+Chat search waits 250 ms after the latest input and allows one SQLite scan at a time.
+Scans borrow row JSON, stop at 100 matches in newest-first order, and leave the full chat
+list available when the search field is cleared. The presence timer considers a peek
+deadline only when the peek can expire. The collapsed notch skips the mascot clock when
+there is no app window or pending reply reveal.
+
+On Windows, closing the app window while the notch is settled and idle schedules
+`HeapOptimizeResources` on the existing executor. Windows can decommit freed heap pages
+after Iced drops the window. This runs once on the close event and keeps live allocations
+and the graphics device available to the notch.
 
 Release builds and signing (2026-11-11): releases are built by `.github/workflows/release.yml` on
 GitHub's Windows runners from a pushed `v<version>` tag (`installer/release.ps1` creates it), not
