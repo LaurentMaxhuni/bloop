@@ -840,3 +840,68 @@ is unchanged), reply text wrapping in `ui/rich.rs` (another lane).
 
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`
 (118 library, 191 UI, plus the integration suites) passed.
+
+## Reply rendering bugs: math, Markdown, streaming (2026-11-20)
+
+Fixed in `src/math.rs` and `src/ui/rich.rs` (lane: replies):
+
+1. **Deeply nested TeX overflowed the UI thread's stack (breaking bug, routed by
+   the coordinator).** Before the fix a 5000-deep input (`{` × 5000 or
+   `\frac{` × 5000) made `parse`/`unicode` fail with `STATUS_STACK_OVERFLOW`
+   (reproduced on the original code). The parser recurses per nesting level
+   (`Parser::rows` → `atom_with_scripts` → `argument` → `group_body` → …); now
+   `math.rs` caps nesting at `MAX_DEPTH = 64` (`Parser::enter`/`leave`), and past
+   the cap `parse` returns `Node::Text(tex)` — the TeX is shown as written.
+   `rich.rs` layout (`formula`) is bounded by the capped tree, so no separate
+   guard was needed there (verified by the regression tests below, not by
+   manual review of the render recursion).
+2. **Streaming made plain prose quadratic in reply length.** `Reply::update`
+   used to run `math::prepare(text)` plus `strip_prefix` per chunk (O(n) each),
+   so a 300 KB reply streamed in 64-byte chunks took 17.7 s. `Reply` now keeps a
+   `tail_clean` flag (the trailing line of the reply is free of `$`, `\` and
+   backticks) and takes a fast path when the tail is clean and the delta is
+   clean: the merged line converts to the old tail plus `convert_prose(delta)`,
+   so the parse extends in O(delta) and the fast path checks lengths only
+   (`text.get(self.source.len()..)` — O(1); the app passes the reply's text so
+   far). Same 300 KB: 1.4 s (the residual is iced's `Content::push_str`, which
+   re-parses the paragraph per update; out of lane).
+
+Verification:
+
+- Regression tests (all new):
+  - `math::tests::deep_nesting_falls_back_to_text_on_a_small_stack` — 5000-deep
+    `{` and `\frac{` inputs on a 512 KB-stack thread must return `Node::Text(tex)`
+    and `unicode` must return the input as written (fails by aborting the test
+    process before the fix).
+  - `math::tests::nesting_below_the_cap_still_parses` — 30 levels still parse.
+  - `math::tests::prepare_leaves_markdown_passthrough` — nested lists, tables,
+    block quotes, headings, links with parentheses (`[a](b(c))`), inline code
+    containing backticks, CRLF, emoji, RTL text, HTML-like text, a 5000-char
+    line all pass through `prepare` unchanged.
+  - `math::tests::prepare_leaves_code_and_prices_alone` — fenced code with no
+    language, unknown language, unclosed while streaming; `$5 and $10`, `Just
+    $5.` stay as written.
+  - `math::tests::prepare_converts_inline_and_display_math` — `$b$` → `b`,
+    `\[x^2\]` and `$$z^2$$` → ```` ```math ```` fences, `\(y\)` inline.
+  - `math::tests::fuzz_prepare_parse_and_unicode_never_panic` — 3000 deterministic
+    (xorshift) random strings over a TeX/Markdown alphabet plus every prefix of a
+    400-deep pathological string: `prepare`, `parse`, `unicode`, `state` must not
+    panic.
+  - `ui::rich::tests::streaming_updates_match_a_full_prepare` — for seven texts
+    (fences, math, CRLF, emoji, tables…), every cumulative prefix must satisfy
+    `reply.prepared == math::prepare(&reply.source)` with no panic (the fast path
+    is exercised on every update).
+  - `ui::rich::tests::fuzz_streaming_never_panics_or_diverges` — 400 random
+    cumulative texts: same invariant at every prefix.
+  - `ui::rich::tests::fast_path_extends_clean_prose_and_gives_up_on_dirt` — the
+    fast path returns the delta for clean appends and gives up when the tail or
+    the delta contains `$`, `\` or a backtick.
+- Commands run: `cargo fmt --check` (clean), `cargo clippy --all-targets -- -D
+  warnings` (clean), `cargo test` — 124 passed (lib), 187 passed (bin bloop),
+  plus the other crates' suites; nothing new ignored, nothing failing.
+  `cargo test --test cli -- --ignored` not run (per AGENTS.md: spends quota, not
+  needed for this lane).
+- Not verified by running the app: a live render of a deep-nested reply or a
+  long prose stream (no GUI run; the app can't be driven, and the installed copy
+  may be running — per AGENTS.md I never close or signal it). State-level tests
+  (`Reply::update`, `math::prepare`, `math::parse`) are the verification here.
