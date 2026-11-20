@@ -668,3 +668,20 @@ Verification used local fixtures and state tests. Live provider sign-in and infe
 real install/restart flow, physical desktop hit testing, and the Linux runtime were outside
 these runs. The Windows process tests exercise descendants created by the fixture after
 startup. Child creation and Win32 job assignment are still separate calls.
+
+
+### Review follow-up (2026-11-20)
+
+Windows CLI containment remains required before starting pipe workers or sending the prompt.
+When Windows refuses job creation or assignment, the error preserves the native HRESULT and
+suggests opening bloop directly if the launcher restricts child processes. The access-denied
+fixture checks both the code and the hint. Existing process-tree tests cover the containment
+and cancellation path.
+
+Storage regressions cover an unsuccessful delete during Quit, a blocking worker panic after
+switching chats, and a damaged-history notice that survives a successful save on the Chats
+page. Before the fix, the Quit test left the notch closed and the history notice test populated
+the write-failure warning.
+
+Windows passed `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test` (357 passed, five ignored).

@@ -769,8 +769,7 @@ async fn stream_in<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
         .spawn()
         .map_err(|e| Error::Protocol(format!("Could not start {}: {e}", kind.name())))?;
     // Owns the process tree: closing it (on drop, including cancel) kills every process in it.
-    let job = job::Job::adopt(&child)
-        .map_err(|e| Error::Protocol(format!("Could not contain {}: {e}", kind.name())))?;
+    let job = job::Job::adopt(&child).map_err(|error| containment_error(kind, error))?;
 
     let mut decoder = match kind {
         Kind::Claude => LineDecoder::new(kind),
@@ -889,6 +888,14 @@ async fn stream_in<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
         .and_then(Result::ok)
         .unwrap_or_default();
     Err(explain(kind, error, &tail))
+}
+
+fn containment_error(kind: Kind, error: std::io::Error) -> Error {
+    // A wrapped Win32 error includes its HRESULT in Display.
+    Error::Protocol(format!(
+        "Could not contain {} ({error}). Try opening bloop directly if your launcher restricts child processes.",
+        kind.name()
+    ))
 }
 
 /// Adds the CLI's last stderr line (keys masked) and a sign-in hint when it looks signed out.
@@ -1028,6 +1035,17 @@ mod job {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn containment_error_includes_the_windows_code_and_a_recovery_hint() {
+        use windows::{Win32::Foundation::ERROR_ACCESS_DENIED, core::HRESULT};
+        let denied = windows::core::Error::from(HRESULT::from_win32(ERROR_ACCESS_DENIED.0));
+        let message = containment_error(Kind::Claude, std::io::Error::other(denied)).to_string();
+        assert!(message.contains("Claude Code"));
+        assert!(message.contains("0x80070005"), "{message}");
+        assert!(message.contains("Try opening bloop directly"));
+    }
 
     #[cfg(windows)]
     #[tokio::test]
