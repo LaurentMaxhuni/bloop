@@ -816,8 +816,7 @@ impl Island {
                         self.config = loaded.config.clone();
                         self.draft_config = loaded.config;
                         if let Some(warning) = loaded.warning {
-                            self.chats_notice = warning.clone();
-                            self.storage_warning = warning;
+                            self.chats_notice = warning;
                         }
                         self.instructions_editor =
                             text_editor::Content::with_text(&self.draft_config.instructions);
@@ -3747,6 +3746,21 @@ mod tests {
             config,
             ..Default::default()
         }))
+    }
+
+    #[test]
+    fn damaged_history_notice_does_not_become_a_quit_warning() {
+        let mut app = ready();
+        let warning = "Could not open the newest saved conversation.";
+        let _ = app.update(Message::Loaded(Ok(storage::Loaded {
+            warning: Some(warning.into()),
+            ..Default::default()
+        })));
+        assert!(app.storage_warning.is_empty());
+        assert_eq!(app.chats_notice, warning);
+
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(None)));
+        assert_eq!(app.chats_notice, warning);
     }
 
     #[test]
