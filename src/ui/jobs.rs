@@ -73,13 +73,20 @@ impl Island {
         match &job {
             Job::Save { config, chat } => {
                 let id = chat.as_ref().map(|(chat, _)| chat.id);
-                self.jobs.retain(|queued| match queued {
-                    Job::Save { chat: None, .. } => false,
-                    Job::Save {
-                        chat: Some((c, _)), ..
-                    } => Some(c.id) != id,
-                    Job::Retry(c, _) => Some(*c) != id,
-                    _ => true,
+                let mut through_barrier = self.jobs.iter().rposition(|queued| {
+                    matches!(queued, Job::Load(c) | Job::Export(c) | Job::Rename(c, _) | Job::Delete(c) if Some(*c) == id)
+                }).map_or(0, |index| index + 1);
+                self.jobs.retain(|queued| {
+                    let may_coalesce = through_barrier == 0;
+                    through_barrier = through_barrier.saturating_sub(1);
+                    match queued {
+                        Job::Save { chat: None, .. } => false,
+                        Job::Save {
+                            chat: Some((c, _)), ..
+                        } if may_coalesce => Some(c.id) != id,
+                        Job::Retry(c, _) if may_coalesce => Some(*c) != id,
+                        _ => true,
+                    }
                 });
                 // A previous failure may belong to a chat that is no longer active.
                 for &failed_id in self.failed_saves.keys() {
@@ -212,5 +219,43 @@ impl Island {
             }
         }
         Task::batch([follow_up, self.next_job()])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_reads_the_save_queued_before_it() {
+        let mut island = Island::new(bloop::launch::Launch::Manual).0;
+        island.saving = true;
+        let save = |answer: &str| Job::Save {
+            config: Box::new(Config::default()),
+            chat: Some((
+                Chat {
+                    id: 42,
+                    ..Chat::default()
+                },
+                vec![Turn {
+                    user: "prompt".into(),
+                    assistant: answer.into(),
+                    complete: true,
+                }],
+            )),
+        };
+        let _ = island.queue(save("original"));
+        let _ = island.queue(Job::Export(42));
+        let _ = island.queue(save("intermediate edit"));
+        let _ = island.queue(save("final edit"));
+
+        assert_eq!(island.jobs.len(), 3);
+        assert!(
+            matches!(&island.jobs[0], Job::Save { chat: Some((_, turns)), .. } if turns[0].assistant == "original")
+        );
+        assert!(matches!(&island.jobs[1], Job::Export(42)));
+        assert!(
+            matches!(&island.jobs[2], Job::Save { chat: Some((_, turns)), .. } if turns[0].assistant == "final edit")
+        );
     }
 }
