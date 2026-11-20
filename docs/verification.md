@@ -685,3 +685,50 @@ the write-failure warning.
 
 Windows passed `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
 `cargo test` (357 passed, five ignored).
+
+## Visual fixes: scroll follow, work-area fit, region, pill text, long words (2026-11-20)
+
+Windows x64. Checked by reading the view code against Iced 0.14's layout rules and by
+state tests; no scratch instance was launched (the user's installed bloop was running),
+so none of these were screenshotted.
+
+- Scroll follow (#15): chunks and typewriter ticks snapped the conversation to the end
+  every time. `Follow` now only sticks while the reader is within 24 px of the end, and
+  only a moved scroll offset decides (content growing under a still offset doesn't).
+  Tests: `scrolling_up_stops_following_and_growth_alone_never_does`,
+  `chunks_leave_a_reader_alone_until_the_next_prompt`.
+- Panel taller than the work area: the 580 px panel ran under the taskbar on
+  1366 x 768 at 125 % (574 px work area) and 1920 x 1080 at 200 % (516 px), hiding the
+  prompt. Windows now cuts the window to the work area under its top and reports the
+  logical height; the panel keeps an 8 px gap and a 260 px floor. Tests:
+  `the_window_never_runs_past_the_work_area` (100/125/150/175/200 %, secondary monitors
+  above and left of the primary, bad input), `panel_fits_short_work_areas`,
+  `a_short_work_area_shrinks_the_open_panel_and_recuts_the_region`.
+- Region a device pixel short: the frame before the spring snaps can round to the final
+  logical size while a fraction short, and the settling frame skipped the recut. The
+  settling frame now always recuts (once; idle frames still return early).
+  `the_settling_frame_cuts_the_exact_final_region` fails without the fix.
+- Pill text: a long status or peek ("Update 0.6.1 ready — click to restart") wrapped to
+  a second line below the 40 px pill. It is now one line, cut with "…" by a character
+  budget and clipped as a backstop; a peek's message takes the wordmark's place.
+  Tests: `fit_line_cuts_on_characters_and_marks_the_cut` (CJK, emoji, combining marks),
+  `pill_statuses_fit_on_one_line`.
+- Long words: user messages, warnings, chat titles and search snippets, profile names,
+  model ids, connection reports and paths used word wrapping, which can't break a URL or
+  path, so they ran out of their bubble or card. `prose()` wraps inside such words. The
+  Home summary rows' value column is now `Fill`, so long values wrap instead of pushing
+  the chevron button out. Not unit-tested (Iced's `Text` keeps its wrapping private and
+  the app has no headless renderer); needs a screenshot check.
+
+Review follow-ups (same day): sub-pixel scroll steps now add up (`Follow` compares with
+the last deciding offset; `subpixel_scroll_steps_add_up_to_a_move`); below 260 px the work
+area caps panel, canvas and region together (`below_the_floor_window_canvas_and_region_agree`);
+late answers from older placements and failed placements no longer change the cap
+(`stale_or_failed_placements_keep_the_confirmed_height`).
+
+Not verified: any of the above on screen, Linux (the cross `cargo check` stops at C build
+scripts with no `x86_64-linux-gnu-gcc`; Linux returns no work height, so behaviour there
+is unchanged), reply text wrapping in `ui/rich.rs` (another lane).
+
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`
+(118 library, 191 UI, plus the integration suites) passed.

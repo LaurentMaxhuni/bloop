@@ -1,7 +1,7 @@
 //! The app window's dashboard: a fixed sidebar of pages and a scrolling page area.
 //! Appearance applies live; the Model and Shortcut & startup pages keep a Save button.
 
-use super::{Island, Message, UpdateState, field};
+use super::{Island, Message, UpdateState, field, prose};
 use crate::mascot::Mood;
 use crate::platform;
 use crate::{
@@ -324,12 +324,13 @@ impl Island {
     ) -> Element<'a, Message> {
         let t = self.tokens();
         let mut line = row![
+            // Fill, so a long model name wraps here instead of pushing the buttons out.
             column![
                 text(label).size(13).font(MEDIUM),
-                text(value).size(13).color(t.muted_foreground),
+                prose(value).size(13).color(t.muted_foreground),
             ]
-            .spacing(2),
-            Space::new().width(Length::Fill),
+            .spacing(2)
+            .width(Length::Fill),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -397,7 +398,7 @@ impl Island {
         }
         if !self.storage_warning.is_empty() {
             page = page
-                .push(text(&self.storage_warning).size(13).color(t.destructive))
+                .push(prose(&self.storage_warning).size(13).color(t.destructive))
                 .push(
                     self.button("Quit without saving", Variant::Destructive)
                         .on_press(Message::QuitWithoutSaving),
@@ -700,7 +701,7 @@ impl Island {
         let t = self.tokens();
         let mut save = column![].spacing(10);
         if !self.status.is_empty() {
-            save = save.push(text(&self.status).size(13).color(t.destructive));
+            save = save.push(prose(&self.status).size(13).color(t.destructive));
         }
         save.push(
             self.button("Save changes", Variant::Primary)
@@ -798,13 +799,13 @@ impl Island {
         ]
         .spacing(6);
         if let Some(report) = &self.connection {
-            check = check.push(text(&report.summary).size(13).color(if report.ok {
+            check = check.push(prose(&report.summary).size(13).color(if report.ok {
                 t.foreground
             } else {
                 t.destructive
             }));
             if let Some(fix) = &report.fix {
-                check = check.push(text(fix).size(12).color(t.muted_foreground));
+                check = check.push(prose(fix).size(12).color(t.muted_foreground));
             }
         }
         if !self.key_draft.trim().is_empty() {
@@ -876,7 +877,7 @@ impl Island {
             };
             let title: Element<'_, Message> = if id == default {
                 row![
-                    text(name).size(14).font(MEDIUM),
+                    prose(name).size(14).font(MEDIUM).width(Length::Fill),
                     container(text("Default").size(11))
                         .padding([1, 8])
                         .style(style::badge(t)),
@@ -885,13 +886,13 @@ impl Island {
                 .align_y(Alignment::Center)
                 .into()
             } else {
-                text(name).size(14).font(MEDIUM).into()
+                prose(name).size(14).font(MEDIUM).into()
             };
             let mut line = row![
                 star,
                 column![
                     title,
-                    text(self.describe_model(&config, None))
+                    prose(self.describe_model(&config, None))
                         .size(12)
                         .color(t.muted_foreground),
                 ]
@@ -924,7 +925,7 @@ impl Island {
             if self.confirm_profile_delete == Some(id) {
                 card = card.push(
                     row![
-                        text(format!("Delete {name}? Chats that use it can't continue."))
+                        prose(format!("Delete {name}? Chats that use it can't continue."))
                             .size(13)
                             .width(Length::Fill),
                         self.button("Keep", Variant::Outline)
@@ -1290,10 +1291,10 @@ impl Island {
             );
         }
         if !self.desktop_warning.is_empty() {
-            page = page.push(text(&self.desktop_warning).size(13).color(t.destructive));
+            page = page.push(prose(&self.desktop_warning).size(13).color(t.destructive));
         }
         for note in &self.desktop_notes {
-            page = page.push(text(note).size(13).color(t.muted_foreground));
+            page = page.push(prose(note).size(13).color(t.muted_foreground));
         }
         page.push(self.save_row())
             .push(self.autostart_toggle())
