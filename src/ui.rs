@@ -309,6 +309,8 @@ pub struct Island {
     /// Search results; `None` lists every chat.
     chat_hits: Option<Vec<(Chat, String)>>,
     search_id: u64,
+    search_running: Option<u64>,
+    search_ready: bool,
     renaming: Option<(i64, String)>,
     confirm_delete: Option<i64>,
     /// Storage jobs waiting their turn; `saving` is true while one runs.
@@ -431,6 +433,8 @@ impl Island {
             chat_query: String::new(),
             chat_hits: None,
             search_id: 0,
+            search_running: None,
+            search_ready: false,
             renaming: None,
             confirm_delete: None,
             jobs: std::collections::VecDeque::new(),
@@ -3938,6 +3942,50 @@ mod tests {
             ..Chat::default()
         };
         (chat, turns("other"))
+    }
+
+    #[test]
+    fn chat_search_waits_for_the_latest_input_and_runs_one_scan_at_a_time() {
+        let mut app = queued_storage();
+        let search = |query: &str| Message::Chat(ChatAction::Search(query.into()));
+        let ready = |id| Message::Chat(ChatAction::SearchReady(id));
+        let results = |id| Message::Chat(ChatAction::Results(id, Ok(vec![])));
+
+        let _ = app.update(search("m"));
+        let first = app.search_id;
+        let _ = app.update(search("ma"));
+        let second = app.search_id;
+        assert_eq!(app.search_running, None);
+        assert_eq!(app.update(ready(first)).units(), 0);
+        assert_eq!(app.update(ready(second)).units(), 1);
+        assert_eq!(app.search_running, Some(second));
+
+        let _ = app.update(search("march"));
+        let latest = app.search_id;
+        assert_eq!(app.update(ready(latest)).units(), 0);
+        assert_eq!(app.search_running, Some(second));
+        assert_eq!(app.update(results(second)).units(), 1);
+        assert!(app.chat_hits.is_none());
+        assert_eq!(app.search_running, Some(latest));
+        let _ = app.update(results(latest));
+        assert!(app.chat_hits.is_some());
+        assert_eq!(app.search_running, None);
+    }
+
+    #[test]
+    fn clearing_chat_search_discards_a_deferred_scan_and_its_previous_results() {
+        let mut app = queued_storage();
+        let _ = app.update(Message::Chat(ChatAction::Search("first".into())));
+        let first = app.search_id;
+        let _ = app.update(Message::Chat(ChatAction::SearchReady(first)));
+        let _ = app.update(Message::Chat(ChatAction::Search("next".into())));
+        let next = app.search_id;
+        let _ = app.update(Message::Chat(ChatAction::SearchReady(next)));
+        let _ = app.update(Message::Chat(ChatAction::Search(String::new())));
+        let stale = Message::Chat(ChatAction::Results(first, Ok(vec![])));
+        assert_eq!(app.update(stale).units(), 0);
+        assert!(app.chat_hits.is_none());
+        assert_eq!(app.search_running, None);
     }
 
     #[test]
