@@ -69,6 +69,23 @@ natively (fractions, scripts, roots, big operators, matrices) in Cambria Math, a
 button to code blocks, and opens only http(s)/mailto links. Each turn keeps a parsed
 `Reply` that is extended incrementally while it streams.
 
+Reply streaming and the TeX depth cap (2026-11-20): a reply only grows while it
+streams, so `Reply::update` pushes new text into the existing `markdown::Content`
+when it can prove the parse extends (`math::state` tracks the open fence; a clean
+trailing line of the prose plus a clean delta means the merged line converts to
+the old tail plus the delta). Anything else reparses, as before. The fast path
+checks lengths only — the app passes the reply's text so far — so it is O(delta).
+On the slow path the residual quadratic inside iced (`Content::push_str`
+re-parses the leftover paragraph per update) is out of lane; the lane's
+prepare/strip-per-update quadratics were removed. Separately, the TeX parser
+recurses per nesting level (`Parser::rows` → `atom_with_scripts` → `argument` →
+`group_body` → …). Thousands of nested `{` or `\frac{\frac{…` overflowed the UI
+thread's stack (verified: `STATUS_STACK_OVERFLOW` on a 5000-deep repro before the
+fix). `math.rs` now caps nesting at `MAX_DEPTH` (64); past it the parse sets
+`cut`, loops stop, and `parse` falls back to `Node::Text(tex)` — the TeX is
+shown as written. The layout recursion in `rich.rs` is bounded by the capped
+tree, so it needs no separate guard.
+
 Notch motion (2026-11-07): the OS window is created once at the open panel's size and is
 never resized while animating; only the drawn notch changes size, driven by critically
 damped springs (`motion.rs`) stepped on `window::frames()` (redraw-synced, no subscription
