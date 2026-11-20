@@ -769,7 +769,8 @@ async fn stream_in<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
         .spawn()
         .map_err(|e| Error::Protocol(format!("Could not start {}: {e}", kind.name())))?;
     // Owns the process tree: closing it (on drop, including cancel) kills every process in it.
-    let job = job::Job::adopt(&child);
+    let job = job::Job::adopt(&child)
+        .map_err(|e| Error::Protocol(format!("Could not contain {}: {e}", kind.name())))?;
 
     let mut decoder = match kind {
         Kind::Claude => LineDecoder::new(kind),
@@ -820,17 +821,31 @@ async fn stream_in<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
         }
         String::from_utf8_lossy(&tail).into_owned()
     });
+    struct AbortPipes([tokio::task::AbortHandle; 2]);
+    impl Drop for AbortPipes {
+        fn drop(&mut self) {
+            for task in &self.0 {
+                task.abort();
+            }
+        }
+    }
+    let _pipes = AbortPipes([writer.abort_handle(), errors.abort_handle()]);
 
     let mut stdout = child.stdout.take().expect("stdout piped");
     let deadline = tokio::time::Instant::now() + limits.total;
+    let too_long = || Error::Protocol("The CLI took too long to reply.".into());
     let mut buf = vec![0u8; 16 * 1024];
     let outcome: Result<(), Error> = async {
         loop {
-            let idle = tokio::time::Instant::now() + limits.idle;
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(too_long());
+            }
+            let idle = now + limits.idle;
             let read = tokio::time::timeout_at(idle.min(deadline), stdout.read(&mut buf)).await;
             let n = match read {
                 Err(_) if tokio::time::Instant::now() >= deadline => {
-                    return Err(Error::Protocol("The CLI took too long to reply.".into()));
+                    return Err(too_long());
                 }
                 Err(_) => return Err(Error::Protocol("The CLI stopped responding.".into())),
                 Ok(Err(e)) => return Err(Error::Protocol(format!("Could not read the CLI: {e}"))),
@@ -844,7 +859,12 @@ async fn stream_in<F: Future<Output = bool> + Send, E: AsRef<OsStr>>(
             send(&input, decoder.take_outbox());
             for event in events {
                 let done = matches!(event, StreamEvent::Done);
-                if !emit(event).await || done {
+                let keep_going = tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(deadline) => return Err(too_long()),
+                    accepted = emit(event) => accepted,
+                };
+                if !keep_going || done {
                     return Ok(());
                 }
             }
@@ -922,14 +942,14 @@ mod job {
     pub struct Job {
         /// Raw job handle, stored as an integer so the stream future stays `Send`.
         #[cfg(windows)]
-        handle: Option<usize>,
+        handle: usize,
         /// The child's process group (its pid, see `process_group(0)`).
         #[cfg(target_os = "linux")]
         group: Option<i32>,
     }
 
     impl Job {
-        pub fn adopt(child: &tokio::process::Child) -> Self {
+        pub fn adopt(child: &tokio::process::Child) -> std::io::Result<Self> {
             #[cfg(windows)]
             {
                 use windows::Win32::{
@@ -940,13 +960,11 @@ mod job {
                         JobObjectExtendedLimitInformation, SetInformationJobObject,
                     },
                 };
-                let Some(process) = child.raw_handle() else {
-                    return Self { handle: None };
-                };
+                let process = child
+                    .raw_handle()
+                    .ok_or_else(|| std::io::Error::other("CLI process already exited"))?;
                 // SAFETY: no attributes or name; returns an owned handle closed in Drop.
-                let Ok(job) = (unsafe { CreateJobObjectW(None, None) }) else {
-                    return Self { handle: None };
-                };
+                let job = unsafe { CreateJobObjectW(None, None) }.map_err(std::io::Error::other)?;
                 let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
                 info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
                 // SAFETY: `info` is a valid struct of the size passed; `job` is live; `process`
@@ -960,27 +978,27 @@ mod job {
                     )
                     .and_then(|()| AssignProcessToJobObject(job, HANDLE(process)))
                 };
-                if ok.is_err() {
+                if let Err(error) = ok {
                     // SAFETY: we own `job` and drop it here instead of in Drop.
                     unsafe {
                         let _ = CloseHandle(job);
                     }
-                    return Self { handle: None };
+                    return Err(std::io::Error::other(error));
                 }
-                Self {
-                    handle: Some(job.0 as usize),
-                }
+                Ok(Self {
+                    handle: job.0 as usize,
+                })
             }
             #[cfg(target_os = "linux")]
             {
-                Self {
+                Ok(Self {
                     group: child.id().and_then(|pid| i32::try_from(pid).ok()),
-                }
+                })
             }
             #[cfg(not(any(windows, target_os = "linux")))]
             {
                 let _ = child;
-                Self {}
+                Ok(Self {})
             }
         }
     }
@@ -995,11 +1013,11 @@ mod job {
                 }
             }
             #[cfg(windows)]
-            if let Some(handle) = self.handle.take() {
+            {
                 // SAFETY: we own this job handle; closing it kills the processes in the job.
                 unsafe {
                     let _ = windows::Win32::Foundation::CloseHandle(
-                        windows::Win32::Foundation::HANDLE(handle as *mut _),
+                        windows::Win32::Foundation::HANDLE(self.handle as *mut _),
                     );
                 }
             }
@@ -1010,6 +1028,18 @@ mod job {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn job_adoption_rejects_a_reaped_process() {
+        let mut child = tokio::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "exit", "0"])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .unwrap();
+        assert!(child.wait().await.unwrap().success());
+        assert!(job::Job::adopt(&child).is_err());
+    }
 
     fn decode(kind: Kind, input: &str) -> Result<Vec<StreamEvent>, Error> {
         let mut decoder = LineDecoder::new(kind);
