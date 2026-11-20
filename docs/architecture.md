@@ -335,3 +335,22 @@ the body so it hangs behind. To make Bloop more present, the open notch's header
 36 px (was 30), an empty chat greets you with a 72 px Bloop, and clicking it makes it laugh.
 Appearance changes apply and save at once, like the rest of that page.
 
+## Storage and runtime failure recovery (2026-11-20)
+
+The storage queue retains a failed chat snapshot by ID. Opening or exporting that chat uses
+the retained snapshot, and the next save retries it with the current settings. A later save
+for the same chat supersedes the failed snapshot. Quit or update waits for those writes.
+Save coalescing stops at a load, export, rename, or delete for the same chat so each operation
+sees the right version. A pending delete leaves the chat and earlier saves intact until SQLite
+confirms it. A failed delete leaves the transcript available.
+
+Startup reads valid settings even if a conversation's turns are damaged. It leaves damaged
+rows in the database and opens the most recent readable chat. Legacy migration claims the
+exact original history and inserts it with a SQLite-assigned ID in the same transaction.
+Settings and setup check the serialized settings limit before replacing the live config.
+
+CLI streaming requires successful Windows job assignment before starting pipe workers.
+Cancellation aborts both pipe workers and drops the process-tree guard. The total deadline
+covers stream delivery when the consumer is blocked. At startup, cached update verification
+runs on a blocking worker and checks asset and checksum file types and size limits before
+hashing.
