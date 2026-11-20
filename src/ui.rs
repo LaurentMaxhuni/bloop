@@ -833,8 +833,7 @@ impl Island {
                                 }
                             }
                             None => {
-                                self.chat.id = model::new_chat_id(0);
-                                self.chat.profile = self.config.default_profile();
+                                self.start_chat(self.config.default_profile());
                             }
                         }
                         self.sync_replies();
@@ -1752,8 +1751,14 @@ impl Island {
             .max()
             .unwrap_or(0)
             .max(self.chat.id);
+        let mut id = model::new_chat_id(newest);
+        if newest == i64::MAX {
+            while self.chat.id == id || self.chats.iter().any(|chat| chat.id == id) {
+                id = id.checked_add(1).unwrap_or(1);
+            }
+        }
         self.chat = Chat {
-            id: model::new_chat_id(newest),
+            id,
             profile,
             ..Chat::default()
         };
@@ -3760,8 +3765,18 @@ mod tests {
         assert_eq!(app.chats[0].id, app.chat.id, "newest first");
     }
 
+    #[test]
+    fn largest_saved_chat_id_does_not_block_creating_another_chat() {
+        let mut app = ready();
+        app.chat.id = i64::MAX;
+        app.chats.push(app.chat.clone());
+        let _ = app.update(Message::NewChat);
+        assert!(app.chat.id > 0);
+        assert_ne!(app.chat.id, i64::MAX);
+    }
+
     fn with_cloud_profile(app: &mut Island) -> u32 {
-        let id = app.config.next_profile_id();
+        let id = app.config.next_profile_id().unwrap();
         app.config.profiles.push(bloop::config::Profile {
             id,
             name: "Cloud".into(),
@@ -4216,7 +4231,7 @@ mod tests {
         // The counter survives a save and reload.
         let back: Config =
             serde_json::from_str(&serde_json::to_string(&app.config).unwrap()).unwrap();
-        assert!(back.next_profile_id() > later);
+        assert!(back.next_profile_id().unwrap() > later);
     }
 
     #[test]
@@ -4314,7 +4329,7 @@ mod tests {
     fn deleting_another_profile_keeps_the_one_being_edited() {
         let mut app = ready();
         let cloud = with_cloud_profile(&mut app);
-        let other = app.config.next_profile_id();
+        let other = app.config.next_profile_id().unwrap();
         app.config.profiles.push(bloop::config::Profile {
             id: other,
             name: "Other".into(),

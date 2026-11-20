@@ -64,7 +64,7 @@ fn export_task(path: PathBuf, chat: Chat, turns: Vec<Turn>) -> Task<Message> {
 
 /// "Just now", "5 min ago", "3 h ago", "Yesterday", "4 days ago", "6 weeks ago".
 pub fn when(updated: i64, now: i64) -> String {
-    let seconds = (now - updated).max(0);
+    let seconds = now.saturating_sub(updated).max(0);
     let (minutes, hours, days) = (seconds / 60, seconds / 3600, seconds / 86_400);
     match () {
         _ if minutes < 1 => "Just now".into(),
@@ -458,5 +458,11 @@ mod tests {
         assert_eq!(super::when(now - 4 * 86_400, now), "4 days ago");
         assert_eq!(super::when(now - 42 * 86_400, now), "6 weeks ago");
         assert_eq!(super::when(now + 50, now), "Just now");
+    }
+
+    #[test]
+    fn relative_times_accept_the_full_sqlite_integer_range() {
+        assert!(super::when(i64::MIN, 10).ends_with("weeks ago"));
+        assert_eq!(super::when(i64::MAX, 10), "Just now");
     }
 }
