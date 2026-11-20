@@ -77,6 +77,18 @@ struct TokenResponse {
 }
 
 impl TokenResponse {
+    fn renew_session(self, previous: &Session) -> Result<Session, String> {
+        let scopes = self
+            .scope
+            .clone()
+            .unwrap_or_else(|| previous.scopes.clone());
+        let mut renewed = self.into_session(previous.id_token.clone(), scopes)?;
+        if renewed.refresh_token.is_none() {
+            renewed.refresh_token.clone_from(&previous.refresh_token);
+        }
+        Ok(renewed)
+    }
+
     fn into_session(self, id_token: String, scopes: String) -> Result<Session, String> {
         if !self.token_type.eq_ignore_ascii_case("bearer")
             || self.access_token.trim().is_empty()
@@ -348,12 +360,8 @@ async fn renew_if_needed() -> Result<String, String> {
         }
         Err(error) => return Err(error.message("ChatGPT credential refresh")),
     };
-    let scopes = response
-        .scope
-        .clone()
-        .unwrap_or_else(|| tokens.scopes.clone());
     // Keep the original, verified ID token as a hint for this registration.
-    let renewed = response.into_session(tokens.id_token.clone(), scopes)?;
+    let renewed = response.renew_session(tokens)?;
     let has_plan = renewed.plan_enabled();
     let access_token = renewed.access_token.clone();
     profile.tokens = Some(renewed);
@@ -729,6 +737,32 @@ fn host_id() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_preserves_the_existing_token_unless_the_server_rotates_it() {
+        let previous = Session {
+            access_token: "old-access".into(),
+            refresh_token: Some("old-refresh".into()),
+            id_token: "verified-id".into(),
+            expires_at: 0,
+            scopes: "openid".into(),
+        };
+        for (replacement, expected) in [(None, "old-refresh"), (Some("new-refresh"), "new-refresh")]
+        {
+            let response = TokenResponse {
+                access_token: "new-access".into(),
+                refresh_token: replacement.map(str::to_owned),
+                id_token: None,
+                expires_in: 3600,
+                token_type: "Bearer".into(),
+                scope: None,
+            };
+            let session = response.renew_session(&previous).unwrap();
+            assert_eq!(session.refresh_token.as_deref(), Some(expected));
+            assert_eq!(session.id_token, "verified-id");
+            assert_eq!(session.scopes, "openid");
+        }
+    }
 
     #[test]
     fn callback_checks_path_state_and_client_registration() {
