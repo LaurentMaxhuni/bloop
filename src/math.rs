@@ -5,6 +5,11 @@
 //! becomes Unicode text, display math (`$$…$$`, `\[…\]`) becomes a fenced ```` ```math ````
 //! block that the UI draws as a laid-out formula. Code spans and fences are left alone.
 
+/// TeX nested deeper than this is not parsed; it is shown as written instead, so
+/// pathological nesting (thousands of `{`, `\frac{\frac{…`) can't exhaust the
+/// stack of the UI thread.
+const MAX_DEPTH: usize = 64;
+
 /// A parsed formula.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
@@ -89,7 +94,7 @@ pub fn prepare(markdown: &str) -> String {
 }
 
 /// ```` ``` ```` or `~~~` (3+) after at most three spaces: (char, length, info string).
-fn fence_marker(line: &str) -> Option<(char, usize, &str)> {
+pub fn fence_marker(line: &str) -> Option<(char, usize, &str)> {
     let indent = line.len() - line.trim_start_matches(' ').len();
     if indent > 3 {
         return None;
@@ -100,7 +105,34 @@ fn fence_marker(line: &str) -> Option<(char, usize, &str)> {
     (n >= 3).then(|| (c, n, &rest[n..]))
 }
 
-fn convert_prose(text: &str) -> String {
+/// The fence open in `text` (none when the text is in prose), and the trailing
+/// line of the reply when no fence is open: the part of new text that merges
+/// into the last line while streaming.
+pub fn state(text: &str) -> (Option<(char, usize)>, String) {
+    let mut fence = None;
+    for line in text.split_inclusive('\n') {
+        match (fence, fence_marker(line)) {
+            (Some((c, n)), Some((mc, mn, rest)))
+                if mc == c && mn >= n && rest.trim().is_empty() =>
+            {
+                fence = None;
+            }
+            (Some(_), _) => {}
+            (None, Some((c, n, _))) => fence = Some((c, n)),
+            (None, None) => {}
+        }
+    }
+    let tail = if fence.is_some() {
+        String::new()
+    } else {
+        text.rsplit_once('\n')
+            .map_or(text, |(_, tail)| tail)
+            .to_owned()
+    };
+    (fence, tail)
+}
+
+pub fn convert_prose(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut i = 0;
@@ -275,12 +307,18 @@ pub fn parse(tex: &str) -> Node {
     let mut parser = Parser {
         tokens: &tokens,
         at: 0,
+        depth: 0,
+        cut: false,
     };
     let mut rows = parser.rows(&[]);
     // A stray `}` ends `rows` early: skip it and keep going on a new line.
     while parser.at < tokens.len() {
         parser.at += 1;
         rows.extend(parser.rows(&[]));
+    }
+    if parser.cut {
+        // Deeper than [`MAX_DEPTH`]: show the TeX as written.
+        return Node::Text(tex.to_owned());
     }
     if rows.len() > 1 {
         // Top-level `\\`: stacked lines, like `gathered`.
@@ -301,11 +339,31 @@ pub fn parse(tex: &str) -> Node {
 struct Parser<'a> {
     tokens: &'a [Token],
     at: usize,
+    /// Nesting depth of the current call chain, bounded by [`MAX_DEPTH`].
+    depth: usize,
+    /// Set when the depth cap was hit; callers stop parsing.
+    cut: bool,
 }
 
 impl Parser<'_> {
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.at)
+    }
+
+    /// Enters a nested construct; past [`MAX_DEPTH`] it sets `cut` and returns
+    /// false, so deeply nested TeX is shown as written instead of parsed.
+    fn enter(&mut self) -> bool {
+        if self.depth >= MAX_DEPTH {
+            self.cut = true;
+            false
+        } else {
+            self.depth += 1;
+            true
+        }
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
     }
 
     fn skip_space(&mut self) {
@@ -340,6 +398,9 @@ impl Parser<'_> {
                     rows.push(std::mem::take(&mut cells));
                 }
                 _ => {
+                    if self.cut {
+                        break;
+                    }
                     if let Some(node) = self.atom_with_scripts() {
                         cell.push(node);
                     }
@@ -355,8 +416,11 @@ impl Parser<'_> {
 
     /// A `{…}` group or a single atom, as an argument.
     fn argument(&mut self) -> Node {
+        if !self.enter() {
+            return Node::Row(Vec::new());
+        }
         self.skip_space();
-        match self.peek() {
+        let node = match self.peek() {
             Some(Token::Open) => {
                 self.at += 1;
                 let node = self.group_body();
@@ -366,7 +430,9 @@ impl Parser<'_> {
                 node
             }
             _ => self.atom().unwrap_or(Node::Row(Vec::new())),
-        }
+        };
+        self.leave();
+        node
     }
 
     fn group_body(&mut self) -> Node {
@@ -379,6 +445,9 @@ impl Parser<'_> {
                 Some(Token::Amp) => self.at += 1,
                 Some(Token::Command(c)) if c == "\\" => self.at += 1,
                 _ => {
+                    if self.cut {
+                        break;
+                    }
                     if let Some(node) = self.atom_with_scripts() {
                         items.push(node);
                     }
@@ -419,7 +488,16 @@ impl Parser<'_> {
     }
 
     fn atom_with_scripts(&mut self) -> Option<Node> {
-        let base = self.atom()?;
+        if !self.enter() {
+            return None;
+        }
+        let base = match self.atom() {
+            Some(base) => base,
+            None => {
+                self.leave();
+                return None;
+            }
+        };
         let (mut sub, mut sup) = (None, None);
         loop {
             let resume = self.at;
@@ -448,6 +526,7 @@ impl Parser<'_> {
                 }
             }
         }
+        self.leave();
         Some(if sub.is_none() && sup.is_none() {
             base
         } else {
@@ -531,7 +610,9 @@ impl Parser<'_> {
                     let mut items = Vec::new();
                     loop {
                         self.skip_space();
-                        if matches!(self.peek(), None | Some(Token::Char(']') | Token::Close)) {
+                        if matches!(self.peek(), None | Some(Token::Char(']') | Token::Close))
+                            || self.cut
+                        {
                             break;
                         }
                         if let Some(node) = self.atom_with_scripts() {
@@ -1207,5 +1288,132 @@ mod tests {
             let _ = unicode(&parse(tex));
         }
         assert_eq!(inline_of(r"\foo"), r"\foo");
+    }
+
+    /// Nested lists, tables, quotes, headings, links with parentheses and inline
+    /// code containing backticks pass through unchanged; CRLF, emoji, RTL and
+    /// HTML-like text survive intact.
+    #[test]
+    fn prepare_leaves_markdown_passthrough() {
+        let texts = [
+            "- a\n  - b\n    - c\n".to_string(),
+            "| a | b |\n|---|---|\n| 1 | 2 |\n".to_string(),
+            "> quote\n> more\n".to_string(),
+            "# Title\n".to_string(),
+            "[a](b(c))\n".to_string(),
+            "`` `a ` b`` ``\n".to_string(),
+            "a\r\nb\r\n".to_string(),
+            "😀 emoji RTL text 向文本\n".to_string(),
+            "<div>html</div>\n".to_string(),
+            "x".repeat(5000),
+        ];
+        for text in &texts {
+            assert_eq!(prepare(text), text.as_str(), "passthrough: {text:?}");
+        }
+    }
+
+    #[test]
+    fn prepare_leaves_code_and_prices_alone() {
+        // Fenced code: no language, unknown language, unclosed while streaming.
+        assert_eq!(
+            prepare("```\nno language\n```\n"),
+            "```\nno language\n```\n"
+        );
+        assert_eq!(
+            prepare("```unknown\nstuff\n```\n"),
+            "```unknown\nstuff\n```\n"
+        );
+        assert_eq!(
+            prepare("```rust\nfn main() {}\n"),
+            "```rust\nfn main() {}\n"
+        );
+        // Dollar amounts and other unclosed-looking spans stay as written.
+        assert_eq!(prepare("Costs $5 and $10.\n"), "Costs $5 and $10.\n");
+        assert_eq!(prepare("Just $5.\n"), "Just $5.\n");
+    }
+
+    #[test]
+    fn prepare_converts_inline_and_display_math() {
+        assert_eq!(prepare("a $b$ c\n"), "a b c\n");
+        assert_eq!(prepare("\\[x^2\\]\n"), "```math\nx^2\n```\n\n");
+        assert_eq!(prepare("\\(y\\)\n"), "y\n");
+        assert_eq!(prepare("$$z^2$$\n"), "```math\nz^2\n```\n\n");
+        assert_eq!(
+            prepare("\\frac{1}{2} $x^2$ \\sqrt{4}\n"),
+            "\\frac{1}{2} x² \\sqrt{4}\n"
+        );
+    }
+
+    /// Regression: deeply nested TeX used to overflow the UI thread's stack.
+    #[test]
+    fn deep_nesting_falls_back_to_text_on_a_small_stack() {
+        let braces = format!("{}x{}", "{".repeat(5000), "}".repeat(5000));
+        let fracs = format!("{}x{}", "\\frac{".repeat(5000), "}".repeat(10000));
+        let run = |deep: &str| {
+            let node = parse(deep);
+            let text = unicode(&node);
+            (node == Node::Text(deep.to_owned()), text == deep)
+        };
+        let result = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || (run(&braces), run(&fracs)))
+            .unwrap()
+            .join()
+            .unwrap();
+        for (shown_as_written, text_matches) in [result.0, result.1] {
+            assert!(shown_as_written);
+            assert!(text_matches);
+        }
+    }
+
+    #[test]
+    fn nesting_below_the_cap_still_parses() {
+        let node = parse(&format!("{}a{}", "{".repeat(30), "}".repeat(30)));
+        assert!(!matches!(node, Node::Text(_)));
+        assert_eq!(unicode(&node), "a");
+        // Shallow unbalanced input still parses instead of being text.
+        assert!(!matches!(parse("{a"), Node::Text(_)));
+        assert!(!matches!(parse("{{a}"), Node::Text(_)));
+    }
+
+    /// Fuzz: random and truncated inputs must never panic while preparing, parsing or
+    /// converting (this runs on a normal stack; the stack-overflow case is covered above).
+    #[test]
+    fn fuzz_prepare_parse_and_unicode_never_panic() {
+        let alphabet: [&str; 25] = [
+            "$", "$$", "\\", "\\[", "\\(", "\\]", "\\)", "\\frac", "\\sqrt", "^{", "_", "^", "&",
+            "{", "}", "(", ")", "[", "]", "`", "~", " ", "\n", "a", "1",
+        ];
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut cases: Vec<String> = vec![String::new()];
+        for _ in 0..3000 {
+            let len = (next() % 48) as usize;
+            let mut s = String::new();
+            for _ in 0..len {
+                s.push_str(alphabet[(next() % alphabet.len() as u64) as usize]);
+            }
+            cases.push(s);
+        }
+        for s in &cases {
+            let _ = prepare(s);
+            let _ = unicode(&parse(s));
+            let _ = state(s);
+        }
+        // Truncations of pathological input at every boundary.
+        let deep = format!("{}a{}", "{".repeat(400), "}".repeat(400));
+        for end in 0..=deep.len() {
+            if deep.is_char_boundary(end) {
+                let s = &deep[..end];
+                let _ = prepare(s);
+                let _ = unicode(&parse(s));
+                let _ = state(s);
+            }
+        }
     }
 }
