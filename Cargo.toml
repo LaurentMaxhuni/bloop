@@ -23,10 +23,11 @@ httparse = "1"
 ring = "0.17"
 
 [target.'cfg(windows)'.dependencies]
+iced = { version = "0.14", default-features = false, features = ["tiny-skia"] }
 # Select only DirectX 12 instead of loading unused GPU backends on Windows.
 wgpu = { version = "27", default-features = false, features = ["std", "wgsl", "dx12"] }
 tray-icon = "0.26"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_Security", "Win32_System_Registry", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_UI_Controls_Dialogs"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_Security", "Win32_System_Registry", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_SystemServices", "Win32_UI_Controls_Dialogs"] }
 
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 global-hotkey = "0.9"

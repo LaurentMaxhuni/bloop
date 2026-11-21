@@ -122,6 +122,13 @@ pub fn installer_name_for(names: &AssetNames, version: &Version) -> String {
     format!("{}{version}{}", names.prefix, names.suffix)
 }
 
+fn asset_version(name: &str, names: &AssetNames) -> Option<Version> {
+    Version::parse(
+        name.strip_prefix(names.prefix)?
+            .strip_suffix(names.suffix)?,
+    )
+}
+
 #[derive(Deserialize)]
 struct ApiRelease {
     tag_name: String,
@@ -394,16 +401,24 @@ pub async fn download_from(
         format!("{}  {name}\n", hex(&expected)),
     )
     .await?;
-    // Keep only this installer.
+    remove_older_downloads(dir, &CURRENT, release.version);
+    Ok(target)
+}
+
+fn remove_older_downloads(dir: &Path, names: &AssetNames, version: Version) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
-            let file = entry.file_name().to_string_lossy().into_owned();
-            if file.starts_with("bloop-setup-") && !file.starts_with(&name) {
+            let file = entry.file_name();
+            let file = file.to_string_lossy();
+            let asset = file
+                .strip_suffix(".sha256")
+                .or_else(|| file.strip_suffix(".part"))
+                .unwrap_or(&file);
+            if asset_version(asset, names).is_some_and(|old| old < version) {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
     }
-    Ok(target)
 }
 
 /// The newest already-downloaded installer newer than `current` whose bytes still match its
@@ -423,20 +438,28 @@ pub fn ready_for(
         .flatten()
         .filter_map(|entry| {
             let file = entry.file_name().to_string_lossy().into_owned();
-            let version = Version::parse(
-                file.strip_prefix(names.prefix)?
-                    .strip_suffix(names.suffix)?,
-            )?;
+            let version = asset_version(&file, names)?;
             (version > *current).then_some((version, entry.path()))
         })
         .collect();
     found.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     found.into_iter().find(|(version, path)| {
         let name = installer_name_for(names, version);
-        let sidecar = std::fs::read_to_string(dir.join(format!("{name}.sha256"))).ok();
+        let sidecar = dir.join(format!("{name}.sha256"));
+        if !regular_file_within(path, names.max_size)
+            || !regular_file_within(&sidecar, MAX_CHECKSUM_FILE as u64)
+        {
+            return false;
+        }
+        let sidecar = std::fs::read_to_string(sidecar).ok();
         let expected = sidecar.and_then(|text| parse_checksum(&text, &name));
         expected.is_some() && sha256_file(path).ok() == expected
     })
+}
+
+fn regular_file_within(path: &Path, max_bytes: u64) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.len() > 0 && meta.len() <= max_bytes)
 }
 
 #[cfg(test)]
@@ -663,6 +686,51 @@ mod tests {
             hex(&digest),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cached_installer_must_fit_the_asset_limit_even_with_a_valid_checksum() {
+        let dir = std::env::temp_dir().join(format!("bloop-cache-size-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let names = AssetNames {
+            max_size: 2,
+            ..LINUX
+        };
+        let name = installer_name_for(&names, &v("9.0.0"));
+        let asset = dir.join(&name);
+        std::fs::write(&asset, b"abc").unwrap();
+        let checksum = hex(&sha256_file(&asset).unwrap());
+        std::fs::write(
+            dir.join(format!("{name}.sha256")),
+            format!("{checksum}  {name}\n"),
+        )
+        .unwrap();
+        assert!(ready_for(&dir, &v("8.0.0"), &names).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn update_cleanup_removes_only_older_assets_for_the_current_platform() {
+        let dir = std::env::temp_dir().join(format!("bloop-cache-clean-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = [
+            "bloop-0.8.0-x86_64.AppImage",
+            "bloop-0.8.0-x86_64.AppImage.sha256",
+            "bloop-0.8.0-x86_64.AppImage.part",
+        ];
+        let keep = [
+            "bloop-0.9.0-x86_64.AppImage",
+            "bloop-1.0.0-x86_64.AppImage",
+            "bloop-setup-0.8.0.exe",
+            "bloop-user-file.AppImage",
+        ];
+        for name in old.into_iter().chain(keep) {
+            std::fs::write(dir.join(name), b"fixture").unwrap();
+        }
+        remove_older_downloads(&dir, &LINUX, v("0.9.0"));
+        assert!(old.iter().all(|name| !dir.join(name).exists()));
+        assert!(keep.iter().all(|name| dir.join(name).exists()));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -243,6 +243,47 @@ async fn idle_deadline_fails() {
 }
 
 #[tokio::test]
+async fn total_deadline_kills_cli_while_the_consumer_is_blocked() {
+    let scene = Scene::new("backpressure");
+    let env = [
+        ("FAKE_PID", scene.file("pid")),
+        ("FAKE_CHILD_PID", scene.file("child")),
+        ("FAKE_FIXTURE", fixture("claude-ok.jsonl")),
+        ("FAKE_HANG", "1".into()),
+    ];
+    let program = fake();
+    let mut saw_output = false;
+    let result = tokio::time::timeout(
+        Duration::from_secs(7),
+        cli::stream_with(
+            cli::Request {
+                kind: Kind::Claude,
+                program: &program,
+                args: &[],
+                prompt: "x",
+                model: "",
+                dir: None,
+            },
+            &env,
+            Limits {
+                idle: Duration::from_secs(2),
+                total: Duration::from_secs(2),
+            },
+            |_| {
+                saw_output = true;
+                std::future::pending()
+            },
+        ),
+    )
+    .await
+    .expect("total deadline must cover event delivery");
+    assert!(saw_output);
+    assert!(result.unwrap_err().to_string().contains("took too long"));
+    assert!(wait_dead(scene.read_pid("pid")));
+    assert!(wait_dead(scene.read_pid("child")));
+}
+
+#[tokio::test]
 async fn signed_out_cli_gets_a_hint() {
     let env = [
         (

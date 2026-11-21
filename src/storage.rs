@@ -13,6 +13,7 @@ const MAX_SETTINGS: usize = 32 * 1024;
 /// Largest serialized turns of one chat.
 const MAX_HISTORY: usize = 16 * 1024 * 1024;
 const MAX_TITLE: usize = 200;
+const MAX_SEARCH_HITS: usize = 100;
 
 pub fn data_path() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("BLOOP_DATA_DIR") {
@@ -130,15 +131,16 @@ pub struct Loaded {
     pub config: Config,
     pub chats: Vec<Chat>,
     pub current: Option<(Chat, Vec<Turn>)>,
+    pub warning: Option<String>,
 }
 
 pub fn load(path: &Path) -> Result<Loaded, String> {
     let mut connection = connect(path)?;
-    let row: Option<(String, String)> = connection
+    let row: Option<(String, Option<String>)> = connection
         .query_row(
             "SELECT settings, history FROM state WHERE id = 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1).ok())),
         )
         .optional()
         .map_err(|e| e.to_string())?;
@@ -150,37 +152,62 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
     }
     let config: Config = serde_json::from_str(&settings).map_err(|e| e.to_string())?;
     config.validate()?;
-    let legacy = parse_turns(&history)?;
-    if !legacy.is_empty() {
-        migrate_history(&mut connection, &legacy, &history)?;
+    let mut warning = None;
+    if let Some(history) = history {
+        match parse_turns(&history) {
+            Ok(legacy) if !legacy.is_empty() => {
+                migrate_history(&mut connection, &legacy, &history)?
+            }
+            Ok(_) => {}
+            Err(error) => warning = Some(format!("Could not read the older conversation: {error}")),
+        }
+    } else {
+        warning = Some("Could not read the older conversation.".into());
     }
     let chats = list(&connection)?;
-    let current = match chats.first() {
-        Some(chat) => Some((chat.clone(), turns_of(&connection, chat.id)?)),
-        None => None,
-    };
+    let mut current = None;
+    for chat in &chats {
+        let json = match turns_json(&connection, chat.id) {
+            Ok(json) => Some(json),
+            Err(
+                rusqlite::Error::InvalidColumnType(..)
+                | rusqlite::Error::FromSqlConversionFailure(..)
+                | rusqlite::Error::QueryReturnedNoRows,
+            ) => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        if let Some(turns) = json.and_then(|json| parse_turns(&json).ok()) {
+            current = Some((chat.clone(), turns));
+            break;
+        }
+        warning.get_or_insert_with(|| {
+            "Could not open the newest saved conversation. It remains in Chats.".into()
+        });
+    }
     Ok(Loaded {
         config,
         chats,
         current,
+        warning,
     })
 }
 
 /// Moves the single conversation of an older bloop into `chats`, in one transaction.
 fn migrate_history(connection: &mut Connection, turns: &[Turn], json: &str) -> Result<(), String> {
-    let chat = Chat {
-        id: model::new_chat_id(0),
-        title: model::title_for(&turns[0].user),
-        profile: 0,
-        // Its settings may have changed since it was sent, so where it went is unknown.
-        destination: model::UNKNOWN_DESTINATION.into(),
-        updated: model::unix_seconds(),
-    };
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
-    upsert(&transaction, &chat, json)?;
-    transaction
-        .execute("UPDATE state SET history = '[]' WHERE id = 1", [])
+    let changed = transaction
+        .execute(
+            "UPDATE state SET history = '[]' WHERE id = 1 AND history = ?1",
+            [json],
+        )
         .map_err(|e| e.to_string())?;
+    if changed != 0 {
+        // SQLite allocates an unused id. A stale concurrent load migrates nothing.
+        transaction.execute(
+            "INSERT INTO chats(title, profile, destination, updated, turns) VALUES(?1, 0, ?2, ?3, ?4)",
+            params![model::title_for(&turns[0].user), model::UNKNOWN_DESTINATION, model::unix_seconds(), json],
+        ).map_err(|e| e.to_string())?;
+    }
     transaction.commit().map_err(|e| e.to_string())
 }
 
@@ -196,12 +223,14 @@ fn list(connection: &Connection) -> Result<Vec<Chat>, String> {
         .map_err(|e| e.to_string())
 }
 
+fn turns_json(connection: &Connection, id: i64) -> rusqlite::Result<String> {
+    connection.query_row("SELECT turns FROM chats WHERE id = ?1", [id], |row| {
+        row.get(0)
+    })
+}
+
 fn turns_of(connection: &Connection, id: i64) -> Result<Vec<Turn>, String> {
-    let json: String = connection
-        .query_row("SELECT turns FROM chats WHERE id = ?1", [id], |row| {
-            row.get(0)
-        })
-        .map_err(|e| e.to_string())?;
+    let json = turns_json(connection, id).map_err(|e| e.to_string())?;
     parse_turns(&json)
 }
 
@@ -228,11 +257,7 @@ fn upsert(connection: &Connection, chat: &Chat, turns_json: &str) -> Result<(), 
 /// Saves settings and, when given, one chat, together in one transaction. A chat
 /// without turns is not written.
 pub fn save(path: &Path, config: &Config, chat: Option<(&Chat, &[Turn])>) -> Result<(), String> {
-    config.validate()?;
-    let settings = serde_json::to_string(config).map_err(|e| e.to_string())?;
-    if settings.len() > MAX_SETTINGS {
-        return Err("Saved data exceeds supported limits.".into());
-    }
+    let settings = settings_json(config)?;
     let chat = match chat {
         Some((chat, turns)) if !turns.is_empty() => {
             validate_chat(chat)?;
@@ -258,6 +283,22 @@ pub fn save(path: &Path, config: &Config, chat: Option<(&Chat, &[Turn])>) -> Res
         upsert(&transaction, chat, &json)?;
     }
     transaction.commit().map_err(|e| e.to_string())
+}
+
+/// Checks that settings can be adopted without preventing future database writes.
+pub fn validate_config(config: &Config) -> Result<(), String> {
+    settings_json(config).map(drop)
+}
+
+fn settings_json(config: &Config) -> Result<String, String> {
+    config.validate()?;
+    let settings = serde_json::to_string(config).map_err(|e| e.to_string())?;
+    if settings.len() > MAX_SETTINGS {
+        return Err(
+            "Settings are too large to save. Shorten long fields such as endpoint URLs.".into(),
+        );
+    }
+    Ok(settings)
 }
 
 /// One saved chat with its turns.
@@ -297,36 +338,42 @@ pub fn delete_chat(path: &Path, id: i64) -> Result<(), String> {
     Ok(())
 }
 
-/// Chats whose title or text contains `query` (ignoring case), newest first, each with an
-/// excerpt of the first matching line. An empty query lists every chat.
+/// The newest 100 chats whose title or text contains `query` (ignoring case), each with
+/// an excerpt of the first matching line. An empty query lists every chat.
 pub fn search(path: &Path, query: &str) -> Result<Vec<(Chat, String)>, String> {
     let connection = connect(path)?;
     let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(list(&connection)?
+            .into_iter()
+            .map(|chat| (chat, String::new()))
+            .collect());
+    }
     let mut statement = connection
         .prepare(&format!(
             "SELECT {CHAT_COLUMNS}, turns FROM chats ORDER BY updated DESC, id DESC"
         ))
         .map_err(|e| e.to_string())?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((chat_from_row(row)?, row.get::<_, String>(5)?))
-        })
-        .map_err(|e| e.to_string())?;
+    let mut rows = statement.query([]).map_err(|e| e.to_string())?;
     let mut hits = Vec::new();
-    for row in rows {
-        let (chat, json) = row.map_err(|e| e.to_string())?;
-        if needle.is_empty() {
-            hits.push((chat, String::new()));
-            continue;
-        }
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let json = row.get_ref(5).map_err(|e| e.to_string())?;
         // A damaged chat is skipped rather than failing the whole search.
-        let Ok(turns) = parse_turns(&json) else {
+        let Ok(turns) = parse_turns(json.as_str().map_err(|e| e.to_string())?) else {
             continue;
         };
-        if let Some(snippet) = model::snippet(&turns, &needle) {
+        let chat = chat_from_row(row).map_err(|e| e.to_string())?;
+        let snippet = model::snippet(&turns, &needle).or_else(|| {
+            chat.title
+                .to_lowercase()
+                .contains(&needle)
+                .then(String::new)
+        });
+        if let Some(snippet) = snippet {
             hits.push((chat, snippet));
-        } else if chat.title.to_lowercase().contains(&needle) {
-            hits.push((chat, String::new()));
+            if hits.len() == MAX_SEARCH_HITS {
+                break;
+            }
         }
     }
     Ok(hits)
@@ -399,6 +446,36 @@ mod tests {
     }
 
     #[test]
+    fn damaged_history_keeps_settings_and_other_chats_usable() {
+        let path = temp("damaged");
+        let config = Config {
+            onboarded: true,
+            ..Config::default()
+        };
+        let turns = [turn("question", "answer")];
+        save(&path, &config, Some((&chat(1, "older", 1), &turns))).unwrap();
+        save(&path, &config, Some((&chat(2, "newer", 2), &turns))).unwrap();
+        {
+            let connection = connect(&path).unwrap();
+            connection
+                .execute_batch(
+                    "UPDATE chats SET turns = '[' WHERE id = 2; UPDATE state SET history = '[';",
+                )
+                .unwrap();
+        }
+
+        let loaded = load(&path).unwrap();
+        assert!(loaded.config.onboarded);
+        assert!(loaded.warning.is_some());
+        assert_eq!(loaded.chats.len(), 2);
+        assert_eq!(loaded.current.unwrap().0.id, 1);
+        save(&path, &loaded.config, Some((&chat(3, "new", 3), &turns))).unwrap();
+        assert_eq!(load(&path).unwrap().current.unwrap().0.id, 3);
+        assert!(load_chat(&path, 2).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn old_single_history_becomes_a_chat_once() {
         let path = temp("migrate");
         {
@@ -421,6 +498,41 @@ mod tests {
         assert_eq!(turns[0].assistant, "answer");
         // A second load finds nothing left to migrate.
         assert_eq!(load(&path).unwrap().chats.len(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn repeated_migration_of_the_same_snapshot_keeps_existing_chats() {
+        let path = temp("migration-collision");
+        let existing = chat(i64::MAX, "existing", 1);
+        let config = Config::default();
+        save(&path, &config, Some((&existing, &[turn("our", "chat")]))).unwrap();
+        let legacy = [turn("legacy", "reply")];
+        let history = serde_json::to_string(&legacy).unwrap();
+        {
+            let mut connection = connect(&path).unwrap();
+            connection
+                .execute("UPDATE state SET history=?1 WHERE id=1", [&history])
+                .unwrap();
+            migrate_history(&mut connection, &legacy, &history).unwrap();
+            connection
+                .execute(
+                    "UPDATE chats SET title='renamed' WHERE id != ?1",
+                    [existing.id],
+                )
+                .unwrap();
+            migrate_history(&mut connection, &legacy, &history).unwrap();
+        }
+
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.chats.len(), 2);
+        assert_eq!(
+            load_chat(&path, existing.id).unwrap().1[0].assistant,
+            "chat"
+        );
+        let (migrated, turns) = loaded.current.unwrap();
+        assert_eq!(migrated.title, "renamed");
+        assert_eq!(turns[0].assistant, "reply");
         std::fs::remove_file(path).unwrap();
     }
 
@@ -462,6 +574,28 @@ mod tests {
         delete_chat(&path, 2).unwrap();
         assert!(load_chat(&path, 2).is_err());
         assert_eq!(load(&path).unwrap().chats.len(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn search_bounds_the_newest_matches_without_limiting_the_chat_list() {
+        let path = temp("bounded-search");
+        let config = Config::default();
+        for id in 1..=102 {
+            let text = if id == 101 { "unrelated" } else { "matching" };
+            save(
+                &path,
+                &config,
+                Some((&chat(id, "Chat", 1), &[turn(text, "reply")])),
+            )
+            .unwrap();
+        }
+
+        let hits = search(&path, "MATCHING").unwrap();
+        assert_eq!(hits.len(), 100);
+        assert_eq!(hits[0].0.id, 102);
+        assert_eq!(hits[99].0.id, 2);
+        assert_eq!(search(&path, "").unwrap().len(), 102);
         std::fs::remove_file(path).unwrap();
     }
 }

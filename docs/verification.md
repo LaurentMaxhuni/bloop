@@ -46,6 +46,252 @@ Sandboxed MSVC archive writes and network access were blocked. Cargo dependency
 fetches, native builds/tests, and interactive launches were run with approved
 environment access. No changes to global Rust, Git, or Windows configuration.
 
+## Windows memory and idle CPU (2026-11-20)
+
+Release builds on Windows x64 (build 26300, Rust 1.97.1, Iced 0.14, wgpu 27 and
+DirectX 12). The control was `1425657` and the candidate was `e98dd60`. Both profiles used fresh
+`BLOOP_DATA_DIR` directories and excluded the installed process and fixture from all
+samples. Temporary instrumentation was applied to separate source copies and built
+with `cargo build --release --locked --offline --bin bloop --example stream_fixture`.
+
+- Enter the real Iced daemon in background mode before the single-instance and
+  autostart code. Disable tray and shortcut registration, external open requests,
+  ChatGPT account loading, and update checks. Ignore OS focus and cursor events in
+  the scratch instance to keep the scripted presence state deterministic.
+- Start `examples/stream_fixture.rs` on `127.0.0.1:11634`, with `onboarded = true`
+  and `auto_update = false`. For the long workload, send 192 paragraphs, one
+  NDJSON delta every 22 ms, followed by `done: true`. Each delta has an indexed
+  Markdown heading and a paragraph exercising bold, emphasis and line wrapping.
+  Each finished answer contains 54,610 bytes. The fixture starts with an empty
+  history and performs no inference.
+
+  ```rust
+  format!(
+      "### Local fixture section {i}\n\n\
+       Bloop is receiving a long deterministic reply over localhost. \
+       **Bold text**, _emphasis_, and inline code exercise the chat layout. \
+       The fixture repeats text and never calls a model. \
+       This paragraph keeps the line wrapping and paragraph measurement realistic.\n\n"
+  )
+  ```
+
+- Pause background startup before opening the notch to collect a reading with no
+  surface. Open the notch, expand with `Toggle`, collapse and open the app window,
+  expand again and send the fixture prompt. Wait for the stream and text reveal
+  to complete. Dismiss the notch, wait one second for the animation, and issue
+  `CloseRequested` for the app window. Repeat the open/reply/close sequence, then
+  expand and collapse the notch twice with the same two saved replies. Dispatch
+  Iced messages directly. No keyboard or mouse simulation is used.
+- Read `WorkingSet64`, `PrivateMemorySize64`, `TotalProcessorTime` and thread
+  count from `System.Diagnostics.Process` for the scratch PID. Refresh about
+  every 850 ms. Report the median after the first second and before the seventh
+  second of each marked phase (seven samples per phase). The memory columns use MiB and
+  exclude dedicated GPU VRAM. Enable `BLOOP_FRAME_LOG` for frame cadence.
+  Mark the phases at approximately 8, 25, 38, 51, 73, 87, 118, 132 and 146 seconds.
+  Read the scratch process handle at launch to capture its exit code.
+
+| State | Control working set | Control private | Final working set | Final private |
+| --- | ---: | ---: | ---: | ---: |
+| Before the first surface | 16.31 | 5.21 | 16.29 | 5.18 |
+| Idle, collapsed | 117.28 | 123.32 | 117.42 | 123.15 |
+| Notch expanded | 125.33 | 130.69 | 125.15 | 130.60 |
+| App window open, notch collapsed | 129.05 | 134.28 | 128.73 | 134.12 |
+| Long reply complete, both windows open | 156.45 | 169.36 | 156.25 | 169.45 |
+| App window closed, notch collapsed | 144.06 | 158.52 | 141.16 | 152.02 |
+| After reopening, replying and closing again | 151.06 | 164.47 | 150.13 | 161.07 |
+| After another expand/collapse | 152.86 | 167.89 | 153.64 | 169.75 |
+| After the next expand/collapse | 153.20 | 168.24 | 153.54 | 167.49 |
+
+After the first idle app close, the final build used 2.90 MiB less working set
+and 6.50 MiB less private memory. The second close saved 0.93 and 3.40 MiB,
+respectively. Both `HeapOptimizeResources` calls succeeded and took under 0.8 ms
+on the executor. Subsequent expands reused memory. Private bytes varied across
+the two expand/collapse cycles with the same history. This sample covers two
+replies and two further cycles. [Windows heap optimization API](https://learn.microsoft.com/windows/win32/api/heapapi/nf-heapapi-heapsetinformation)
+
+Both builds recorded 0 ms of process CPU time over about 5.2 seconds of the
+first idle sample. From launch through the settled collapsed marker, the
+control handled 28 mascot ticks and six blink messages, and the final build
+handled zero. The first expand recorded median frame intervals of 2.81 ms
+and 2.83 ms. Both scratch processes exited with code 0.
+
+The renderer startup delta includes DX12 and driver initialization, a shared
+device and queue, and the first swapchain and renderer. It added about 101 MiB
+of working set in each run. The 50 MB target remains open. The pre-surface phase
+includes SQLite loading and the text editor's initialized font system. Iced's
+`WindowManager` removes the app renderer, surface and widget caches on close. It
+keeps the compositor for the notch. Iced already requests one frame of maximum
+latency (two DX12 buffers). At 1× scale and four bytes per pixel, the raw buffer
+pair is about 2.66 MiB for the 600×580 notch or 4.26 MiB for the 900×620 app window,
+before GPU allocation overhead. These are raw texture sizes kept separate from
+the process counters.
+
+At the first repeat cycle, a separate `GPU Process Memory` counter snapshot for
+the control PID reported 44.64 MiB dedicated and 48.32 MiB shared across its
+adapter instances. Those are separate GPU accounting figures.
+
+Iced's shared color and mask atlases start at 256×256 and can grow with glyph
+use. The font database indexes system fonts and caches faces used for shaping.
+Bloop uses a roughly 10 KiB icon font and draws the mascot from paths, with no
+large mascot bitmap. Saved turns and parsed replies are retained for the active
+chat. The process counters combine driver, glyph, parser and stack memory.
+Tokio still starts two async workers and allows four blocking workers
+for the CLI pipe path.
+
+`cargo fmt --check`, `cargo clippy --offline --all-targets -- -D warnings`, and
+`cargo test --offline` passed. The full suite ran in the normal Windows session
+because the sandbox's logon token could not access the credential test vault.
+343 passed and five existing tests remained ignored.
+
+- Each search edit previously started a new SQLite scan before the generation check
+  could reject stale results. State tests cover debounce, clearing the field and
+  the single-scan limit. A 102-chat database test checks newest-first ordering,
+  the 100-result cap and access to the complete unfiltered list.
+- A busy peek's old deadline kept the 50 ms timer alive. A state test reproduces
+  the expired deadline, then checks that the pinned peek has no scheduled wakeup
+  and that completion starts a new expiry. A separate test covers the mascot
+  clock with the notch collapsed, a dashboard open and a pending reply reveal.
+- A close-event test covers scheduling heap reclamation only when the notch is
+  idle. The scratch release trace measures the actual Windows heap calls.
+
+## Windows software renderer (2026-11-21)
+
+One release run per backend on Windows x64 build 26300 with Rust 1.97.1,
+Iced 0.14, and an NVIDIA GeForce RTX 4070 Ti SUPER. Both runs used the same
+binary built from a temporary source copy with
+`cargo build --release --locked --offline --bin bloop --example stream_fixture`.
+The default run left the renderer overrides unset and logged `Dx12` as the
+selected backend. The software run set only `BLOOP_RENDERER=software`.
+The DX12 modules were present only in the default process.
+
+The scratch daemon followed the preceding procedure with fresh data
+directories and Iced messages. It skipped single-instance handling, the tray,
+global shortcuts, autostart, external launch requests, and ChatGPT account
+loading. Auto-update was off. The fixture served 192 Markdown paragraphs at
+22 ms per delta on loopback. Both runs completed and revealed 55,378 bytes
+of reply text and exited with code 0. The installed instance and the fixture
+were excluded from the counters.
+
+Working set and private bytes are medians in MiB. CPU is the process
+`TotalProcessorTime` delta over the indicated sampled wall time. The idle
+rows use seven samples roughly 850 ms apart, from seconds one through seven.
+The streaming row uses four samples after the first second and before
+stream completion. Each complete stream took about 4.37 seconds. The
+animation row pools samples spaced about 50 ms apart during four expands
+and four collapses and sums CPU deltas and wall time within those transitions. Memory counters
+exclude dedicated VRAM.
+
+| State | DX12 working set | DX12 private | DX12 CPU / wall | Tiny-skia working set | Tiny-skia private | Tiny-skia CPU / wall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Before creating a surface | 15.86 | 5.25 | 0 ms / 5.17 s | 15.87 | 5.13 | 0 ms / 5.10 s |
+| Idle, collapsed | 104.68 | 122.80 | 0 ms / 5.07 s | 23.55 | 7.64 | 0 ms / 5.11 s |
+| Expand and collapse animations | 119.83 | 134.49 | 1,453 ms / 3.85 s | 28.53 | 8.91 | 3,359 ms / 3.83 s |
+| Reply streaming, both windows open | 139.79 | 154.09 | 406 ms / 2.54 s | 42.19 | 21.39 | 1,109 ms / 2.54 s |
+
+`BLOOP_FRAME_LOG` recorded median intervals of 2.76–2.81 ms per transition
+on DX12. Tiny-skia recorded 5.12–5.31 ms on expands and 0.19–0.23 ms on
+collapses. The latter reflects 1,184–1,340 Iced frame callbacks in each
+roughly half-second collapse.
+
+A separate visual run for each backend used a solid backdrop at 100% scale.
+Tiny-skia drew the 5 px sliver, the rounded compact pill with two eyes and
+peek text, the expanded panel, and the streaming and completed Markdown
+reply without visible trails in the captured frames. The region reported
+by `GetWindowRgn` contained the center in each state. `WindowFromPoint`
+selected the notch at the center and the visible backdrop at a cut-out
+corner within the same bounding rectangle. The first visual pass had
+foreground overlap, so the comparison placed the scratch notch immediately
+above its backdrop before each capture. Physical cursor redraw and mixed-DPI
+behavior remain unverified.
+
+Keep DX12 as the default and leave tiny-skia available for memory-constrained
+Windows setups. Tiny-skia saved 81.13 MiB of working set and 115.16 MiB of
+private memory at rest with the same measured idle CPU. It used 2.3 times
+the process CPU during animation and 2.7 times while streaming, with a burst
+of frame callbacks during each collapse.
+
+`cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` passed
+on Windows. `cargo test` passed 385 tests with five ignored.
+Cargo resolved the same Linux x64 feature tree as before the opt-in
+(`258f402`). Linux runtime rendering was outside this Windows measurement.
+
+## Retained transcript memory (2026-11-20 to 2026-11-21)
+
+Control `dbdf1fa` and the final build used the nine states above in fresh,
+isolated Windows release runs. The loopback fixture sent 192 Markdown chunks
+and returned 55,378 bytes per reply. Both runs used reduced motion and drove
+presence directly through Iced messages. They suppressed ambient focus, Escape,
+cursor and fullscreen events to keep those states reproducible. Measurements use
+the same 850 ms process sampler and one-to-seven-second window per checkpoint.
+
+| State | Control working set (MiB) | Control private (MiB) | Final working set (MiB) | Final private (MiB) |
+| --- | ---: | ---: | ---: | ---: |
+| Before the first surface | 16.07 | 5.20 | 16.04 | 5.24 |
+| Idle, collapsed | 105.05 | 124.79 | 104.80 | 123.97 |
+| Notch expanded | 116.13 | 132.55 | 115.88 | 131.78 |
+| App window open, notch collapsed | 116.51 | 134.22 | 117.32 | 134.28 |
+| Long reply complete, both windows open | 146.93 | 172.47 | 148.91 | 173.56 |
+| App window closed, notch collapsed | 131.14 | 154.24 | 133.50 | 156.20 |
+| After reopening, replying and closing again | 139.38 | 162.62 | 143.24 | 165.84 |
+| After another expand/collapse | 140.37 | 166.15 | 144.88 | 169.10 |
+| After the next expand/collapse | 140.41 | 163.96 | 145.12 | 168.67 |
+
+Each cell is the median of seven samples. Both measured runs exited with code 0.
+At the final collapse, the two turns retained 146,988 bytes of string capacity in
+the control and 110,800 bytes in the final build, equal to their combined byte
+length. Live Rust allocations fell from 3.469 to 3.439 MiB at that checkpoint.
+Process working set and private bytes both increased by 4.71 MiB in this pair.
+The observed saving is limited to the reply buffers. The aggregate retained
+process growth remains unresolved.
+
+Both scratch builds counted live requested bytes through Rust's system allocator.
+The meter excludes native allocations such as SQLite and the graphics driver.
+SQLite supplied its own live and high-water counters. A temporary Iced wgpu
+probe polled the device and reported allocator totals at the labeled checkpoints.
+In the control, the probe continued past the nine states to test process-heap trimming,
+shared atlas reset, and replacing the notch renderer while keeping the device and surface.
+
+Two additional diagnostic runs compared drawing the full transcript with retaining
+the same transcript while skipping its view. Drawing the first long reply took
+20.98 MiB of live Rust allocations at the settled checkpoint. Closing the view
+brought that to 2.43 MiB. The run that skipped the view was already at 1.98 MiB
+before close. After the second reply and two further cycles, dropping the cached
+replies freed 1.87 MiB live in the drawing run and 0.95 MiB without the view.
+The difference includes Iced's styled spans. Cached replies stay available to
+reopen the transcript without reparsing it.
+
+Shrinking the two finished turns released 36,188 bytes of spare string capacity.
+The empty instructions editor accounted for 24 live Rust bytes in its reset probe.
+Replacing the font system after closing the compositor released 56–98 KiB of live
+Rust allocations. That probe covers the font system's state after the renderer and
+paragraph trees are gone. SQLite reported zero live bytes at every settled checkpoint,
+with a 486,536-byte peak during the two-reply workload.
+
+The Windows sandbox affected both exploratory runs. A hot thread whose start
+address mapped to `NvMessageBus.dll` took sustained CPU from the first DX12 surface.
+Working set grew even with the transcript view suppressed. The paired process
+measurements use the normal Windows logon session, which removed that busy loop.
+
+The shared glyph textures totaled 384 KiB in the wgpu report at every checkpoint.
+Resetting the atlas gave the same totals. DX12 allocator reservations rose from
+20 MiB on the cold sliver to 32 MiB at the first reply and stayed there after
+both app closes. Replacing the remaining notch renderer after the final cycle
+released 5.75 MiB of live GPU suballocations and 4 MiB of reserved blocks while
+the device stayed alive. Manual heap reclamation dropped the control's process
+private bytes from 163.96 to 162.57 MiB. Process-private memory stayed near
+163 MiB through the atlas and renderer resets. Iced releases the app window's
+renderer at close. The notch keeps its own renderer, and Iced 0.14's window API
+has no operation to recycle it independently of the window.
+
+The exploratory build with an extra heap-reclaim hook after collapse measured
+164.19 MiB private at the final cycle, against the control's 163.96 MiB. The
+final change is limited to releasing spare reply-buffer capacity.
+
+`cargo fmt --check`, `cargo clippy --offline --all-targets -- -D warnings`, and
+`cargo test --offline` passed with 375 tests and five existing ignores. The new
+regression failed on the control and checks that success, failure and cancellation
+preserve reply text and release spare capacity.
+
 ## Auto-hide notch (2026-11-06)
 
 Checked on Windows 11 (100 % scale) with a debug build and a scratch `BLOOP_DATA_DIR`,
@@ -635,3 +881,176 @@ hovering (`TOOLTIP_DELAY`) instead of at once, below its control with a 4 px gap
 `Tooltip::delay` schedules one redraw for when the time is up, so there's no polling while the
 pointer rests. fmt, clippy and `cargo test` (336 passed, 5 ignored) pass. Not looked at in a
 running build: the installed copy was running.
+
+## Breaking bug audit and fixes (2026-11-20)
+
+The numbered findings and baseline locations are in [the audit](bug-audit-2026-11-20.md).
+Branch `fix-colead` covers findings 1–5, 7–14, and 18. The coordinator routed findings 6,
+15, 16, and 17 to the rich-text, visual, and memory workers.
+
+| Finding | Fix and regression evidence |
+| --- | --- |
+| 1. Failed save | The job retains the failed snapshot. `failed_save_survives_switching_and_a_successful_unrelated_save` proves that opening the chat recovers the latest reply, an unrelated save leaves the warning visible, and Quit schedules recovery. |
+| 2. Failed delete | The chat remains active and writes stay queued until SQLite confirms deletion. `failed_delete_keeps_the_active_transcript` and `deleting_a_chat_waits_for_its_save_and_for_confirmation_from_storage` cover both outcomes and prevent a new reply while deletion is pending. |
+| 3. Damaged turns | Startup keeps valid settings, opens the newest readable chat, and leaves damaged rows in place. `damaged_history_keeps_settings_and_other_chats_usable` uses a SQLite file with malformed legacy and current history. |
+| 4. Legacy ID collision | The migration claims the old history and uses a SQLite-assigned ID in one transaction. `repeated_migration_of_the_same_snapshot_keeps_existing_chats` replays a stale migration with an occupied maximum row ID and preserves a rename made after migration. |
+| 5. Unsavable settings | Settings and setup check the same serialization limit as storage. `oversized_settings_do_not_replace_the_live_config` verifies that a syntactically valid long endpoint leaves the live config intact. |
+| 7. CLI containment | Windows job assignment errors stop the request before sending the prompt. Pipe worker handles are aborted on every exit. `job_adoption_rejects_a_reaped_process` and the existing cancellation and CMD-shim fixtures exercise Windows process lifecycle. |
+| 8. CLI deadline | The absolute deadline also covers an async consumer waiting on stream output. `total_deadline_kills_cli_while_the_consumer_is_blocked` verifies the deadline error and termination of both fixture processes. |
+| 9. Startup cache | A blocking worker validates regular cache files within the installer and checksum size limits. `cached_installer_must_fit_the_asset_limit_even_with_a_valid_checksum` rejects an otherwise valid oversized candidate. |
+| 10. OAuth refresh | A refresh response preserves the saved refresh token until the server supplies a replacement. `refresh_preserves_the_existing_token_unless_the_server_rotates_it` covers both response shapes with fixture values. |
+| 11. Export ordering | Coalescing preserves the save before an export and still collapses later redundant saves. `export_reads_the_save_queued_before_it` checks the exact queue order. |
+| 12. Cancel hit region | Cancel returns the native window task when a busy peek collapses. `cancel_updates_the_hit_region_when_reduced_motion_collapses_the_peek` checks the state transition and the emitted task. |
+| 13. Launch crash | Native OS arguments let launch parsing ignore malformed Unicode. `non_unicode_args_do_not_prevent_recognizing_flags` verifies recognition of a valid flag alongside malformed arguments. |
+| 14. Stored integer overflow | Checked chat and profile IDs avoid wraparound, and relative timestamps use saturating subtraction. Tests cover a chat at `i64::MAX`, exhaustion at `u32::MAX`, and both timestamp extremes. |
+| 18. Obsolete AppImages | Cleanup removes recognized older files for the current platform. `update_cleanup_removes_only_older_assets_for_the_current_platform` covers Linux asset names, checksums, and partial downloads with Windows fixtures. |
+
+Windows passed `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
+(353 passed across seven suites, five ignored), and `cargo build`. The initial sandbox run
+could not write the two test credentials because it lacked a Windows logon session. The
+Credential Manager tests and full suite passed with access to that session.
+
+Verification used local fixtures and state tests. Live provider sign-in and inference, the
+real install/restart flow, physical desktop hit testing, and the Linux runtime were outside
+these runs. The Windows process tests exercise descendants created by the fixture after
+startup. Child creation and Win32 job assignment are still separate calls.
+
+
+### Review follow-up (2026-11-20)
+
+Windows CLI containment remains required before starting pipe workers or sending the prompt.
+When Windows refuses job creation or assignment, the error preserves the native HRESULT and
+suggests opening bloop directly if the launcher restricts child processes. The access-denied
+fixture checks both the code and the hint. Existing process-tree tests cover the containment
+and cancellation path.
+
+Storage regressions cover an unsuccessful delete during Quit, a blocking worker panic after
+switching chats, and a damaged-history notice that survives a successful save on the Chats
+page. Before the fix, the Quit test left the notch closed and the history notice test populated
+the write-failure warning.
+
+Windows passed `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test` (357 passed, five ignored).
+
+## Visual fixes: scroll follow, work-area fit, region, pill text, long words (2026-11-20)
+
+Windows x64. Checked by reading the view code against Iced 0.14's layout rules and by
+state tests; no scratch instance was launched (the user's installed bloop was running),
+so none of these were screenshotted.
+
+- Scroll follow (#15): chunks and typewriter ticks snapped the conversation to the end
+  every time. `Follow` now only sticks while the reader is within 24 px of the end, and
+  only a moved scroll offset decides (content growing under a still offset doesn't).
+  Tests: `scrolling_up_stops_following_and_growth_alone_never_does`,
+  `chunks_leave_a_reader_alone_until_the_next_prompt`.
+- Panel taller than the work area: the 580 px panel ran under the taskbar on
+  1366 x 768 at 125 % (574 px work area) and 1920 x 1080 at 200 % (516 px), hiding the
+  prompt. Windows now cuts the window to the work area under its top and reports the
+  logical height; the panel keeps an 8 px gap and a 260 px floor. Tests:
+  `the_window_never_runs_past_the_work_area` (100/125/150/175/200 %, secondary monitors
+  above and left of the primary, bad input), `panel_fits_short_work_areas`,
+  `a_short_work_area_shrinks_the_open_panel_and_recuts_the_region`.
+- Region a device pixel short: the frame before the spring snaps can round to the final
+  logical size while a fraction short, and the settling frame skipped the recut. The
+  settling frame now always recuts (once; idle frames still return early).
+  `the_settling_frame_cuts_the_exact_final_region` fails without the fix.
+- Pill text: a long status or peek ("Update 0.6.1 ready — click to restart") wrapped to
+  a second line below the 40 px pill. It is now one line, cut with "…" by a character
+  budget and clipped as a backstop; a peek's message takes the wordmark's place.
+  Tests: `fit_line_cuts_on_characters_and_marks_the_cut` (CJK, emoji, combining marks),
+  `pill_statuses_fit_on_one_line`.
+- Long words: user messages, warnings, chat titles and search snippets, profile names,
+  model ids, connection reports and paths used word wrapping, which can't break a URL or
+  path, so they ran out of their bubble or card. `prose()` wraps inside such words. The
+  Home summary rows' value column is now `Fill`, so long values wrap instead of pushing
+  the chevron button out. Not unit-tested (Iced's `Text` keeps its wrapping private and
+  the app has no headless renderer); needs a screenshot check.
+
+Review follow-ups (same day): sub-pixel scroll steps now add up (`Follow` compares with
+the last deciding offset; `subpixel_scroll_steps_add_up_to_a_move`); below 260 px the work
+area caps panel, canvas and region together (`below_the_floor_window_canvas_and_region_agree`);
+late answers from older placements and failed placements no longer change the cap
+(`stale_or_failed_placements_keep_the_confirmed_height`).
+
+Not verified: any of the above on screen, Linux (the cross `cargo check` stops at C build
+scripts with no `x86_64-linux-gnu-gcc`; Linux returns no work height, so behaviour there
+is unchanged), reply text wrapping in `ui/rich.rs` (another lane).
+
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`
+(118 library, 191 UI, plus the integration suites) passed.
+
+## Reply rendering bugs: math, Markdown, streaming (2026-11-20)
+
+Fixed in `src/math.rs` and `src/ui/rich.rs` (lane: replies):
+
+1. **Deeply nested TeX overflowed the UI thread's stack (breaking bug, routed by
+   the coordinator).** Before the fix a 5000-deep input (`{` × 5000 or
+   `\frac{` × 5000) made `parse`/`unicode` fail with `STATUS_STACK_OVERFLOW`
+   (reproduced on the original code). The parser recurses per nesting level
+   (`Parser::rows` → `atom_with_scripts` → `argument` → `group_body` → …); now
+   `math.rs` caps nesting at `MAX_DEPTH = 64` (`Parser::enter`/`leave`), and past
+   the cap `parse` returns `Node::Text(tex)` — the TeX is shown as written.
+   `rich.rs` layout (`formula`) is bounded by the capped tree, so no separate
+   guard was needed there (verified by the regression tests below, not by
+   manual review of the render recursion).
+2. **Streaming made plain prose quadratic in reply length.** `Reply::update`
+   used to run `math::prepare(text)` plus `strip_prefix` per chunk (O(n) each),
+   so a 300 KB reply streamed in 64-byte chunks took 17.7 s. `Reply` now keeps a
+   `tail_clean` flag (the trailing line of the reply is free of `$`, `\` and
+   backticks) and takes a fast path when the tail is clean and the delta is
+   clean: the merged line converts to the old tail plus `convert_prose(delta)`,
+   so the parse extends in O(delta) and the fast path checks lengths only
+   (`text.get(self.source.len()..)` — O(1); the app passes the reply's text so
+   far). Same 300 KB: 1.4 s (the residual is iced's `Content::push_str`, which
+   re-parses the paragraph per update; out of lane).
+
+Verification:
+
+- Regression tests (all new):
+  - `math::tests::deep_nesting_falls_back_to_text_on_a_small_stack` — 5000-deep
+    `{` and `\frac{` inputs on a 512 KB-stack thread must return `Node::Text(tex)`
+    and `unicode` must return the input as written (fails by aborting the test
+    process before the fix).
+  - `math::tests::nesting_below_the_cap_still_parses` — 30 levels still parse.
+  - `math::tests::prepare_leaves_markdown_passthrough` — nested lists, tables,
+    block quotes, headings, links with parentheses (`[a](b(c))`), inline code
+    containing backticks, CRLF, emoji, RTL text, HTML-like text, a 5000-char
+    line all pass through `prepare` unchanged.
+  - `math::tests::prepare_leaves_code_and_prices_alone` — fenced code with no
+    language, unknown language, unclosed while streaming; `$5 and $10`, `Just
+    $5.` stay as written.
+  - `math::tests::prepare_converts_inline_and_display_math` — `$b$` → `b`,
+    `\[x^2\]` and `$$z^2$$` → ```` ```math ```` fences, `\(y\)` inline.
+  - `math::tests::fuzz_prepare_parse_and_unicode_never_panic` — 3000 deterministic
+    (xorshift) random strings over a TeX/Markdown alphabet plus every prefix of a
+    400-deep pathological string: `prepare`, `parse`, `unicode`, `state` must not
+    panic.
+  - `ui::rich::tests::streaming_updates_match_a_full_prepare` — for seven texts
+    (fences, math, CRLF, emoji, tables…), every cumulative prefix must satisfy
+    `reply.prepared == math::prepare(&reply.source)` with no panic (the fast path
+    is exercised on every update).
+  - `ui::rich::tests::fuzz_streaming_never_panics_or_diverges` — 400 random
+    cumulative texts: same invariant at every prefix.
+  - `ui::rich::tests::fast_path_extends_clean_prose_and_gives_up_on_dirt` — the
+    fast path returns the delta for clean appends and gives up when the tail or
+    the delta contains `$`, `\` or a backtick.
+- Commands run: `cargo fmt --check` (clean), `cargo clippy --all-targets -- -D
+  warnings` (clean), `cargo test` — 124 passed (lib), 187 passed (bin bloop),
+  plus the other crates' suites; nothing new ignored, nothing failing.
+  `cargo test --test cli -- --ignored` not run (per AGENTS.md: spends quota, not
+  needed for this lane).
+- Not verified by running the app: a live render of a deep-nested reply or a
+  long prose stream (no GUI run; the app can't be driven, and the installed copy
+  may be running — per AGENTS.md I never close or signal it). State-level tests
+  (`Reply::update`, `math::prepare`, `math::parse`) are the verification here.
+
+### Review follow-up: streaming fast path on reused replies (2026-11-20)
+
+A cross-review of the reply-rendering change found that `Reply::try_fast` took the new
+text's tail by length alone. A reused `Reply` given longer text that doesn't extend the
+old text (switching chats reuses replies by index in `sync_replies`) kept the old text
+with the new tail appended. `try_fast` now requires `text.starts_with(source)` and falls
+back to a full parse otherwise. `longer_unrelated_text_replaces_the_old_reply` fails
+without the guard and passes with it. The reviewer's split-point check (every two-way
+split of ten tricky inputs) matched a full parse everywhere; the one rendering
+difference, indented code blocks streamed in chunks, also appears at baseline `1425657`.

@@ -1,7 +1,7 @@
 //! The Chats page: every saved conversation, with search, open, rename, export and delete.
 //! Only the current chat is written by `persist`; the others change here directly.
 
-use super::{Island, Message, jobs::Job};
+use super::{Island, Message, jobs::Job, prose};
 use crate::{
     icons::Icon,
     platform,
@@ -18,11 +18,14 @@ use iced::{
     Alignment, Element, Length, Task,
     widget::{self, Space, column, container, row, text},
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
+
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub enum ChatAction {
     Search(String),
+    SearchReady(u64),
     Results(u64, Result<Vec<(Chat, String)>, String>),
     /// Show this chat in the notch.
     Open(i64),
@@ -64,7 +67,7 @@ fn export_task(path: PathBuf, chat: Chat, turns: Vec<Turn>) -> Task<Message> {
 
 /// "Just now", "5 min ago", "3 h ago", "Yesterday", "4 days ago", "6 weeks ago".
 pub fn when(updated: i64, now: i64) -> String {
-    let seconds = (now - updated).max(0);
+    let seconds = now.saturating_sub(updated).max(0);
     let (minutes, hours, days) = (seconds / 60, seconds / 3600, seconds / 86_400);
     match () {
         _ if minutes < 1 => "Just now".into(),
@@ -90,28 +93,49 @@ impl Island {
             ChatAction::Search(query) => {
                 self.chat_query = query;
                 self.search_id += 1;
+                self.search_ready = false;
                 if self.chat_query.trim().is_empty() {
                     self.chat_hits = None;
+                    return Task::none();
+                }
+                let id = self.search_id;
+                return Task::perform(
+                    async { tokio::time::sleep(SEARCH_DEBOUNCE).await },
+                    move |()| Message::Chat(ChatAction::SearchReady(id)),
+                );
+            }
+            ChatAction::SearchReady(id) if id == self.search_id => {
+                if self.search_running.is_some() {
+                    self.search_ready = true;
                     return Task::none();
                 }
                 let Some(path) = self.db_path.clone() else {
                     return Task::none();
                 };
-                let (id, query) = (self.search_id, self.chat_query.clone());
+                self.search_running = Some(id);
+                let query = self.chat_query.clone();
                 return Task::perform(
                     blocking(path, move |path| storage::search(path, &query)),
                     move |result| Message::Chat(ChatAction::Results(id, result)),
                 );
             }
-            ChatAction::Results(id, result) => {
+            ChatAction::Results(id, result) if self.search_running == Some(id) => {
+                self.search_running = None;
                 if id == self.search_id {
                     match result {
                         Ok(hits) => self.chat_hits = Some(hits),
                         Err(error) => self.chats_notice = format!("Search failed: {error}"),
                     }
                 }
+                if std::mem::take(&mut self.search_ready) {
+                    return self.chat_action(ChatAction::SearchReady(self.search_id));
+                }
             }
+            ChatAction::SearchReady(_) | ChatAction::Results(..) => {}
             ChatAction::Open(id) => {
+                if self.deleting.contains(&id) {
+                    return Task::none();
+                }
                 if self.request.is_some() {
                     self.chats_notice =
                         "Stop the reply in the notch before switching chats.".into();
@@ -149,6 +173,9 @@ impl Island {
                 let Some((id, title)) = self.renaming.clone() else {
                     return Task::none();
                 };
+                if self.deleting.contains(&id) {
+                    return Task::none();
+                }
                 let title = title.trim().to_owned();
                 if title.is_empty() {
                     self.chats_notice = "Give the chat a name.".into();
@@ -184,19 +211,17 @@ impl Island {
                 if self.chat_store().is_none() {
                     return Task::none();
                 }
-                if id == self.chat.id {
-                    if self.request.is_some() {
-                        self.chats_notice = "Stop the reply before deleting this chat.".into();
-                        return Task::none();
-                    }
-                    let profile = self.usable_profile(self.chat.profile);
-                    self.start_chat(profile);
+                if id == self.chat.id && self.request.is_some() {
+                    self.chats_notice = "Stop the reply before deleting this chat.".into();
+                    return Task::none();
+                }
+                if !self.deleting.insert(id) {
+                    return Task::none();
                 }
                 // Runs after any save of this chat already under way, never before it.
                 if self.opening == Some(id) {
                     self.opening = None;
                 }
-                self.forget_chat(id);
                 return self.queue(Job::Delete(id));
             }
             ChatAction::Export(id) => {
@@ -238,7 +263,7 @@ impl Island {
                 self.turns = turns;
                 self.sync_replies();
                 self.chats_notice.clear();
-                let scroll = self.scroll();
+                let scroll = self.scroll_to_end();
                 Task::batch([self.show_notch(), scroll])
             }
             Err(error) => {
@@ -287,7 +312,7 @@ impl Island {
             .id("chat-search");
         let mut page = column![search].spacing(14);
         if !self.chats_notice.is_empty() {
-            page = page.push(text(&self.chats_notice).size(13).color(t.muted_foreground));
+            page = page.push(prose(&self.chats_notice).size(13).color(t.muted_foreground));
         }
         if self.storage_disabled {
             page = page.push(
@@ -350,7 +375,7 @@ impl Island {
             .spacing(6)
             .align_y(Alignment::Center)
             .into(),
-            _ => text(if chat.title.is_empty() {
+            _ => prose(if chat.title.is_empty() {
                 "Untitled chat"
             } else {
                 &chat.title
@@ -375,11 +400,11 @@ impl Island {
         }
         let mut details = column![
             title,
-            text(meta.join(" · ")).size(12).color(t.muted_foreground)
+            prose(meta.join(" · ")).size(12).color(t.muted_foreground)
         ]
         .spacing(4);
         if !snippet.is_empty() {
-            details = details.push(text(snippet).size(12).color(t.muted_foreground));
+            details = details.push(prose(snippet).size(12).color(t.muted_foreground));
         }
         let mut card = column![details].spacing(10);
         if self.confirm_delete == Some(chat.id) {
@@ -454,5 +479,11 @@ mod tests {
         assert_eq!(super::when(now - 4 * 86_400, now), "4 days ago");
         assert_eq!(super::when(now - 42 * 86_400, now), "6 weeks ago");
         assert_eq!(super::when(now + 50, now), "Just now");
+    }
+
+    #[test]
+    fn relative_times_accept_the_full_sqlite_integer_range() {
+        assert!(super::when(i64::MIN, 10).ends_with("weeks ago"));
+        assert_eq!(super::when(i64::MAX, 10), "Just now");
     }
 }

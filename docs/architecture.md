@@ -69,6 +69,23 @@ natively (fractions, scripts, roots, big operators, matrices) in Cambria Math, a
 button to code blocks, and opens only http(s)/mailto links. Each turn keeps a parsed
 `Reply` that is extended incrementally while it streams.
 
+Reply streaming and the TeX depth cap (2026-11-20): a reply only grows while it
+streams, so `Reply::update` pushes new text into the existing `markdown::Content`
+when it can prove the parse extends (`math::state` tracks the open fence; a clean
+trailing line of the prose plus a clean delta means the merged line converts to
+the old tail plus the delta). Anything else reparses, as before. The fast path
+checks lengths only — the app passes the reply's text so far — so it is O(delta).
+On the slow path the residual quadratic inside iced (`Content::push_str`
+re-parses the leftover paragraph per update) is out of lane; the lane's
+prepare/strip-per-update quadratics were removed. Separately, the TeX parser
+recurses per nesting level (`Parser::rows` → `atom_with_scripts` → `argument` →
+`group_body` → …). Thousands of nested `{` or `\frac{\frac{…` overflowed the UI
+thread's stack (verified: `STATUS_STACK_OVERFLOW` on a 5000-deep repro before the
+fix). `math.rs` now caps nesting at `MAX_DEPTH` (64); past it the parse sets
+`cut`, loops stop, and `parse` falls back to `Node::Text(tex)` — the TeX is
+shown as written. The layout recursion in `rich.rs` is bounded by the capped
+tree, so it needs no separate guard.
+
 Notch motion (2026-11-07): the OS window is created once at the open panel's size and is
 never resized while animating; only the drawn notch changes size, driven by critically
 damped springs (`motion.rs`) stepped on `window::frames()` (redraw-synced, no subscription
@@ -113,14 +130,42 @@ The first measured GPU baseline exceeds the provisional 50 MB target. A future
 software compositor must preserve alpha correctly before replacing DirectX.
 
 App window (2026-11-09): bloop is now an `iced::daemon` with two windows: the notch (always
-present) and a decorated app window (900 × 620, min 720 × 520) created on demand and closed
-for real, so it costs nothing while hidden. It replaces the in-notch hub and hosts onboarding.
+present) and a decorated app window (900 × 620, min 720 × 520) created on demand and
+dropped on close. It replaces the in-notch hub and hosts onboarding.
 Window ids route cursor, focus and drawing to the right window; closing the app window never
 quits, Quit lives in the tray. `launch.rs` decides what to open: first run shows only the
 window (finishing or closing it brings up the notch; unfinished setup resumes next launch);
 a manual launch opens notch and window; `--background` (the HKCU Run value and the update
 relaunch) opens the notch only. A second launch signals the named event `Local\bloop-open`
 and exits; the running copy opens or focuses the window. `bloop-app` stays the installer mutex.
+
+Windows memory and idle timers (2026-11-20). Iced shares one wgpu device, queue and
+text atlas across window renderers. Its close action removes the decorated window's
+surface, renderer and widget cache. The notch keeps the compositor alive. Iced already
+requests wgpu's memory-use allocation mode and a maximum frame latency of one. Keeping
+system font fallback preserves multilingual replies and Windows glyphs. See
+`docs/verification.md` for the renderer startup delta and retained memory after streaming.
+
+Chat search waits 250 ms after the latest input and allows one SQLite scan at a time.
+Scans borrow row JSON, stop at 100 matches in newest-first order, and leave the full chat
+list available when the search field is cleared. The presence timer considers a peek
+deadline only when the peek can expire. The collapsed notch skips the mascot clock when
+there is no app window or pending reply reveal.
+
+On Windows, closing the app window while the notch is settled and idle schedules
+`HeapOptimizeResources` on the existing executor. Windows can decommit freed heap pages
+after Iced drops the window. Completed, failed and cancelled replies discard spare
+string capacity before saving or showing the final text. The parsed replies remain
+available for the next open.
+
+Windows renderer choice (2026-11-21). Windows compiles both Iced renderers
+and keeps wgpu with DirectX 12 first. `BLOOP_RENDERER=software` selects
+tiny-skia at startup when `ICED_BACKEND` is unset. The native notch region
+still clips the transparent canvas and handles pointer hit testing for
+either renderer. Tiny-skia reduces resident and private memory but spends
+more process CPU during animations and streaming, so it stays an opt-in.
+Linux retains its existing X11 and wgpu Vulkan/OpenGL ES paths. See
+[Windows software renderer measurements](verification.md#windows-software-renderer-2026-11-21).
 
 Release builds and signing (2026-11-11): releases are built by `.github/workflows/release.yml` on
 GitHub's Windows runners from a pushed `v<version>` tag (`installer/release.ps1` creates it), not
@@ -335,3 +380,38 @@ the body so it hangs behind. To make Bloop more present, the open notch's header
 36 px (was 30), an empty chat greets you with a 72 px Bloop, and clicking it makes it laugh.
 Appearance changes apply and save at once, like the rest of that page.
 
+## Storage and runtime failure recovery (2026-11-20)
+
+The storage queue retains a failed chat snapshot by ID. Opening or exporting that chat uses
+the retained snapshot, and the next save retries it with the current settings. A later save
+for the same chat supersedes the failed snapshot. Quit or update waits for those writes.
+Save coalescing stops at a load, export, rename, or delete for the same chat so each operation
+sees the right version. A pending delete leaves the chat and earlier saves intact until SQLite
+confirms it. A failed delete leaves the transcript available.
+
+Startup reads valid settings even if a conversation's turns are damaged. It leaves damaged
+rows in the database and opens the most recent readable chat. Legacy migration claims the
+exact original history and inserts it with a SQLite-assigned ID in the same transaction.
+Settings and setup check the serialized settings limit before replacing the live config.
+
+CLI streaming requires successful Windows job assignment before starting pipe workers.
+Cancellation aborts both pipe workers and drops the process-tree guard. The total deadline
+covers stream delivery when the consumer is blocked. At startup, cached update verification
+runs on a blocking worker and checks asset and checksum file types and size limits before
+hashing.
+
+
+## The panel fits the work area (2026-11-20)
+
+The window used to be a fixed 600 x 580 logical canvas. On a short or highly scaled
+screen (1366 x 768 at 125 %, 1920 x 1080 at 200 %) that runs under the taskbar and hides
+the prompt. `platform::place_on` now cuts the window's height to the work area below
+its top and returns that area's logical height; the UI keeps it and sizes the open
+panel to it (8 px clear of the bottom; the gap goes before the panel drops below
+260 px, and the work area is a hard ceiling for window, panel and region alike).
+Each placement is numbered and only the latest one's answer counts; a placement that
+failed (`SetWindowPos` error) reports nothing, and the last confirmed height stays. Placement always asks for
+the full canvas, so moving from a short monitor to a tall one gives the full panel back
+without a second placement, and the work-area report arrives in the same task that
+moved the window, so there is no extra resize mid-animation. Only Windows reports a
+height for now; Linux returns `None` and keeps its behaviour.

@@ -1,5 +1,7 @@
 //! How the app was started (manual or background) and where that routes the user (pure).
 
+use std::ffi::OsStr;
+
 /// How this process was launched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Launch {
@@ -52,9 +54,9 @@ pub enum Startup {
 
 /// `Background` if any argument after the program path is `--background`; else `Toggle` or
 /// `Ask` for `--toggle` / `--ask`; otherwise `Manual`.
-pub fn launch_kind(args: impl IntoIterator<Item = String>) -> Launch {
-    let args: Vec<String> = args.into_iter().skip(1).collect();
-    let has = |flag: &str| args.iter().any(|a| a == flag);
+pub fn launch_kind(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Launch {
+    let args: Vec<_> = args.into_iter().skip(1).collect();
+    let has = |flag: &str| args.iter().any(|a| a.as_ref() == OsStr::new(flag));
     if has("--background") {
         Launch::Background
     } else if has("--toggle") {
@@ -112,6 +114,25 @@ mod tests {
         assert_eq!(
             launch_kind(args(&["bloop.exe", "--foo", "x"])),
             Launch::Manual
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn non_unicode_args_do_not_prevent_recognizing_flags() {
+        #[cfg(unix)]
+        let invalid = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![0xff])
+        };
+        #[cfg(windows)]
+        let invalid = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[0xd800])
+        };
+        assert_eq!(
+            launch_kind([invalid.clone(), invalid, "--toggle".into()]),
+            Launch::Toggle
         );
     }
 

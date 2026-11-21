@@ -133,6 +133,11 @@ pub enum Message {
     FullscreenPoll,
     PeekTest,
     Frame(Instant),
+    /// The conversation's scroll position or content size changed.
+    Scrolled(scrollable::Viewport),
+    /// Logical height of the work area the notch was just placed on, when the platform knows it.
+    /// Tagged with the placement that asked, so a late answer to an older one is dropped.
+    WorkArea(u32, Option<f32>),
     /// Mascot animation frame while it is moving.
     Tick(Instant),
     /// Low-frequency wake-up at rest so the mascot can blink.
@@ -249,6 +254,7 @@ pub enum Message {
     },
     /// Result of a check; `true` when the user asked for it.
     UpdateChecked(bool, Result<Option<Release>, String>),
+    UpdateCacheChecked(Option<(Version, PathBuf)>),
     UpdateProgress(Version, u8),
     UpdateReady(Result<(Version, PathBuf), String>),
     InstallUpdate,
@@ -309,10 +315,15 @@ pub struct Island {
     /// Search results; `None` lists every chat.
     chat_hits: Option<Vec<(Chat, String)>>,
     search_id: u64,
+    search_running: Option<u64>,
+    search_ready: bool,
     renaming: Option<(i64, String)>,
     confirm_delete: Option<i64>,
+    deleting: std::collections::HashSet<i64>,
     /// Storage jobs waiting their turn; `saving` is true while one runs.
     jobs: std::collections::VecDeque<jobs::Job>,
+    /// Latest turns that SQLite failed to save, including chats no longer in the notch.
+    failed_saves: std::collections::HashMap<i64, (Chat, Vec<Turn>)>,
     /// Restart to update once the queue is empty.
     install_after_save: bool,
     /// The chat the Chats page asked to open, until the queue has read it. Anything that
@@ -337,6 +348,12 @@ pub struct Island {
     last_frame: Option<Instant>,
     /// Size and offset the click-through region was last cut for, in whole pixels.
     region: Option<(i32, i32, i32)>,
+    /// How many times the region was cut; lets tests see the final cut.
+    region_cuts: u32,
+    /// Logical height of the screen's work area under the notch, once placed.
+    work_height: Option<f32>,
+    /// Whether the conversation keeps to the newest text as a reply streams.
+    follow: Follow,
     /// Frame intervals while animating, written to `BLOOP_FRAME_LOG` when it settles.
     frame_log: Vec<f32>,
     /// Windows' "Animation effects" setting is off.
@@ -431,9 +448,13 @@ impl Island {
             chat_query: String::new(),
             chat_hits: None,
             search_id: 0,
+            search_running: None,
+            search_ready: false,
             renaming: None,
             confirm_delete: None,
+            deleting: std::collections::HashSet::new(),
             jobs: std::collections::VecDeque::new(),
+            failed_saves: std::collections::HashMap::new(),
             install_after_save: false,
             opening: None,
             legacy_key: false,
@@ -447,6 +468,9 @@ impl Island {
             spring: SizeSpring::new(SLIVER.width, SLIVER.height),
             last_frame: None,
             region: None,
+            region_cuts: 0,
+            work_height: None,
+            follow: Follow::default(),
             frame_log: Vec::new(),
             system_reduce: platform::reduce_motion_system(),
             icons_ready: false,
@@ -746,14 +770,21 @@ impl Island {
             // Redraw-synced frames, only while the notch is moving.
             events.push(window::frames().map(Message::Frame));
         }
-        let blinking = self.blink_until.is_some_and(|until| self.now < until);
-        if self.mood().animated() || blinking {
-            events.push(iced::time::every(Duration::from_millis(33)).map(Message::Tick));
-        } else {
-            // At rest: one cheap wake-up every few seconds for a blink / nap check.
-            events.push(iced::time::every(Duration::from_millis(3700)).map(Message::Blink));
+        if self.needs_mascot_clock() {
+            let blinking = self.blink_until.is_some_and(|until| self.now < until);
+            if self.mood().animated() || blinking {
+                events.push(iced::time::every(Duration::from_millis(33)).map(Message::Tick));
+            } else {
+                // At rest: one cheap wake-up every few seconds for a blink / nap check.
+                events.push(iced::time::every(Duration::from_millis(3700)).map(Message::Blink));
+            }
         }
         Subscription::batch(events)
+    }
+
+    fn needs_mascot_clock(&self) -> bool {
+        // The sliver draws no mascot. A hidden reply still needs its reveal ticks.
+        self.presence.shape() != Shape::Sliver || self.app_window.is_some() || self.reveal.is_some()
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -765,6 +796,8 @@ impl Island {
             Message::Tick(_)
                 | Message::Blink(_)
                 | Message::Frame(_)
+                | Message::Scrolled(_)
+                | Message::WorkArea(..)
                 | Message::JobDone(_)
                 | Message::Deadline(_)
                 | Message::FullscreenPoll
@@ -809,6 +842,9 @@ impl Island {
                     Ok(loaded) => {
                         self.config = loaded.config.clone();
                         self.draft_config = loaded.config;
+                        if let Some(warning) = loaded.warning {
+                            self.chats_notice = warning;
+                        }
                         self.instructions_editor =
                             text_editor::Content::with_text(&self.draft_config.instructions);
                         self.chats = loaded.chats;
@@ -823,8 +859,7 @@ impl Island {
                                 }
                             }
                             None => {
-                                self.chat.id = model::new_chat_id(0);
-                                self.chat.profile = self.config.default_profile();
+                                self.start_chat(self.config.default_profile());
                             }
                         }
                         self.sync_replies();
@@ -838,14 +873,19 @@ impl Island {
                 self.apply_shortcuts();
                 self.presence
                     .set_hover_delay(Duration::from_millis(self.config.hover_delay_ms.into()));
-                let ready = self
-                    .updates_dir()
-                    .and_then(|dir| update::ready(&dir, &Version::current()));
-                if let Some((version, path)) = ready {
-                    self.update_state = UpdateState::Ready(version, path);
-                    // Downloaded before a restart: say so once.
-                    self.update_peek_pending = true;
-                }
+                let cache = self.updates_dir().map_or_else(Task::none, |dir| {
+                    Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                update::ready(&dir, &Version::current())
+                            })
+                            .await
+                            .ok()
+                            .flatten()
+                        },
+                        Message::UpdateCacheChecked,
+                    )
+                });
                 let layout = self.relayout(false);
                 // First-run setup lives in the app window; the notch appears when it ends.
                 let (notch, windows) = match startup(self.launch, self.config.onboarded) {
@@ -853,7 +893,7 @@ impl Island {
                     Startup::Dashboard => (self.open_notch(), self.open_app_window()),
                     Startup::Onboarding => (Task::none(), self.start_setup()),
                 };
-                return Task::batch([layout, notch, windows]);
+                return Task::batch([layout, notch, windows, cache]);
             }
             Message::JobDone(done) => return self.job_done(done),
             Message::Platform(event) => match event {
@@ -923,6 +963,18 @@ impl Island {
                 }
                 if self.window == Some(id) {
                     self.window = None;
+                    return Task::none();
+                }
+                // Iced has already dropped the app window's surface and renderer.
+                #[cfg(windows)]
+                if self.app_window.is_none()
+                    && self.window.is_some()
+                    && self.presence.shape() == Shape::Sliver
+                    && !self.animating()
+                    && self.request.is_none()
+                    && self.reveal.is_none()
+                {
+                    return Task::future(async { platform::optimize_idle_heaps() }).discard();
                 }
             }
             Message::Deadline(now) => return self.present_at(Event::Tick, now),
@@ -934,6 +986,23 @@ impl Island {
                 let close = self.present(Event::Dismiss);
                 let peek = self.present(Event::Peek("Hi! This is a peek.".into()));
                 return Task::batch([close, peek]);
+            }
+            Message::Scrolled(viewport) => self.follow.on_scroll(
+                viewport.absolute_offset().y,
+                viewport.bounds().height,
+                viewport.content_bounds().height,
+            ),
+            Message::WorkArea(placement, height) => {
+                // A stale answer (a newer placement since), or a placement that didn't land:
+                // keep the last height a placement confirmed.
+                if placement != self.placements || height.is_none() || height == self.work_height {
+                    return Task::none();
+                }
+                // The open panel never reaches past the taskbar on a short or scaled screen.
+                self.work_height = height;
+                self.retarget(self.presence.shape(), Instant::now());
+                self.region = None;
+                return self.update_region();
             }
             Message::Frame(now) => {
                 if !self.animating() {
@@ -951,6 +1020,12 @@ impl Island {
                 }
                 if std::env::var_os("BLOOP_FRAME_LOG").is_some() {
                     self.frame_log.push(dt);
+                }
+                if !self.animating() {
+                    // The last frame before the snap can round to the same whole pixels while
+                    // still a fraction short, which is a device pixel or two at 150-200 %:
+                    // cut the region to the exact final outline.
+                    self.region = None;
                 }
                 let region = self.update_region();
                 if self.animating() {
@@ -1035,6 +1110,9 @@ impl Island {
             }
             Message::Finished(id, result) if id == self.request_id && self.request.is_some() => {
                 self.request = None;
+                if let Some(turn) = self.turns.last_mut() {
+                    turn.assistant.shrink_to_fit();
+                }
                 let mut presence = self.present(Event::Busy(false));
                 match result {
                     Ok(()) => {
@@ -1070,11 +1148,11 @@ impl Island {
                 }
             }
             Message::Cancel => {
-                self.cancel();
+                let collapse = self.cancel();
                 self.status = "Stopped. Partial reply kept out of model context.".into();
                 self.react(Mood::Mad, 1.2);
                 let update = self.peek_update_if_pending();
-                return Task::batch([self.persist(), update]);
+                return Task::batch([self.persist(), collapse.chain(update)]);
             }
             Message::Provider(provider) => {
                 if provider == self.draft_config.provider {
@@ -1361,16 +1439,16 @@ impl Island {
                 }
             }
             Message::Quit => {
-                self.cancel();
+                let collapse = self.cancel();
                 self.quitting = true;
                 let save = self.persist();
                 if self.idle_storage() {
                     return iced::exit();
                 }
-                return save;
+                return Task::batch([save, collapse]);
             }
             Message::QuitWithoutSaving => {
-                self.cancel();
+                let _ = self.cancel();
                 return iced::exit();
             }
             Message::OnboardNext => {
@@ -1518,6 +1596,16 @@ impl Island {
                     self.retry_update_later(Instant::now());
                 }
             },
+            Message::UpdateCacheChecked(Some((version, path)))
+                if matches!(self.update_state, UpdateState::Idle) =>
+            {
+                self.update_state = UpdateState::Ready(version, path);
+                self.update_peek_pending = true;
+                if self.window.is_some() {
+                    return self.peek_update_if_pending();
+                }
+            }
+            Message::UpdateCacheChecked(_) => {}
             Message::UpdateProgress(version, percent) => {
                 if let UpdateState::Downloading(current, _) = &self.update_state
                     && *current == version
@@ -1647,9 +1735,7 @@ impl Island {
             self.key_draft.clear();
         }
         let theme = self.config.theme;
-        if self
-            .draft_config
-            .validate()
+        if storage::validate_config(&self.draft_config)
             .and_then(|_| platform::validate_shortcut(&self.draft_config.shortcut))
             .is_ok()
         {
@@ -1729,8 +1815,14 @@ impl Island {
             .max()
             .unwrap_or(0)
             .max(self.chat.id);
+        let mut id = model::new_chat_id(newest);
+        if newest == i64::MAX {
+            while self.chat.id == id || self.chats.iter().any(|chat| chat.id == id) {
+                id = id.checked_add(1).unwrap_or(1);
+            }
+        }
         self.chat = Chat {
-            id: model::new_chat_id(newest),
+            id,
             profile,
             ..Chat::default()
         };
@@ -1775,6 +1867,10 @@ impl Island {
     /// Sends `prompt` as a new turn. With `replace_last`, the last turn is dropped first
     /// (Retry, Edit & resend), so it is neither shown twice nor sent back as context.
     fn send_prompt(&mut self, prompt: String, replace_last: bool) -> Task<Message> {
+        if self.deleting.contains(&self.chat.id) {
+            self.status = "Wait for the chat deletion to finish.".into();
+            return Task::none();
+        }
         self.recall = None;
         let Some(config) = self.config.with_profile(self.chat.profile) else {
             self.status =
@@ -1864,7 +1960,7 @@ impl Island {
         let (task, handle) = Task::run(stream, |message| message).abortable();
         self.request = Some(handle);
         let busy = self.present(Event::Busy(true));
-        Task::batch([task, self.scroll(), busy])
+        Task::batch([task, self.scroll_to_end(), busy])
     }
 
     fn chatgpt_can_manage(&self) -> bool {
@@ -1959,14 +2055,16 @@ impl Island {
         Some(field("API key", control))
     }
 
-    fn cancel(&mut self) {
+    fn cancel(&mut self) -> Task<Message> {
         if let Some(handle) = self.request.take() {
             handle.abort();
+            if let Some(turn) = self.turns.last_mut() {
+                turn.assistant.shrink_to_fit();
+            }
         }
         self.request_id += 1;
         self.finish_reveal();
-        // Only state changes matter here; this event never shows, hides or focuses the window.
-        let _ = self.present(Event::Cancelled);
+        self.present(Event::Cancelled)
     }
 
     fn persist(&mut self) -> Task<Message> {
@@ -1976,7 +2074,8 @@ impl Island {
         if self.db_path.is_none() {
             return Task::none();
         }
-        let chat = (!self.turns.is_empty()).then(|| (self.chat.clone(), self.turns.clone()));
+        let chat = (!self.turns.is_empty() && !self.deleting.contains(&self.chat.id))
+            .then(|| (self.chat.clone(), self.turns.clone()));
         self.queue(jobs::Job::Save {
             config: Box::new(self.config.clone()),
             chat,
@@ -2052,7 +2151,10 @@ impl Island {
         let (w, h) = match shape {
             Shape::Sliver => NotchWidth::SLIVER,
             Shape::Compact => self.config.notch_width.compact(),
-            Shape::Expanded => self.config.notch_width.panel(),
+            Shape::Expanded => {
+                let (w, h) = self.config.notch_width.panel();
+                (w, panel_height(h, self.work_height))
+            }
         };
         Size::new(w, h)
     }
@@ -2062,7 +2164,7 @@ impl Island {
         // Always the widest panel: width changes then never resize the window, so the notch
         // stays inside it while it animates to the new width.
         let (w, h) = NotchWidth::L.panel();
-        Size::new(w, h)
+        Size::new(w, canvas_height(h, self.work_height))
     }
 
     /// Where a rect of `size` sits horizontally in the canvas for the notch position.
@@ -2207,6 +2309,10 @@ impl Island {
             self.install_after_save = true;
             return Task::none();
         }
+        if !self.failed_saves.is_empty() {
+            self.install_after_save = true;
+            return self.persist();
+        }
         let path = path.clone();
         if let (Some(db), false) = (&self.db_path, self.storage_disabled)
             && let Err(error) = storage::save(db, &self.config, Some((&self.chat, &self.turns)))
@@ -2257,15 +2363,21 @@ impl Island {
     }
 
     fn place_window(&mut self, target: platform::Target) -> Task<Message> {
-        self.placements += 1;
+        self.placements = self.placements.wrapping_add(1);
         let Some(id) = self.window else {
             return Task::none();
         };
-        let canvas = self.canvas_size();
+        // The full-height canvas: the platform cuts it to the work area of whichever monitor
+        // the notch lands on and reports that height back, so the window and `canvas_size`
+        // agree after a move between monitors of different height or scale.
+        let (w, h) = NotchWidth::L.panel();
+        let canvas = Size::new(w, h);
         let position = self.config.notch_position;
         self.region = None;
+        let placement = self.placements;
         Task::batch([
-            window::run(id, move |w| platform::place_on(w, canvas, position, target)).discard(),
+            window::run(id, move |w| platform::place_on(w, canvas, position, target))
+                .map(move |height| Message::WorkArea(placement, height)),
             self.update_region(),
         ])
     }
@@ -2286,6 +2398,7 @@ impl Island {
             return Task::none();
         }
         self.region = Some(key);
+        self.region_cuts = self.region_cuts.wrapping_add(1);
         let outline: Vec<(f32, f32)> =
             mascot::notch_outline(rect.size(), self.shoulder(), self.corner_radius())
                 .into_iter()
@@ -2336,8 +2449,19 @@ impl Island {
         (self.size().height * 0.6).clamp(3.0, SHOULDER)
     }
 
+    /// Keeps to the newest text, unless the user scrolled up to read something earlier.
     fn scroll(&self) -> Task<Message> {
-        widget::operation::snap_to("conversation", scrollable::RelativeOffset::END)
+        if self.follow.stick {
+            widget::operation::snap_to("conversation", scrollable::RelativeOffset::END)
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Jumps to the newest text and follows it again (a new prompt, another chat).
+    fn scroll_to_end(&mut self) -> Task<Message> {
+        self.follow = Follow::default();
+        self.scroll()
     }
 
     fn button<'a>(&self, label: &'a str, variant: Variant) -> button::Button<'a, Message> {
@@ -2538,18 +2662,34 @@ impl Island {
             .into()
     }
 
-    /// The pill shown on hover and for peeks.
+    /// The pill shown on hover and for peeks. A peek's message takes the wordmark's place,
+    /// so it has the room; anything still too long ends in "…" on one line instead of
+    /// wrapping past the pill's bottom.
     fn pill_content(&self) -> Element<'_, Message> {
         let t = self.tokens();
         let status = self.pill_status();
-        let header = row![
-            self.mascot(26.0),
-            text("bloop").size(14).font(MEDIUM),
-            Space::new().width(Length::Fill),
-            text(status).size(12).color(t.muted_foreground),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
+        let wordmark = self.presence.message().is_none();
+        let chars = pill_chars(self.size_for(Shape::Compact).width, wordmark);
+        let status = container(
+            text(fit_line(&status, chars).into_owned())
+                .size(PILL_TEXT)
+                .color(t.muted_foreground)
+                .wrapping(text::Wrapping::None),
+        )
+        .width(Length::Fill)
+        .align_x(if wordmark {
+            iced::alignment::Horizontal::Right
+        } else {
+            iced::alignment::Horizontal::Left
+        })
+        .clip(true);
+        let mut header = row![self.mascot(26.0)]
+            .spacing(8)
+            .align_y(Alignment::Center);
+        if wordmark {
+            header = header.push(text("bloop").size(14).font(MEDIUM));
+        }
+        let header = header.push(status);
         button(header)
             .on_press(Message::OpenClick)
             .style(style::btn(t, Variant::Bare))
@@ -2662,7 +2802,7 @@ impl Island {
         }
         let last = self.turns.len().saturating_sub(1);
         for (index, turn) in self.turns.iter().enumerate() {
-            let bubble = container(text(&turn.user).size(14))
+            let bubble = container(prose(&turn.user).size(14))
                 .padding([8, 12])
                 .max_width(380)
                 .style(style::bubble(t));
@@ -2717,6 +2857,7 @@ impl Island {
         let mut body = column![
             scrollable(history)
                 .id("conversation")
+                .on_scroll(Message::Scrolled)
                 .height(Length::Fill)
                 .direction(scrollable::Direction::Vertical(
                     scrollable::Scrollbar::new()
@@ -2730,7 +2871,7 @@ impl Island {
         for warning in [&self.storage_warning, &self.desktop_warning, &self.status] {
             if !warning.is_empty() {
                 body = body.push(
-                    container(text(warning).size(13).color(t.destructive))
+                    container(prose(warning).size(13).color(t.destructive))
                         .padding([8, 12])
                         .width(Length::Fill)
                         .style(style::card(t, t.background)),
@@ -2899,13 +3040,12 @@ impl Island {
             container(
                 column![
                     row![
-                        text(heading).size(12).font(MEDIUM),
-                        Space::new().width(Length::Fill),
+                        prose(heading).size(12).font(MEDIUM).width(Length::Fill),
                         self.small_button(Icon::X, "Remove", "Remove", Message::RemoveAttachment),
                     ]
                     .align_y(Alignment::Center),
-                    text(preview).size(12).color(t.muted_foreground),
-                    text(format!("Sends with your question to {}", self.badge_text()))
+                    prose(preview).size(12).color(t.muted_foreground),
+                    prose(format!("Sends with your question to {}", self.badge_text()))
                         .size(11)
                         .color(t.muted_foreground),
                 ]
@@ -3087,7 +3227,7 @@ impl Island {
             );
         }
         let mut fields = column![
-            text(summary).size(14),
+            prose(summary).size(14),
             text("ChatGPT receives your prompt and recent chat context.")
                 .size(12)
                 .color(t.muted_foreground),
@@ -3095,7 +3235,7 @@ impl Island {
         ]
         .spacing(10);
         if !self.chatgpt_notice.is_empty() {
-            fields = fields.push(text(&self.chatgpt_notice).size(13));
+            fields = fields.push(prose(&self.chatgpt_notice).size(13));
         }
         if self.chatgpt.plan_enabled {
             let slug = self.draft_config.model.trim();
@@ -3135,6 +3275,96 @@ impl Island {
         fields.into()
     }
 }
+
+/// Text size of the pill's status.
+const PILL_TEXT: f32 = 12.0;
+/// A generous average advance of Segoe UI at [`PILL_TEXT`], in pixels per character.
+const PILL_CHAR: f32 = 5.6;
+
+/// How many characters of status fit beside the mascot (and the wordmark) in a pill of
+/// `width`: the pill's padding, the 26 px mascot, the gaps and the ~38 px wordmark.
+fn pill_chars(width: f32, wordmark: bool) -> usize {
+    let used = SHOULDER * 2.0 + 28.0 + 26.0 + if wordmark { 16.0 + 38.0 } else { 8.0 };
+    ((width - used).max(0.0) / PILL_CHAR) as usize
+}
+
+/// `line` on one line of at most `max` characters, ending in "…" when it was cut.
+fn fit_line(line: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    let mut lines = line.lines();
+    let line = lines.next().unwrap_or_default();
+    let more = lines.next().is_some();
+    if !more && line.chars().count() <= max {
+        return line.into();
+    }
+    let kept: String = line.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", kept.trim_end()).into()
+}
+
+/// Room left under the open panel on a work area too short for it, so its rounded bottom
+/// stays clear of the taskbar.
+const PANEL_GAP: f32 = 8.0;
+/// The panel gives up its gap before it shrinks below this; it never grows past the work
+/// area, though, since the native window is cut there.
+const MIN_PANEL_HEIGHT: f32 = 260.0;
+
+/// The open panel's height: `full`, or less when the work area is too short for it. The
+/// work area is a hard ceiling: the native window, the canvas and the region all stop there.
+fn panel_height(full: f32, work: Option<f32>) -> f32 {
+    match work {
+        Some(work) if work - PANEL_GAP < full => {
+            (work - PANEL_GAP).max(MIN_PANEL_HEIGHT).min(work).max(0.0)
+        }
+        _ => full,
+    }
+}
+
+/// The window's height: the full panel, or the work area when that's shorter. Never less
+/// than the panel, since the panel is capped by the same work area.
+fn canvas_height(full: f32, work: Option<f32>) -> f32 {
+    work.map_or(full, |work| work.min(full).max(0.0))
+}
+
+/// Whether the conversation sticks to its end while a reply grows. Only a change of scroll
+/// offset (the user's wheel or scrollbar, or our own snap) decides; content growing under
+/// a still offset doesn't, so a reply streaming in never unsticks it by itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Follow {
+    stick: bool,
+    offset: Option<f32>,
+}
+
+impl Default for Follow {
+    fn default() -> Self {
+        Self {
+            stick: true,
+            offset: None,
+        }
+    }
+}
+
+impl Follow {
+    /// Within this many pixels of the end still counts as at the end.
+    const SLACK: f32 = 24.0;
+
+    /// `offset` is compared with the last offset that decided, not the last one seen, so
+    /// many sub-pixel steps still add up to a move.
+    fn on_scroll(&mut self, offset: f32, visible: f32, content: f32) {
+        let moved = self.offset.is_none_or(|last| (last - offset).abs() > 0.5);
+        if moved {
+            self.stick = content - (offset + visible) <= Self::SLACK;
+            self.offset = Some(offset);
+        }
+    }
+}
+
+/// Text the user or the outside world wrote: names, model ids, URLs, paths and errors.
+/// It wraps between words, and inside a word too long for the line (a URL, a path), so
+/// it never runs out of its bubble, card or window.
+pub(crate) fn prose<'a>(content: impl text::IntoFragment<'a>) -> widget::Text<'a> {
+    text(content).wrapping(PROSE_WRAPPING)
+}
+
+const PROSE_WRAPPING: text::Wrapping = text::Wrapping::WordOrGlyph;
 
 /// `inner` placed `rect.x` from the left of the canvas, top-aligned.
 fn place(rect: iced::Rectangle, inner: Element<'_, Message>) -> Element<'_, Message> {
@@ -3263,6 +3493,25 @@ mod tests {
         assert_eq!(app.turns[0].assistant, "partial");
         assert!(!app.turns[0].complete);
         assert!(app.request.is_none());
+    }
+
+    #[test]
+    fn stopping_a_stream_keeps_its_text_without_spare_buffer_capacity() {
+        for completion in [Some(Ok(())), Some(Err("connection lost".into())), None] {
+            let mut app = ready();
+            app.input = "hello".into();
+            let _stream = app.update(Message::Send);
+            let id = app.request_id;
+            let text = "A partially revealed response";
+            let _ = app.update(Message::Chunk(id, StreamEvent::Delta(text.into())));
+            app.turns[0].assistant.reserve(64 * 1024);
+            let reserved = app.turns[0].assistant.capacity();
+            let end = completion.map_or(Message::Cancel, |result| Message::Finished(id, result));
+            let _ = app.update(end);
+
+            assert_eq!(app.turns[0].assistant, text);
+            assert!(app.turns[0].assistant.capacity() < reserved);
+        }
     }
 
     /// Sends `prompt` and finishes its reply with `reply`.
@@ -3457,6 +3706,230 @@ mod tests {
     }
 
     #[test]
+    fn scrolling_up_stops_following_and_growth_alone_never_does() {
+        let mut follow = Follow::default();
+        // At the end of a 1000 px conversation in a 400 px view.
+        follow.on_scroll(600.0, 400.0, 1000.0);
+        assert!(follow.stick);
+        // The reply grows under a still offset: keep following.
+        follow.on_scroll(600.0, 400.0, 1400.0);
+        assert!(follow.stick);
+        // The user scrolls up to read: stop.
+        follow.on_scroll(200.0, 400.0, 1400.0);
+        assert!(!follow.stick);
+        // More text arrives while they read: still stopped.
+        follow.on_scroll(200.0, 400.0, 1800.0);
+        assert!(!follow.stick);
+        // Back down to within the slack of the end: follow again.
+        follow.on_scroll(1390.0, 400.0, 1800.0);
+        assert!(follow.stick);
+    }
+
+    #[test]
+    fn chunks_leave_a_reader_alone_until_the_next_prompt() {
+        let mut app = ready();
+        app.input = "first".into();
+        let _ = app.update(Message::Send);
+        let id = app.request_id;
+        app.follow.on_scroll(600.0, 400.0, 1000.0);
+        app.follow.on_scroll(100.0, 400.0, 1000.0);
+        let _ = app.update(Message::Chunk(id, StreamEvent::Delta("more".into())));
+        let _ = app.update(Message::Finished(id, Ok(())));
+        assert!(!app.follow.stick, "a streamed reply pulled the reader down");
+        app.finish_reveal();
+        app.input = "second".into();
+        let _ = app.update(Message::Send);
+        assert_eq!(app.follow, Follow::default());
+    }
+
+    #[test]
+    fn panel_fits_short_work_areas() {
+        let full = 580.0;
+        assert_eq!(panel_height(full, None), full);
+        assert_eq!(canvas_height(full, None), full);
+        // Plenty of room, or exactly the gap to spare.
+        for work in [1032.0, full + PANEL_GAP] {
+            assert_eq!(panel_height(full, Some(work)), full);
+            assert_eq!(canvas_height(full, Some(work)), full);
+        }
+        // 1366 x 768 at 125 % with a 40 px taskbar: 582 px tall, so 6 px under the gap.
+        assert_eq!(panel_height(full, Some(582.0)), 574.0);
+        assert_eq!(canvas_height(full, Some(582.0)), 580.0);
+        // 1920 x 1080 at 200 % with a 48 px taskbar: 516 px.
+        assert_eq!(panel_height(full, Some(516.0)), 508.0);
+        assert_eq!(canvas_height(full, Some(516.0)), 516.0);
+        // Short enough that the gap would leave less than the floor: the gap goes first.
+        assert_eq!(panel_height(full, Some(264.0)), MIN_PANEL_HEIGHT);
+        // Below the floor the work area still wins: the native window stops there.
+        assert_eq!(panel_height(full, Some(240.0)), 240.0);
+        assert_eq!(canvas_height(full, Some(240.0)), 240.0);
+        for work in [
+            0.0, 100.0, 200.0, 240.0, 259.0, 260.0, 267.0, 268.0, 300.0, 587.0, 588.0, 600.0,
+            5000.0,
+        ] {
+            let (panel, canvas) = (
+                panel_height(full, Some(work)),
+                canvas_height(full, Some(work)),
+            );
+            assert!(
+                panel <= canvas && canvas <= work && canvas <= full,
+                "{work}"
+            );
+        }
+    }
+
+    #[test]
+    fn subpixel_scroll_steps_add_up_to_a_move() {
+        let mut follow = Follow::default();
+        follow.on_scroll(600.0, 400.0, 1000.0);
+        assert!(follow.stick);
+        // A touchpad creeping up 0.4 px at a time, 100 times: 40 px up, past the slack.
+        let mut offset = 600.0;
+        for _ in 0..100 {
+            offset -= 0.4;
+            follow.on_scroll(offset, 400.0, 1000.0);
+        }
+        assert!(!follow.stick, "40 px up still followed");
+    }
+
+    #[test]
+    fn a_short_work_area_shrinks_the_open_panel_and_recuts_the_region() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::On;
+        let _ = app.present(Event::Shortcut);
+        assert_eq!(app.size().height, 580.0);
+        let now = app.placements;
+        let cuts = app.region_cuts;
+        let _ = app.update(Message::WorkArea(now, Some(516.0)));
+        assert_eq!(app.size_for(Shape::Expanded).height, 508.0);
+        assert_eq!(app.size().height, 508.0);
+        assert_eq!(app.canvas_size().height, 516.0);
+        assert!(app.region_cuts > cuts);
+        assert_eq!(app.region.map(|(_, h, _)| h), Some(508));
+        // The same report again changes nothing.
+        let cuts = app.region_cuts;
+        let _ = app.update(Message::WorkArea(now, Some(516.0)));
+        assert_eq!(app.region_cuts, cuts);
+        // A taller monitor gives the full panel back.
+        let _ = app.update(Message::WorkArea(now, Some(1400.0)));
+        assert_eq!(app.size().height, 580.0);
+        assert_eq!(app.canvas_size().height, 580.0);
+    }
+
+    #[test]
+    fn below_the_floor_window_canvas_and_region_agree() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::On;
+        let _ = app.present(Event::Shortcut);
+        let _ = app.update(Message::WorkArea(app.placements, Some(240.0)));
+        assert_eq!(app.canvas_size().height, 240.0);
+        assert_eq!(app.size().height, 240.0);
+        assert_eq!(app.region.map(|(_, h, _)| h), Some(240));
+    }
+
+    #[test]
+    fn stale_or_failed_placements_keep_the_confirmed_height() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::On;
+        let _ = app.present(Event::Shortcut);
+        let first = app.placements;
+        let _ = app.update(Message::Toggle);
+        let _ = app.update(Message::Toggle);
+        let latest = app.placements;
+        assert!(latest > first, "reopening re-places");
+        // The newer placement, on a tall monitor, answers first.
+        let _ = app.update(Message::WorkArea(latest, Some(1400.0)));
+        assert_eq!(app.work_height, Some(1400.0));
+        // The older one, from a short monitor, arrives late: dropped.
+        let _ = app.update(Message::WorkArea(first, Some(516.0)));
+        assert_eq!(app.work_height, Some(1400.0));
+        assert_eq!(app.size().height, 580.0);
+        // A placement that failed reports nothing: the last cap stays.
+        let _ = app.update(Message::WorkArea(latest, Some(516.0)));
+        let _ = app.update(Message::WorkArea(latest, None));
+        assert_eq!(app.work_height, Some(516.0));
+        assert_eq!(app.size().height, 508.0);
+    }
+
+    #[test]
+    fn the_settling_frame_cuts_the_exact_final_region() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::Off;
+        let _ = app.present(Event::Shortcut);
+        app.spring.snap();
+        // A fraction short of the target, still moving: rounds to the final whole pixels.
+        app.spring.h.value -= 0.4;
+        app.spring.h.velocity = 12.0;
+        assert!(app.animating());
+        let _ = app.update_region();
+        assert_eq!(app.region.map(|(_, h, _)| h), Some(580));
+        let mut at = Instant::now();
+        let mut cut_at_settle = false;
+        for _ in 0..60 {
+            let cuts = app.region_cuts;
+            at = run_frames(&mut app, at, 1);
+            if !app.animating() {
+                cut_at_settle = app.region_cuts > cuts;
+                break;
+            }
+        }
+        assert!(!app.animating());
+        assert!(
+            cut_at_settle,
+            "the final frame kept a region cut short of the notch"
+        );
+        // Settled: later frames cut nothing.
+        let cuts = app.region_cuts;
+        run_frames(&mut app, at, 5);
+        assert_eq!(app.region_cuts, cuts);
+    }
+
+    #[test]
+    fn fit_line_cuts_on_characters_and_marks_the_cut() {
+        assert_eq!(fit_line("Ask anything", 20), "Ask anything");
+        assert_eq!(fit_line("Ask anything", 12), "Ask anything");
+        assert_eq!(fit_line("Ask anything", 8), "Ask any…");
+        assert_eq!(fit_line("Ask anything", 5), "Ask…");
+        assert_eq!(fit_line("Ask anything", 1), "…");
+        assert_eq!(fit_line("Ask anything", 0), "…");
+        assert_eq!(fit_line("", 0), "");
+        assert_eq!(fit_line("one\ntwo", 20), "one…");
+        assert_eq!(fit_line("更新已准备好请点击重新启动", 6), "更新已准备…");
+        assert_eq!(fit_line("👋🏽 hello", 3), "👋🏽…");
+        assert_eq!(fit_line("e\u{301}e\u{301}e\u{301}", 4), "e\u{301}e…");
+    }
+
+    #[test]
+    fn pill_statuses_fit_on_one_line() {
+        for width in NotchWidth::ALL {
+            let pill = width.compact().0;
+            for status in [
+                "Thinking…",
+                "Replying…",
+                "All done",
+                "Napping",
+                "Listening…",
+                "Ask anything",
+                "Update 10.10.10 ready",
+            ] {
+                assert!(
+                    status.chars().count() <= pill_chars(pill, true),
+                    "{status} {width:?}"
+                );
+            }
+        }
+        // The update peek fits whole in the default and wide pills.
+        let peek = "Update 0.6.1 ready — click to restart";
+        for width in [NotchWidth::M, NotchWidth::L] {
+            let chars = pill_chars(width.compact().0, false);
+            assert_eq!(fit_line(peek, chars), peek, "{width:?}");
+        }
+        // The narrow one cuts it on one line, never wraps it.
+        let cut = fit_line(peek, pill_chars(NotchWidth::S.compact().0, false));
+        assert!(cut.ends_with('…') && !cut.contains('\n'), "{cut}");
+    }
+
+    #[test]
     fn up_and_down_recall_this_chats_prompts() {
         let mut app = ready();
         let _ = app.update(Message::Toggle);
@@ -3543,9 +4016,24 @@ mod tests {
         let _ = app.update(Message::Toggle);
         app.input = "hello".into();
         let _task = app.update(Message::Send);
-        app.cancel();
+        let _ = app.cancel();
         let _ = app.update(Message::Focus(app.window.unwrap(), false));
         assert_eq!(app.presence.state(), State::Sliver);
+    }
+
+    #[test]
+    fn cancel_updates_the_hit_region_when_reduced_motion_collapses_the_peek() {
+        let mut app = ready();
+        app.config.reduce_motion = ReduceMotion::On;
+        let _ = app.update(Message::Toggle);
+        app.input = "hello".into();
+        let _ = app.update(Message::Send);
+        let _ = app.update(Message::Focus(app.window.unwrap(), false));
+        assert_eq!(app.presence.state(), State::Peek);
+
+        let task = app.update(Message::Cancel);
+        assert_eq!(app.presence.state(), State::Sliver);
+        assert!(task.units() > 0, "native hit region must be updated");
     }
 
     #[test]
@@ -3564,7 +4052,10 @@ mod tests {
         let mut app = ready();
         app.quitting = true;
         app.saving = true;
-        let _ = app.update(Message::JobDone(jobs::Done::Saved(Err("disk full".into()))));
+        let _ = app.update(Message::JobDone(jobs::Done::SaveFailed {
+            chat: None,
+            error: "disk full".into(),
+        }));
         assert!(!app.quitting);
         assert_eq!(app.presence.state(), State::Open);
         assert!(app.storage_warning.contains("disk full"));
@@ -3634,7 +4125,7 @@ mod tests {
         assert_eq!(app.mood(), Mood::Mad);
         app.input = "again".into();
         let _task = app.update(Message::Send);
-        app.cancel();
+        let _ = app.cancel();
         assert_eq!(app.reply_mood(0).0, Mood::Sleepy);
         assert_eq!(app.reply_mood(1).0, Mood::Mad);
         let _ = app.update(Message::Tick(Instant::now() + NAP_AFTER * 2));
@@ -3681,6 +4172,25 @@ mod tests {
     }
 
     #[test]
+    fn mascot_clock_stops_when_collapsed_and_resumes_for_visible_or_pending_content() {
+        let mut app = ready();
+        assert!(!app.needs_mascot_clock());
+
+        let _ = app.update(Message::Toggle);
+        assert!(app.needs_mascot_clock());
+        let _ = app.update(Message::Toggle);
+        assert!(!app.needs_mascot_clock());
+
+        let _ = app.update(Message::OpenWindow);
+        assert!(app.needs_mascot_clock());
+        let _ = app.update(Message::CloseRequested(app.app_window.unwrap()));
+        assert!(!app.needs_mascot_clock());
+
+        app.reveal = Some(0);
+        assert!(app.needs_mascot_clock());
+    }
+
+    #[test]
     fn send_is_disabled_until_load_finishes() {
         let (mut app, _) = Island::new(Launch::Manual);
         app.input = "hello".into();
@@ -3693,6 +4203,21 @@ mod tests {
             config,
             ..Default::default()
         }))
+    }
+
+    #[test]
+    fn damaged_history_notice_does_not_become_a_quit_warning() {
+        let mut app = ready();
+        let warning = "Could not open the newest saved conversation.";
+        let _ = app.update(Message::Loaded(Ok(storage::Loaded {
+            warning: Some(warning.into()),
+            ..Default::default()
+        })));
+        assert!(app.storage_warning.is_empty());
+        assert_eq!(app.chats_notice, warning);
+
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(None)));
+        assert_eq!(app.chats_notice, warning);
     }
 
     #[test]
@@ -3711,8 +4236,18 @@ mod tests {
         assert_eq!(app.chats[0].id, app.chat.id, "newest first");
     }
 
+    #[test]
+    fn largest_saved_chat_id_does_not_block_creating_another_chat() {
+        let mut app = ready();
+        app.chat.id = i64::MAX;
+        app.chats.push(app.chat.clone());
+        let _ = app.update(Message::NewChat);
+        assert!(app.chat.id > 0);
+        assert_ne!(app.chat.id, i64::MAX);
+    }
+
     fn with_cloud_profile(app: &mut Island) -> u32 {
-        let id = app.config.next_profile_id();
+        let id = app.config.next_profile_id().unwrap();
         app.config.profiles.push(bloop::config::Profile {
             id,
             name: "Cloud".into(),
@@ -3834,7 +4369,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_chat_drops_its_queued_saves_and_waits_for_the_running_one() {
+    fn deleting_a_chat_waits_for_its_save_and_for_confirmation_from_storage() {
         let mut app = ready();
         app.storage_disabled = false;
         app.db_path = Some(PathBuf::from("unused.sqlite3"));
@@ -3843,11 +4378,34 @@ mod tests {
         let a = app.chat.id;
         let _ = app.update(Message::Chat(ChatAction::Delete(a)));
         let _ = app.update(Message::Chat(ChatAction::DeleteConfirm));
-        assert_ne!(app.chat.id, a, "the notch moved to a new chat");
-        assert!(app.chats.iter().all(|c| c.id != a));
-        assert!(app.jobs.iter().all(|job| !matches!(job,
+        assert_eq!(app.chat.id, a);
+        assert!(app.chats.iter().any(|c| c.id == a));
+        assert!(app.jobs.iter().any(|job| matches!(job,
             jobs::Job::Save { chat: Some((c, _)), .. } if c.id == a)));
         assert!(matches!(app.jobs.back(), Some(jobs::Job::Delete(id)) if *id == a));
+        let _ = app.update(Message::JobDone(jobs::Done::Deleted(a, Ok(()))));
+        assert_ne!(app.chat.id, a);
+        assert!(app.chats.iter().all(|c| c.id != a));
+    }
+
+    #[test]
+    fn failed_delete_keeps_the_active_transcript() {
+        let mut app = queued_storage();
+        exchange(&mut app, "chat A", "latest reply");
+        let a = app.chat.id;
+        let _ = app.update(Message::Chat(ChatAction::Delete(a)));
+        let _ = app.update(Message::Chat(ChatAction::DeleteConfirm));
+        let _ = app.update(Message::Retry);
+        assert!(app.request.is_none());
+
+        let _ = app.update(Message::JobDone(jobs::Done::Deleted(
+            a,
+            Err("disk full".into()),
+        )));
+        assert_eq!(app.chat.id, a);
+        assert_eq!(app.turns[0].assistant, "latest reply");
+        assert!(app.chats.iter().any(|chat| chat.id == a));
+        assert!(!app.deleting.contains(&a));
     }
 
     #[test]
@@ -3941,6 +4499,50 @@ mod tests {
     }
 
     #[test]
+    fn chat_search_waits_for_the_latest_input_and_runs_one_scan_at_a_time() {
+        let mut app = queued_storage();
+        let search = |query: &str| Message::Chat(ChatAction::Search(query.into()));
+        let ready = |id| Message::Chat(ChatAction::SearchReady(id));
+        let results = |id| Message::Chat(ChatAction::Results(id, Ok(vec![])));
+
+        let _ = app.update(search("m"));
+        let first = app.search_id;
+        let _ = app.update(search("ma"));
+        let second = app.search_id;
+        assert_eq!(app.search_running, None);
+        assert_eq!(app.update(ready(first)).units(), 0);
+        assert_eq!(app.update(ready(second)).units(), 1);
+        assert_eq!(app.search_running, Some(second));
+
+        let _ = app.update(search("march"));
+        let latest = app.search_id;
+        assert_eq!(app.update(ready(latest)).units(), 0);
+        assert_eq!(app.search_running, Some(second));
+        assert_eq!(app.update(results(second)).units(), 1);
+        assert!(app.chat_hits.is_none());
+        assert_eq!(app.search_running, Some(latest));
+        let _ = app.update(results(latest));
+        assert!(app.chat_hits.is_some());
+        assert_eq!(app.search_running, None);
+    }
+
+    #[test]
+    fn clearing_chat_search_discards_a_deferred_scan_and_its_previous_results() {
+        let mut app = queued_storage();
+        let _ = app.update(Message::Chat(ChatAction::Search("first".into())));
+        let first = app.search_id;
+        let _ = app.update(Message::Chat(ChatAction::SearchReady(first)));
+        let _ = app.update(Message::Chat(ChatAction::Search("next".into())));
+        let next = app.search_id;
+        let _ = app.update(Message::Chat(ChatAction::SearchReady(next)));
+        let _ = app.update(Message::Chat(ChatAction::Search(String::new())));
+        let stale = Message::Chat(ChatAction::Results(first, Ok(vec![])));
+        assert_eq!(app.update(stale).units(), 0);
+        assert!(app.chat_hits.is_none());
+        assert_eq!(app.search_running, None);
+    }
+
+    #[test]
     fn a_deleted_chat_is_never_opened() {
         let mut app = queued_storage();
         let _ = app.update(Message::Chat(ChatAction::Open(42)));
@@ -3986,7 +4588,7 @@ mod tests {
         let _ = app.update(Message::Chat(ChatAction::Delete(a)));
         let _ = app.update(Message::Chat(ChatAction::DeleteConfirm));
         assert!(app.jobs.iter().any(|job| matches!(job,
-            jobs::Job::Save { config, chat: None } if config.ask_shortcut == "Ctrl+Alt+Q")));
+            jobs::Job::Save { config, chat: Some((chat, _)) } if chat.id == a && config.ask_shortcut == "Ctrl+Alt+Q")));
     }
 
     #[test]
@@ -3997,13 +4599,45 @@ mod tests {
     }
 
     #[test]
+    fn failed_save_survives_switching_and_a_successful_unrelated_save() {
+        let mut app = queued_storage();
+        exchange(&mut app, "chat A", "unsaved reply");
+        let a = app.chat.id;
+        let snapshot = (app.chat.clone(), app.turns.clone());
+        let _ = app.update(Message::NewChat);
+        let _ = app.update(Message::Chat(ChatAction::Open(a)));
+
+        let _ = app.update(Message::JobDone(jobs::Done::SaveFailed {
+            chat: Some(snapshot),
+            error: "disk full".into(),
+        }));
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(None)));
+        assert!(app.storage_warning.contains("disk full"));
+
+        let _ = app.update(Message::JobDone(jobs::Done::Loaded(a, Ok(other_chat(a)))));
+        assert_eq!(app.turns[0].assistant, "unsaved reply");
+        let _ = app.update(Message::NewChat);
+        app.saving = true;
+        let _ = app.update(Message::Quit);
+        assert!(
+            app.jobs
+                .iter()
+                .any(|job| matches!(job, jobs::Job::Retry(id, _) if *id == a))
+        );
+
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(Some(a))));
+        assert!(!app.failed_saves.contains_key(&a));
+        assert!(app.storage_warning.is_empty());
+    }
+
+    #[test]
     fn a_deferred_update_survives_a_reply() {
         let mut app = queued_storage();
         app.install_after_save = true;
         app.input = "hi".into();
         let _task = app.update(Message::Send);
         app.jobs.clear();
-        let _ = app.update(Message::JobDone(jobs::Done::Saved(Ok(()))));
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(None)));
         assert!(app.install_after_save, "still waiting for the reply");
         let id = app.request_id;
         let _ = app.update(Message::Finished(id, Ok(())));
@@ -4011,8 +4645,19 @@ mod tests {
             !app.idle_storage(),
             "the save after the reply is under way and drains to the update"
         );
-        let _ = app.update(Message::JobDone(jobs::Done::Saved(Ok(()))));
+        let _ = app.update(Message::JobDone(jobs::Done::Saved(None)));
         assert!(!app.install_after_save, "the update was attempted");
+    }
+
+    #[test]
+    fn oversized_settings_do_not_replace_the_live_config() {
+        let mut app = ready();
+        let original = app.config.endpoint.clone();
+        app.draft_config.endpoint = format!("http://127.0.0.1:11434/{}", "x".repeat(32 * 1024));
+        assert!(app.draft_config.validate().is_ok());
+        let _ = app.update(Message::SaveSettings);
+        assert_eq!(app.config.endpoint, original);
+        assert!(app.status.contains("too large to save"));
     }
 
     #[test]
@@ -4069,8 +4714,7 @@ mod tests {
         };
         let _ = app.update(Message::Loaded(Ok(storage::Loaded {
             config,
-            chats: Vec::new(),
-            current: None,
+            ..Default::default()
         })));
         assert_eq!(app.instructions_editor.text(), "I write Rust.\nBe brief.");
         let _ = app.update(Message::Instructions(text_editor::Action::SelectAll));
@@ -4102,7 +4746,7 @@ mod tests {
         // The counter survives a save and reload.
         let back: Config =
             serde_json::from_str(&serde_json::to_string(&app.config).unwrap()).unwrap();
-        assert!(back.next_profile_id() > later);
+        assert!(back.next_profile_id().unwrap() > later);
     }
 
     #[test]
@@ -4200,7 +4844,7 @@ mod tests {
     fn deleting_another_profile_keeps_the_one_being_edited() {
         let mut app = ready();
         let cloud = with_cloud_profile(&mut app);
-        let other = app.config.next_profile_id();
+        let other = app.config.next_profile_id().unwrap();
         app.config.profiles.push(bloop::config::Profile {
             id: other,
             name: "Other".into(),
@@ -4290,6 +4934,21 @@ mod tests {
         assert_eq!(app.app_window, Some(id));
         let _ = app.update(Message::WindowClosed(id));
         assert!(app.app_window.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn closing_app_window_reclaims_heap_only_when_notch_is_idle() {
+        let mut app = ready();
+        let _ = app.update(Message::OpenWindow);
+        let first = app.app_window.unwrap();
+        let _ = app.update(Message::CloseRequested(first));
+        assert_eq!(app.update(Message::WindowClosed(first)).units(), 1);
+
+        let _ = app.update(Message::OpenWindow);
+        let second = app.app_window.unwrap();
+        let _ = app.update(Message::Toggle);
+        assert_eq!(app.update(Message::WindowClosed(second)).units(), 0);
     }
 
     #[test]

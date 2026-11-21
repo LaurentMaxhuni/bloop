@@ -22,7 +22,7 @@ pub const UNKNOWN_DESTINATION: &str = "unknown";
 /// A saved conversation, without its turns.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chat {
-    /// Milliseconds since 1970 when it was created; unique per chat.
+    /// Unique per chat. New chats normally use the creation time in milliseconds.
     pub id: i64,
     pub title: String,
     /// Model profile the chat uses (0 = default profile).
@@ -44,7 +44,7 @@ pub fn new_chat_id(newest: i64) -> i64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
-    now.max(newest + 1)
+    newest.checked_add(1).map_or(now, |next| now.max(next))
 }
 
 /// A chat title from its first prompt: the first line, whitespace tidied, at most 48 characters.
