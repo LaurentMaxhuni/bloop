@@ -154,6 +154,67 @@ because the sandbox's logon token could not access the credential test vault.
 - A close-event test covers scheduling heap reclamation only when the notch is
   idle. The scratch release trace measures the actual Windows heap calls.
 
+## Windows software renderer (2026-11-21)
+
+One release run per backend on Windows x64 build 26300 with Rust 1.97.1,
+Iced 0.14, and an NVIDIA GeForce RTX 4070 Ti SUPER. Both runs used the same
+binary built from a temporary source copy with
+`cargo build --release --locked --offline --bin bloop --example stream_fixture`.
+The default run left the renderer overrides unset and logged `Dx12` as the
+selected backend. The software run set only `BLOOP_RENDERER=software`.
+The DX12 modules were present only in the default process.
+
+The scratch daemon followed the preceding procedure with fresh data
+directories and Iced messages. It skipped single-instance handling, the tray,
+global shortcuts, autostart, external launch requests, and ChatGPT account
+loading. Auto-update was off. The fixture served 192 Markdown paragraphs at
+22 ms per delta on loopback. Both runs completed and revealed 55,378 bytes
+of reply text and exited with code 0. The installed instance and the fixture
+were excluded from the counters.
+
+Working set and private bytes are medians in MiB. CPU is the process
+`TotalProcessorTime` delta over the indicated sampled wall time. The idle
+rows use seven samples roughly 850 ms apart, from seconds one through seven.
+The streaming row uses four samples after the first second and before
+stream completion. Each complete stream took about 4.37 seconds. The
+animation row pools samples spaced about 50 ms apart during four expands
+and four collapses and sums CPU deltas and wall time within those transitions. Memory counters
+exclude dedicated VRAM.
+
+| State | DX12 working set | DX12 private | DX12 CPU / wall | Tiny-skia working set | Tiny-skia private | Tiny-skia CPU / wall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Before creating a surface | 15.86 | 5.25 | 0 ms / 5.17 s | 15.87 | 5.13 | 0 ms / 5.10 s |
+| Idle, collapsed | 104.68 | 122.80 | 0 ms / 5.07 s | 23.55 | 7.64 | 0 ms / 5.11 s |
+| Expand and collapse animations | 119.83 | 134.49 | 1,453 ms / 3.85 s | 28.53 | 8.91 | 3,359 ms / 3.83 s |
+| Reply streaming, both windows open | 139.79 | 154.09 | 406 ms / 2.54 s | 42.19 | 21.39 | 1,109 ms / 2.54 s |
+
+`BLOOP_FRAME_LOG` recorded median intervals of 2.76–2.81 ms per transition
+on DX12. Tiny-skia recorded 5.12–5.31 ms on expands and 0.19–0.23 ms on
+collapses. The latter reflects 1,184–1,340 Iced frame callbacks in each
+roughly half-second collapse.
+
+A separate visual run for each backend used a solid backdrop at 100% scale.
+Tiny-skia drew the 5 px sliver, the rounded compact pill with two eyes and
+peek text, the expanded panel, and the streaming and completed Markdown
+reply without visible trails in the captured frames. The region reported
+by `GetWindowRgn` contained the center in each state. `WindowFromPoint`
+selected the notch at the center and the visible backdrop at a cut-out
+corner within the same bounding rectangle. The first visual pass had
+foreground overlap, so the comparison placed the scratch notch immediately
+above its backdrop before each capture. Physical cursor redraw and mixed-DPI
+behavior remain unverified.
+
+Keep DX12 as the default and leave tiny-skia available for memory-constrained
+Windows setups. Tiny-skia saved 81.13 MiB of working set and 115.16 MiB of
+private memory at rest with the same measured idle CPU. It used 2.3 times
+the process CPU during animation and 2.7 times while streaming, with a burst
+of frame callbacks during each collapse.
+
+`cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` passed
+on Windows. `cargo test` passed 385 tests with five ignored.
+Cargo resolved the same Linux x64 feature tree as before the opt-in
+(`258f402`). Linux runtime rendering was outside this Windows measurement.
+
 ## Auto-hide notch (2026-11-06)
 
 Checked on Windows 11 (100 % scale) with a debug build and a scratch `BLOOP_DATA_DIR`,
