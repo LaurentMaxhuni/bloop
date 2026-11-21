@@ -1110,6 +1110,9 @@ impl Island {
             }
             Message::Finished(id, result) if id == self.request_id && self.request.is_some() => {
                 self.request = None;
+                if let Some(turn) = self.turns.last_mut() {
+                    turn.assistant.shrink_to_fit();
+                }
                 let mut presence = self.present(Event::Busy(false));
                 match result {
                     Ok(()) => {
@@ -2055,6 +2058,9 @@ impl Island {
     fn cancel(&mut self) -> Task<Message> {
         if let Some(handle) = self.request.take() {
             handle.abort();
+            if let Some(turn) = self.turns.last_mut() {
+                turn.assistant.shrink_to_fit();
+            }
         }
         self.request_id += 1;
         self.finish_reveal();
@@ -3487,6 +3493,25 @@ mod tests {
         assert_eq!(app.turns[0].assistant, "partial");
         assert!(!app.turns[0].complete);
         assert!(app.request.is_none());
+    }
+
+    #[test]
+    fn stopping_a_stream_keeps_its_text_without_spare_buffer_capacity() {
+        for completion in [Some(Ok(())), Some(Err("connection lost".into())), None] {
+            let mut app = ready();
+            app.input = "hello".into();
+            let _stream = app.update(Message::Send);
+            let id = app.request_id;
+            let text = "A partially revealed response";
+            let _ = app.update(Message::Chunk(id, StreamEvent::Delta(text.into())));
+            app.turns[0].assistant.reserve(64 * 1024);
+            let reserved = app.turns[0].assistant.capacity();
+            let end = completion.map_or(Message::Cancel, |result| Message::Finished(id, result));
+            let _ = app.update(end);
+
+            assert_eq!(app.turns[0].assistant, text);
+            assert!(app.turns[0].assistant.capacity() < reserved);
+        }
     }
 
     /// Sends `prompt` and finishes its reply with `reply`.
