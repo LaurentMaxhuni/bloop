@@ -157,6 +157,15 @@ On Windows, closing the app window while the notch is settled and idle schedules
 after Iced drops the window. This runs once on the close event and keeps live allocations
 and the graphics device available to the notch.
 
+Windows renderer choice (2026-11-21). Windows compiles both Iced renderers
+and keeps wgpu with DirectX 12 first. `BLOOP_RENDERER=software` selects
+tiny-skia at startup when `ICED_BACKEND` is unset. The native notch region
+still clips the transparent canvas and handles pointer hit testing for
+either renderer. Tiny-skia reduces resident and private memory but spends
+more process CPU during animations and streaming, so it stays an opt-in.
+Linux retains its existing X11 and wgpu Vulkan/OpenGL ES paths. See
+[Windows software renderer measurements](verification.md#windows-software-renderer-2026-11-21).
+
 Release builds and signing (2026-11-11): releases are built by `.github/workflows/release.yml` on
 GitHub's Windows runners from a pushed `v<version>` tag (`installer/release.ps1` creates it), not
 on a personal PC, because SignPath Foundation (free certificates for open-source projects) signs

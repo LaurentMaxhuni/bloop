@@ -4,12 +4,17 @@ mod icons;
 mod mascot;
 mod platform;
 mod presence;
+#[cfg(windows)]
+mod renderer;
 mod style;
 mod ui;
 
 use iced::Color;
 
 fn main() {
+    // Read the software-renderer opt-in once, before any thread or window starts.
+    #[cfg(windows)]
+    renderer::apply_choice();
     // Before any thread starts: pick X11 (XWayland on Wayland desktops).
     #[cfg(target_os = "linux")]
     {
