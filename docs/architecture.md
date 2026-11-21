@@ -137,8 +137,9 @@ there is no app window or pending reply reveal.
 
 On Windows, closing the app window while the notch is settled and idle schedules
 `HeapOptimizeResources` on the existing executor. Windows can decommit freed heap pages
-after Iced drops the window. This runs once on the close event and keeps live allocations
-and the graphics device available to the notch.
+after Iced drops the window. Completed, failed and cancelled replies discard spare
+string capacity before saving or showing the final text. The parsed replies remain
+available for the next open.
 
 Release builds and signing (2026-11-11): releases are built by `.github/workflows/release.yml` on
 GitHub's Windows runners from a pushed `v<version>` tag (`installer/release.ps1` creates it), not

@@ -154,6 +154,83 @@ because the sandbox's logon token could not access the credential test vault.
 - A close-event test covers scheduling heap reclamation only when the notch is
   idle. The scratch release trace measures the actual Windows heap calls.
 
+## Retained transcript memory (2026-11-20 to 2026-11-21)
+
+Control `dbdf1fa` and the final build used the nine states above in fresh,
+isolated Windows release runs. The loopback fixture sent 192 Markdown chunks
+and returned 55,378 bytes per reply. Both runs used reduced motion and drove
+presence directly through Iced messages. They suppressed ambient focus, Escape,
+cursor and fullscreen events to keep those states reproducible. Measurements use
+the same 850 ms process sampler and one-to-seven-second window per checkpoint.
+
+| State | Control working set (MiB) | Control private (MiB) | Final working set (MiB) | Final private (MiB) |
+| --- | ---: | ---: | ---: | ---: |
+| Before the first surface | 16.07 | 5.20 | 16.04 | 5.24 |
+| Idle, collapsed | 105.05 | 124.79 | 104.80 | 123.97 |
+| Notch expanded | 116.13 | 132.55 | 115.88 | 131.78 |
+| App window open, notch collapsed | 116.51 | 134.22 | 117.32 | 134.28 |
+| Long reply complete, both windows open | 146.93 | 172.47 | 148.91 | 173.56 |
+| App window closed, notch collapsed | 131.14 | 154.24 | 133.50 | 156.20 |
+| After reopening, replying and closing again | 139.38 | 162.62 | 143.24 | 165.84 |
+| After another expand/collapse | 140.37 | 166.15 | 144.88 | 169.10 |
+| After the next expand/collapse | 140.41 | 163.96 | 145.12 | 168.67 |
+
+Each cell is the median of seven samples. Both measured runs exited with code 0.
+At the final collapse, the two turns retained 146,988 bytes of string capacity in
+the control and 110,800 bytes in the final build, equal to their combined byte
+length. Live Rust allocations fell from 3.469 to 3.439 MiB at that checkpoint.
+Process working set and private bytes both increased by 4.71 MiB in this pair.
+The observed saving is limited to the reply buffers. The aggregate retained
+process growth remains unresolved.
+
+Both scratch builds counted live requested bytes through Rust's system allocator.
+The meter excludes native allocations such as SQLite and the graphics driver.
+SQLite supplied its own live and high-water counters. A temporary Iced wgpu
+probe polled the device and reported allocator totals at the labeled checkpoints.
+In the control, the probe continued past the nine states to test process-heap trimming,
+shared atlas reset, and replacing the notch renderer while keeping the device and surface.
+
+Two additional diagnostic runs compared drawing the full transcript with retaining
+the same transcript while skipping its view. Drawing the first long reply took
+20.98 MiB of live Rust allocations at the settled checkpoint. Closing the view
+brought that to 2.43 MiB. The run that skipped the view was already at 1.98 MiB
+before close. After the second reply and two further cycles, dropping the cached
+replies freed 1.87 MiB live in the drawing run and 0.95 MiB without the view.
+The difference includes Iced's styled spans. Cached replies stay available to
+reopen the transcript without reparsing it.
+
+Shrinking the two finished turns released 36,188 bytes of spare string capacity.
+The empty instructions editor accounted for 24 live Rust bytes in its reset probe.
+Replacing the font system after closing the compositor released 56–98 KiB of live
+Rust allocations. That probe covers the font system's state after the renderer and
+paragraph trees are gone. SQLite reported zero live bytes at every settled checkpoint,
+with a 486,536-byte peak during the two-reply workload.
+
+The Windows sandbox affected both exploratory runs. A hot thread whose start
+address mapped to `NvMessageBus.dll` took sustained CPU from the first DX12 surface.
+Working set grew even with the transcript view suppressed. The paired process
+measurements use the normal Windows logon session, which removed that busy loop.
+
+The shared glyph textures totaled 384 KiB in the wgpu report at every checkpoint.
+Resetting the atlas gave the same totals. DX12 allocator reservations rose from
+20 MiB on the cold sliver to 32 MiB at the first reply and stayed there after
+both app closes. Replacing the remaining notch renderer after the final cycle
+released 5.75 MiB of live GPU suballocations and 4 MiB of reserved blocks while
+the device stayed alive. Manual heap reclamation dropped the control's process
+private bytes from 163.96 to 162.57 MiB. Process-private memory stayed near
+163 MiB through the atlas and renderer resets. Iced releases the app window's
+renderer at close. The notch keeps its own renderer, and Iced 0.14's window API
+has no operation to recycle it independently of the window.
+
+The exploratory build with an extra heap-reclaim hook after collapse measured
+164.19 MiB private at the final cycle, against the control's 163.96 MiB. The
+final change is limited to releasing spare reply-buffer capacity.
+
+`cargo fmt --check`, `cargo clippy --offline --all-targets -- -D warnings`, and
+`cargo test --offline` passed with 375 tests and five existing ignores. The new
+regression failed on the control and checks that success, failure and cancellation
+preserve reply text and release spare capacity.
+
 ## Auto-hide notch (2026-11-06)
 
 Checked on Windows 11 (100 % scale) with a debug build and a scratch `BLOOP_DATA_DIR`,
